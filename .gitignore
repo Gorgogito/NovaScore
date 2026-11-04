@@ -1,0 +1,7 @@
+# build output (src-tauri/target alone reaches ~11 GB)
+target/
+node_modules/
+dist/
+app/src-tauri/gen/
+# local tooling output
+*.log

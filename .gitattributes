@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.sf3 binary
+*.otf binary
+*.woff2 binary
+*.png binary
+*.ico binary
+*.icns binary

@@ -1,0 +1,98 @@
+# NovaScore — documento de traspaso
+
+Fecha: 2026-11-03. Objetivo: continuar el proyecto en otro equipo (más RAM y GPU) con la parte de **IA local**.
+
+## 1. Qué es
+Editor de partituras libre y gratuito (GPL-3.0-or-later) que busca igualar a MuseScore Studio. Procesamiento 100 % local, sin servicios de pago.
+Decisiones acordadas con el usuario: licencia GPL-3 (se puede reutilizar código de MuseScore, no habrá versión cerrada) · stack Tauri 2 + Rust + TypeScript/Solid · prioridad: flujo de edición y composición antes que compatibilidad (la compatibilidad `.mscz` ya está hecha).
+
+## 2. Estado funcional (todo implementado y probado)
+| Área | Contenido |
+|---|---|
+| Edición | Entrada por teclado y ratón, acordes, ligaduras de prolongación, deshacer/rehacer (instantáneas), selección de rango (Mayús+flechas), transposición, zoom |
+| Notación | Claves sol/fa/percusión, armaduras, **cambios de compás**, 4 voces por pentagrama (cabezas desplazadas), tuplets (3:2, 5:4, 6:4, 2:3, 4:3 y los importados), vigas, alteraciones por compás, percusión GM con cabezas en cruz |
+| Expresión | Ligaduras de expresión, reguladores, dinámicas (ppp–fff, fp, sf, sfz, rfz), articulaciones (staccato, staccatissimo, tenuto, acento, marcato, portato), octavas 8va/8vb/15ma/15mb, pedal, trinos, **repeticiones y casillas** |
+| Sonido | SpessaSynth (Apache-2.0) + SoundFont MuseScore_General (MIT); velocidad por dinámicas/hairpins/articulaciones, pedal (CC64), trinos, repeticiones desplegadas; mezclador (volumen, mute, solo), 25 instrumentos GM |
+| Formatos | `.nova` (JSON propio) · MusicXML in/out · MIDI in/out (import cuantizado a semicorcheas) · PDF vectorial multipágina (svg2pdf) · **MuseScore `.mscz/.mscx` lectura v2–v4 y escritura v4.60** |
+
+Pendiente conocido (backlog sin IA): saltos D.C./D.S./segno/coda (se pierden al guardar), mordentes/grupetos, MIDI import sin tresillos ni varias voces, 7:4 y otros tuplets, vista/edición de letra y texto, cifrado de acordes, partes/extractos, transposición de instrumentos (se muestran en altura real), ligadura entre >2 sistemas, tablatura, plugins.
+
+## 3. Arquitectura
+```
+app/
+  crates/nova-core/   (Rust, sin UI)   lib.rs   modelo, edición, undo, repeticiones (playback_order), spanners
+                                        io.rs    sounds()/pedals(), MIDI, MusicXML (import+export)
+                                        mscx.rs  lector MuseScore 2/3/4     mscx_write.rs  escritor MuseScore 4.60
+  src-tauri/          (Rust)           lib.rs   comandos Tauri, AppState(Mutex<Document>)   pdf.rs  SVG→PDF
+  src/                (Solid/TS)       App.tsx  estado+teclado+barras   ScoreView.tsx  dibujo SVG (Bravura)
+                                        layout.ts  maquetación           playback.ts  SpessaSynth   pdfExport.tsx  paginación A4
+```
+Flujo: la UI llama a un comando Tauri por operación → el núcleo edita `Document` → devuelve el `Score` completo (JSON) → la UI lo redibuja. El núcleo es la única fuente de verdad.
+
+### Modelo (resumen; `crates/nova-core/src/lib.rs`)
+`Score { title, composer, time, time_changes[], fifths, tempo, parts[], ms_style }` · `Part { name, clef, program, volume, muted, solo, percussion, ms, spanners[], measures[] }` ·
+`Measure { events (voz 1), voices (voces 2–4), extras, start_repeat, end_repeat }` · `Event { start, ticks, content: Note{pitches[],tie}|Rest, tuplet, extras, dynamic, articulations }` ·
+`Spanner { kind: Slur|Crescendo|Decrescendo|Ottava*|Pedal|Trill|Volta, voice, start/end: SpPos{measure,tick}, endings }`.
+Todo campo nuevo es opcional con `serde(default)`: los `.nova` antiguos deben seguir abriéndose.
+
+### Decisiones técnicas que conviene recordar
+- 480 ticks/negra. Duración sonora vs escrita en tuplets (`notated_ticks`). Alturas **sonoras**; las octavas se dibujan desplazadas y MuseScore guarda la altura escrita.
+- Spanners anclados a tiempo, no a notas (sobreviven a ediciones; el escritor los ajusta a notas reales).
+- El contenido de MuseScore 4 que no entendemos se copia literal (extras) → ida y vuelta sin pérdidas de dinámicas/letra/etc. (los archivos 2.x/3.x no admiten copia literal).
+- Canales MIDI: percusión = canal 10 (índice 9); el resto en orden saltándolo (`midi_channels`).
+- Atajos y teclas: ver `app/README.md`.
+
+## 4. Verificación hecha (resultados)
+- `cargo test` en `crates/nova-core`: **62 tests OK**. `npx tsc --noEmit`: limpio.
+- Contra MuseScore 4.6 real (CLI `MuseScore4.exe -o …`): las 42 plantillas incluidas en MuseScore, *Canon in D* y *Nocturne Op. 9 n.º 2* (archivos del usuario, **no incluidos en el repo**), y las 11 muestras de `samples/` salen con notas, spanners y marcas **idénticos** tras pasar por nuestro escritor y por MuseScore. *Big Score* (26 instrumentos, 22 k notas) coincide salvo la transposición de instrumentos (artefacto de la comparación).
+- Diferencia conocida: dos pedales solapados al final del Chopin los interpreta distinto MuseScore.
+- Interfaz: se revisó el **dibujo** exportando PDF y rasterizándolo. **Los botones y el teclado de la UI no se han probado a mano** en ninguna sesión (solo compilación y exportación automática) — probar a fondo con `npm run tauri dev`.
+
+## 5. Puesta en marcha en el equipo nuevo
+Requisitos: Rust estable (≥1.98 usado), Node 20+, **Visual Studio Build Tools (C++)** y **WebView2** en Windows (en Linux/macOS Tauri 2 también corre, pero no se ha probado).
+```
+# 1. descomprimir NovaScore-transfer.zip (no incluye target/ node_modules/ dist/)
+cd NovaScore/app
+npm install
+cd crates/nova-core && cargo test                 # primera compilación: varios minutos
+cd ../.. && npm run tauri dev                      # la primera vez compila src-tauri (~5-10 min)
+```
+- Archivos grandes dentro del repo: `app/public/soundfonts/MuseScore_General.sf3` (40 MB, MIT; se puede volver a bajar de ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/) y `app/public/fonts/Bravura.*` (SIL OFL).
+- Opcional (verificación de formatos): instalar MuseScore 4 y, si no está en la ruta por defecto, definir `MUSESCORE` con la ruta del ejecutable.
+- `scripts/pdf-to-png.ps1` (Windows 10/11): `-pdf f.pdf -out f.png -width 1800 -pg 0` rasteriza una página para ver el dibujo sin abrir la app.
+- Consejo: poner `CARGO_TARGET_DIR` fuera del proyecto (el directorio `target` de Tauri llega a ~11 GB).
+- **Memoria de Claude**: abre Claude Code en la carpeta del proyecto; `CLAUDE.md` se carga solo. Para restaurar además la memoria personal, copia `docs/claude-memory/*.md` a `~/.claude/projects/<carpeta-del-proyecto-con-guiones>/memory/` (ej. `C--Users-xxx-NovaScore`); si no existe la carpeta, créala. Nada de esto es imprescindible: `CLAUDE.md` + este documento bastan.
+
+## 6. Convenciones de trabajo
+Ver `CLAUDE.md` (idioma español, orden por módulos, informar con honestidad lo no probado, preguntar antes de cambios de rumbo, GPL-3 y componentes libres).
+
+## 7. Siguiente bloque: IA local (plan propuesto, sin empezar)
+Objetivo del plan original: transcribir audio a partitura, reconocer partituras desde PDF/imagen (OMR), detectar notas y acordes, asistir a la composición — todo local, gratuito y de código abierto.
+**Antes de integrar cualquier modelo: comprobar la licencia de código *y de pesos* (algunos pesos son CC-BY-NC).** Lo siguiente son candidatos, no verificados en esta sesión:
+
+| Tarea | Candidato | Notas |
+|---|---|---|
+| Audio → notas (polifónico, cualquier instrumento) | **Basic Pitch** (Spotify, Apache-2.0) | Ligero, corre bien en CPU; hay modelo ONNX/TF; salida notas+MIDI. Mejor primer paso |
+| Audio → notas (piano, alta precisión) | ByteDance *piano transcription* | Mejor con GPU; revisar licencia de pesos |
+| Audio multi-instrumento | MT3 (Google) | Pesado (JAX/T5X), pide GPU |
+| Separar pistas antes de transcribir | Demucs (MIT) | Mejora mucho la mezcla; GPU recomendada |
+| Tempo/compás/pulsos | librosa (ISC), *beat_this* | Para cuantizar sobre el pulso en vez de una rejilla fija |
+| OMR (PDF/imagen → MusicXML) | **Audiveris** (AGPL-3, Java) como proceso externo; alternativas *oemer*, *homr* (verificar licencias) | Sale MusicXML → ya tenemos `import_musicxml` |
+| Acordes | plantillas sobre cromagrama, o modelos abiertos | Los pesos de madmom son no comerciales: evitar |
+| Asistente de composición | Magenta (Apache-2.0) y modelos simbólicos pequeños | Evitar pesos CC-BY-NC (p. ej. MusicGen) |
+
+### Arquitectura sugerida
+- **Proceso auxiliar ("sidecar") + gestor de modelos**: la app (Tauri) lanza un ejecutable local que recibe un archivo y devuelve **MIDI o MusicXML**; la app lo importa con los importadores que ya existen (`import_midi`, `import_musicxml`) y muestra un borrador editable con avisos de calidad. Así la IA queda desacoplada y es opcional.
+- Modelos descargables bajo demanda a la carpeta de datos de la app (no empaquetados) para mantener el instalador ligero; mostrar tamaño y licencia antes de descargar.
+- Inferencia con **ONNX Runtime** (crate `ort`, MIT/Apache-2.0) que admite CUDA/DirectML → mismo código en CPU y GPU. Python solo para prototipar/convertir modelos.
+- Mejora necesaria en el núcleo para audio→partitura: **cuantización musical** (hoy el MIDI se cuantiza a semicorcheas fijas): detectar tempo/compás, tresillos, voces y separar manos. El punto de entrada natural es `io.rs::import_midi` + `Score::put_abs`.
+- Calidad: probar con grabaciones monofónicas simples → piano → polifonía; medir con partituras conocidas (comparar notas con MusicXML de referencia).
+
+### Decisión abierta (se preguntó al usuario y aún no respondió)
+¿Los modelos van **descargados bajo demanda** (recomendado: ligero, actualizable) o **empaquetados** con la app (todo en uno, instalador pesado)? Preguntar de nuevo antes de empezar.
+
+### Requisitos de hardware orientativos
+Basic Pitch: CPU, ~1–2 GB RAM. Demucs/MT3/piano de alta precisión: GPU NVIDIA con ≥6–8 GB VRAM recomendable. Audiveris: Java 17+, ~2 GB RAM.
+
+## 8. Contenido del traspaso
+`NovaScore-transfer.zip` (generado con `scripts/pack-project.ps1`; si Windows bloquea scripts, ejecutar su línea `tar -a -c -f …` a mano): código, `samples/`, fuentes y SoundFont, `CLAUDE.md`, `docs/` (este archivo + `claude-memory/`), `scripts/`. No incluye `target/`, `node_modules/`, `dist/`, `src-tauri/gen/` (se regeneran) ni las partituras personales del usuario.

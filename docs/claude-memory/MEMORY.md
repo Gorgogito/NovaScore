@@ -1,0 +1,2 @@
+- [NovaScore decisions](novascore-decisions.md) — estado, decisiones y siguiente paso (IA local)
+- [NovaScore workflow](novascore-user-workflow.md) — cómo prefiere trabajar el usuario
