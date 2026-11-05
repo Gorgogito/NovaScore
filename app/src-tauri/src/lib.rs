@@ -1,3 +1,4 @@
+mod audio;
 mod pdf;
 
 use nova_core::io::{self, PedalEvent, Sound};
@@ -243,6 +244,18 @@ fn import_midi(state: State<AppState>, path: String) -> Result<Imported, String>
     Ok(Imported { score: doc.score.clone(), warnings: r.warnings })
 }
 
+/// Transcribe an audio file (Basic Pitch) into a new score. The heavy work runs on a worker
+/// thread and outside the document lock so the window stays responsive.
+#[tauri::command]
+async fn import_audio(state: State<'_, AppState>, path: String, options: audio::AudioImportOptions) -> Result<Imported, String> {
+    let r = tauri::async_runtime::spawn_blocking(move || audio::audio_to_score(&path, &options))
+        .await
+        .map_err(|e| format!("La transcripción se interrumpió: {e}"))??;
+    let mut doc = lock(&state);
+    doc.replace(r.score);
+    Ok(Imported { score: doc.score.clone(), warnings: r.warnings })
+}
+
 #[tauri::command]
 fn import_musicxml(state: State<AppState>, path: String) -> Result<Imported, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -369,7 +382,12 @@ fn load_score(state: State<AppState>, path: String) -> Res {
 fn initial_score() -> Score {
     if let Some(path) = std::env::args().nth(1) {
         let lower = path.to_lowercase();
-        if lower.ends_with(".mscz") || lower.ends_with(".mscx") {
+        if audio::is_audio_path(&path) {
+            match audio::audio_to_score(&path, &Default::default()) {
+                Ok(r) => return r.score,
+                Err(e) => eprintln!("No se pudo transcribir {path}: {e}"),
+            }
+        } else if lower.ends_with(".mscz") || lower.ends_with(".mscx") {
             if let Ok(bytes) = std::fs::read(&path) {
                 if let Ok(r) = nova_core::mscx::import_mscz(&bytes) {
                     return r.score;
@@ -395,7 +413,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

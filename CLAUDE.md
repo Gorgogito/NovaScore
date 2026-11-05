@@ -11,6 +11,7 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **Siguiente gran bloq
 ## Mapa del código (`app/`)
 - `crates/nova-core/` — núcleo en Rust, sin UI. `lib.rs` modelo + edición + undo; `io.rs` sonidos/MIDI/MusicXML; `mscx.rs` lector MuseScore; `mscx_write.rs` escritor MuseScore.
   `examples/ms_roundtrip.rs` y `examples/mscx_info.rs` son herramientas de verificación.
+- `crates/nova-audio/` — audio→notas con Basic Pitch (Apache-2.0, ONNX de 225 KB incluido en el binario, `ort`). `nova-core/src/quantize.rs` — notas en segundos → `Score` (tempo, tonalidad, pentagramas, voces; sin tresillos aún). Comando Tauri `import_audio` (`src-tauri/src/audio.rs`, hilo aparte) + botón «Importar audio» con diálogo (tempo, compás, sensibilidad). `novascore.exe audio.wav` también lo abre por línea de órdenes.
 - `src-tauri/` — comandos Tauri (una función por operación; estado en `Mutex<Document>`), `pdf.rs` (svg2pdf).
 - `src/` — interfaz Solid: `App.tsx` (estado, teclado, barras), `ScoreView.tsx` (dibujo SVG con Bravura), `layout.ts` (maquetación), `playback.ts` (SpessaSynth), `pdfExport.tsx`.
 - `samples/` — MusicXML de ejemplo, uno por funcionalidad. `scripts/` — utilidades (empaquetar, PDF→PNG).
@@ -18,7 +19,8 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **Siguiente gran bloq
 ## Comandos
 ```
 cd app && npm install && npm run tauri dev          # ejecutar
-cd app/crates/nova-core && cargo test               # 62 tests del núcleo
+cd app/crates/nova-core && cargo test               # 70 tests del núcleo
+cd app/crates/nova-audio && cargo test              # 5 tests; audio→notas (Basic Pitch/ONNX). Ejemplos: audio2notes, audio2score, roundtrip (mide F1 sobre samples/)
 cd app && npx tsc --noEmit                          # tipos del frontend
 cd app && npx tauri build --debug --no-bundle       # exe de depuración (src-tauri/target/debug/novascore.exe)
 NOVASCORE_EXPORT_PDF=salida.pdf novascore.exe archivo.(musicxml|mscz|nova)   # exporta a PDF sin interacción (sirve para comprobar el dibujo)

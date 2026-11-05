@@ -37,6 +37,8 @@ export interface Playback {
   order: number[];
 }
 type Imported = { score: Score; warnings: string[] };
+/** Opciones de la transcripción de audio; sin un campo se usa el valor automático. */
+export type AudioOptions = { minAmplitude?: number; tempo?: number; num?: number; den?: number };
 
 export const api = {
   getScore: () => invoke<Score>("get_score"),
@@ -92,4 +94,5 @@ export const api = {
   importMusicxml: (path: string) => invoke<Imported>("import_musicxml", { path }),
   importMscz: (path: string) => invoke<Imported>("import_mscz", { path }),
   importMidi: (path: string) => invoke<Imported>("import_midi", { path }),
+  importAudio: (path: string, options: AudioOptions) => invoke<Imported>("import_audio", { path, options }),
 };

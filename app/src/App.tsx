@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { api } from "./api";
+import { api, AudioOptions } from "./api";
 import { drumFromPos, DRUM_KEYS } from "./drum";
 import { INSTRUMENTS } from "./instruments";
 import { keyAlter, layoutScore } from "./layout";
@@ -35,6 +35,7 @@ export default function App() {
   const [zoom, setZoom] = createSignal(100);
   const [status, setStatus] = createSignal("Pulsa N para entrar en modo de entrada de notas.");
   const [showNew, setShowNew] = createSignal(false);
+  const [audioFile, setAudioFile] = createSignal<string | null>(null);
   const [dirty, setDirty] = createSignal(false);
   const player = new Player();
 
@@ -411,6 +412,23 @@ export default function App() {
       setStatus(String(e));
     }
   };
+  const pickAudio = async () => {
+    const path = await open({ filters: [{ name: "Audio", extensions: ["wav", "mp3", "flac", "ogg", "oga", "m4a", "aac"] }], multiple: false });
+    if (typeof path === "string") setAudioFile(path);
+  };
+  const doImportAudio = async (path: string, options: AudioOptions) => {
+    setAudioFile(null);
+    try {
+      setStatus("Transcribiendo audio… (puede tardar un poco)");
+      const r = await api.importAudio(path, options);
+      setCursor({ part: 0, voice: 0, m: 0, start: 0 });
+      apply(r.score, false);
+      setDirty(true);
+      setStatus(r.warnings.join(" "));
+    } catch (e) {
+      setStatus(`No se pudo transcribir el audio: ${e}`);
+    }
+  };
   const togglePlay = async () => {
     if (isPlaying()) {
       player.stop();
@@ -433,7 +451,7 @@ export default function App() {
 
   // ---- keyboard ----------------------------------------------------------
   const onKey = async (e: KeyboardEvent) => {
-    if (!score() || showNew()) return;
+    if (!score() || showNew() || audioFile()) return;
     const tag = (e.target as HTMLElement).tagName;
     if (tag === "INPUT" || tag === "SELECT") return;
     const k = e.key.toLowerCase();
@@ -512,6 +530,7 @@ export default function App() {
         <button onClick={() => doImport("xml")} title="Importar MusicXML">Importar XML</button>
         <button onClick={() => doImport("mscz")} title="Importar MuseScore (.mscz / .mscx)">Importar MuseScore</button>
         <button onClick={() => doImport("midi")} title="Importar MIDI">Importar MIDI</button>
+        <button onClick={pickAudio} title="Transcribir un archivo de audio (wav, mp3, flac, ogg, m4a) a partitura">Importar audio</button>
         <button onClick={doExportMuseScore} title="Guardar como MuseScore 4 (.mscz)">Exportar MuseScore</button>
         <button onClick={() => doExport("xml")} title="Exportar MusicXML">Exportar XML</button>
         <button onClick={() => doExport("midi")} title="Exportar MIDI">Exportar MIDI</button>
@@ -683,6 +702,58 @@ export default function App() {
           }}
         />
       </Show>
+
+      <Show when={audioFile()}>
+        {(path) => <AudioDialog path={path()} onCancel={() => setAudioFile(null)} onImport={doImportAudio} />}
+      </Show>
+    </div>
+  );
+}
+
+function AudioDialog(props: { path: string; onCancel: () => void; onImport: (path: string, o: AudioOptions) => void }) {
+  const [auto, setAuto] = createSignal(true);
+  const [tempo, setTempo] = createSignal(100);
+  const [time, setTime] = createSignal("4/4");
+  const [amp, setAmp] = createSignal(0.5);
+  const name = () => props.path.split(/[\\/]/).pop() ?? props.path;
+  return (
+    <div class="modal" onClick={props.onCancel}>
+      <form
+        class="dialog"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          const [num, den] = time().split("/").map(Number);
+          props.onImport(props.path, { minAmplitude: amp(), tempo: auto() ? undefined : tempo(), num, den });
+        }}
+      >
+        <h2>Importar audio</h2>
+        <p title={props.path}>{name()}</p>
+        <label>Tempo
+          <select value={auto() ? "auto" : "fixed"} onChange={(e) => setAuto(e.currentTarget.value === "auto")}>
+            <option value="auto">Automático</option>
+            <option value="fixed">Indicar…</option>
+          </select>
+        </label>
+        <Show when={!auto()}>
+          <label>Negras por minuto
+            <input type="number" min="20" max="300" value={tempo()} onInput={(e) => setTempo(Number(e.currentTarget.value) || 100)} />
+          </label>
+        </Show>
+        <label>Compás
+          <select value={time()} onChange={(e) => setTime(e.currentTarget.value)}>
+            <For each={["2/4", "3/4", "4/4", "5/4", "6/8", "9/8", "12/8", "2/2", "3/8"]}>{(t) => <option>{t}</option>}</For>
+          </select>
+        </label>
+        <label>Sensibilidad: se descartan notas con amplitud menor que {amp().toFixed(2)}
+          <input type="range" min="0.2" max="0.8" step="0.05" value={amp()} onInput={(e) => setAmp(Number(e.currentTarget.value))} />
+        </label>
+        <p>Menos amplitud = más notas, pero con más falsas (armónicos). Es un borrador: revísalo.</p>
+        <div class="actions">
+          <button type="button" onClick={props.onCancel}>Cancelar</button>
+          <button type="submit" class="primary">Transcribir</button>
+        </div>
+      </form>
     </div>
   );
 }

@@ -43,7 +43,7 @@ Todo campo nuevo es opcional con `serde(default)`: los `.nova` antiguos deben se
 - Atajos y teclas: ver `app/README.md`.
 
 ## 4. Verificación hecha (resultados)
-- `cargo test` en `crates/nova-core`: **62 tests OK**. `npx tsc --noEmit`: limpio.
+- `cargo test` en `crates/nova-core`: **70 tests OK** (62 + 8 de `quantize`). `npx tsc --noEmit`: limpio.
 - Contra MuseScore 4.6 real (CLI `MuseScore4.exe -o …`): las 42 plantillas incluidas en MuseScore, *Canon in D* y *Nocturne Op. 9 n.º 2* (archivos del usuario, **no incluidos en el repo**), y las 11 muestras de `samples/` salen con notas, spanners y marcas **idénticos** tras pasar por nuestro escritor y por MuseScore. *Big Score* (26 instrumentos, 22 k notas) coincide salvo la transposición de instrumentos (artefacto de la comparación).
 - Diferencia conocida: dos pedales solapados al final del Chopin los interpreta distinto MuseScore.
 - Interfaz: se revisó el **dibujo** exportando PDF y rasterizándolo. **Los botones y el teclado de la UI no se han probado a mano** en ninguna sesión (solo compilación y exportación automática) — probar a fondo con `npm run tauri dev`.
@@ -88,8 +88,13 @@ Objetivo del plan original: transcribir audio a partitura, reconocer partituras 
 - Mejora necesaria en el núcleo para audio→partitura: **cuantización musical** (hoy el MIDI se cuantiza a semicorcheas fijas): detectar tempo/compás, tresillos, voces y separar manos. El punto de entrada natural es `io.rs::import_midi` + `Score::put_abs`.
 - Calidad: probar con grabaciones monofónicas simples → piano → polifonía; medir con partituras conocidas (comparar notas con MusicXML de referencia).
 
-### Decisión abierta (se preguntó al usuario y aún no respondió)
-¿Los modelos van **descargados bajo demanda** (recomendado: ligero, actualizable) o **empaquetados** con la app (todo en uno, instalador pesado)? Preguntar de nuevo antes de empezar.
+### Progreso (2026-11-04)
+- Decisión: modelos grandes **bajo demanda**; Basic Pitch (225 KB) va incluido en el binario.
+- Hecho: `crates/nova-audio` (decodificación symphonia, remuestreo, inferencia `ort`, port Rust del extractor de notas; coincide con Basic Pitch Python en las 17 notas de prueba) y `nova-core/src/quantize.rs` (tempo por concentración de inicios con prior ~100 bpm, tonalidad Krumhansl, corte en do central, hasta 4 voces, duraciones simples). `Score::put_abs_voice` generaliza `put_abs`.
+- Medido (ida y vuelta partitura→audio sintético→partitura, `examples/roundtrip`): recall ≈ 1,0; con `min_amplitude` 0,5 precisión 0,80–1,00 (F1 0,89–1,00). Solo audio sintético; **sin probar con grabaciones reales**.
+- Límites: tempo constante, compás 4/4 supuesto, sin anacrusa, sin tresillos, sin dinámicas desde la amplitud, ambigüedad de octava de tempo (60 vs 120) resuelta por un prior (se puede forzar `tempo`).
+- Hecho (2026-11-05): comando `import_audio` + botón «Importar audio» con diálogo (tempo automático/fijo, compás, sensibilidad = amplitud mínima).
+- Falta: probar el botón y el diálogo a mano; probar con grabaciones reales; tresillos y detección de compás; aviso de descarga/licencia solo cuando se añadan modelos grandes.
 
 ### Requisitos de hardware orientativos
 Basic Pitch: CPU, ~1–2 GB RAM. Demucs/MT3/piano de alta precisión: GPU NVIDIA con ≥6–8 GB VRAM recomendable. Audiveris: Java 17+, ~2 GB RAM.
