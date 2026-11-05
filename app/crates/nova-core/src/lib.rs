@@ -4,6 +4,7 @@
 pub mod io;
 pub mod mscx;
 pub mod mscx_write;
+pub mod quantize;
 
 use serde::{Deserialize, Serialize};
 
@@ -894,7 +895,12 @@ impl Score {
     /// the smallest grid unit. The span is split into standard values joined by ties and
     /// the part grows as needed. Used by importers.
     pub fn put_abs(&mut self, part: usize, abs: u32, ticks: u32, pitches: &[Pitch]) -> Result<(), EditError> {
-        if part >= self.parts.len() || ticks < MIN_TICKS || pitches.is_empty() {
+        self.put_abs_voice(part, 0, abs, ticks, pitches)
+    }
+
+    /// Like [`Score::put_abs`] but in any voice (0-3); the voice is created where needed.
+    pub fn put_abs_voice(&mut self, part: usize, voice: usize, abs: u32, ticks: u32, pitches: &[Pitch]) -> Result<(), EditError> {
+        if part >= self.parts.len() || voice >= MAX_VOICES || ticks < MIN_TICKS || pitches.is_empty() {
             return Err(EditError::OutOfRange);
         }
         let (mut pos, mut remaining) = (abs, ticks);
@@ -914,7 +920,7 @@ impl Score {
             let mut p = start;
             for (i, piece) in pieces.into_iter().enumerate() {
                 let last = remaining == seg && i + 1 == n;
-                self.put(part, 0, m, p, piece, Content::note(pitches.to_vec(), !last))?;
+                self.put(part, voice, m, p, piece, Content::note(pitches.to_vec(), !last))?;
                 p += piece;
             }
             let used = p - start;
