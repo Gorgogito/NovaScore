@@ -15,6 +15,9 @@ const GRID: u32 = PPQ / 4;
 const MAX_MEASURES: u32 = 1000;
 /// Do central: por debajo va al pentagrama de clave de fa.
 const SPLIT_PITCH: u8 = 60;
+/// Margen mínimo (frente a la siguiente tonalidad) y correlación mínima para fiarse de la tonalidad.
+const KEY_MIN_MARGIN: f64 = 0.08;
+const KEY_MIN_CORR: f64 = 0.6;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawNote {
@@ -146,6 +149,13 @@ pub fn estimate_beat(onsets: &[(f64, f32)]) -> Beat {
 
 /// Tonalidad (número de alteraciones, + sostenidos / − bemoles) por perfiles de Krumhansl.
 pub fn estimate_fifths(notes: &[RawNote]) -> i8 {
+    estimate_key(notes).0
+}
+
+/// Tonalidad y su fiabilidad: `(alteraciones, correlación del mejor candidato, margen)` donde el
+/// margen es la diferencia con la mejor tonalidad de otro armado (la relativa mayor/menor cuenta
+/// como la misma). Un margen pequeño o una correlación baja indican una tonalidad dudosa.
+pub fn estimate_key(notes: &[RawNote]) -> (i8, f64, f64) {
     const MAJOR: [f64; 12] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
     const MINOR: [f64; 12] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
     // alteraciones de la tonalidad mayor cuya tónica es la clase de altura i
@@ -155,7 +165,7 @@ pub fn estimate_fifths(notes: &[RawNote]) -> i8 {
         hist[(n.pitch % 12) as usize] += (n.end - n.start).max(0.05) * n.amplitude as f64;
     }
     if hist.iter().sum::<f64>() <= 0.0 {
-        return 0;
+        return (0, 0.0, 0.0);
     }
     let corr = |profile: &[f64; 12], tonic: usize| -> f64 {
         let x: Vec<f64> = (0..12).map(|i| hist[(i + tonic) % 12]).collect();
@@ -168,20 +178,20 @@ pub fn estimate_fifths(notes: &[RawNote]) -> i8 {
         }
         if sxx <= 0.0 || syy <= 0.0 { 0.0 } else { sxy / (sxx * syy).sqrt() }
     };
-    let (mut best, mut best_c) = (0i8, f64::MIN);
+    // mejor correlación por armado (mayor o menor relativa)
+    let mut by_fifths: std::collections::BTreeMap<i8, f64> = std::collections::BTreeMap::new();
     for tonic in 0..12 {
-        let cm = corr(&MAJOR, tonic);
-        if cm > best_c {
-            best_c = cm;
-            best = MAJOR_FIFTHS[tonic];
-        }
-        let cn = corr(&MINOR, tonic);
-        if cn > best_c {
-            best_c = cn;
-            best = MAJOR_FIFTHS[(tonic + 3) % 12];
+        for (c, f) in [(corr(&MAJOR, tonic), MAJOR_FIFTHS[tonic]), (corr(&MINOR, tonic), MAJOR_FIFTHS[(tonic + 3) % 12])] {
+            let e = by_fifths.entry(f).or_insert(f64::MIN);
+            if c > *e {
+                *e = c;
+            }
         }
     }
-    best
+    let mut ranked: Vec<(i8, f64)> = by_fifths.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let margin = ranked.get(1).map_or(1.0, |s| ranked[0].1 - s.1);
+    (ranked[0].0, ranked[0].1, margin)
 }
 
 #[derive(Clone, Copy)]
@@ -200,43 +210,51 @@ struct Group {
 /// Ticks de una ranura de tresillo de corchea (un tercio de negra).
 const TRIPLET_SLOT: u32 = PPQ / 3;
 
+/// Evidencia mínima (en nats) para marcar un pulso como de tresillos.
+const TRIPLET_MIN_EVIDENCE: f64 = 2.5;
+
 /// Pulsos (índices de negra) cuyos inicios encajan mejor en tresillos de corchea que en
 /// semicorcheas. `ticks` son las posiciones sin cuantizar, en ticks desde el primer pulso.
+///
+/// Cada inicio aporta `(d16² − d3²) / 2σ²`: la razón de verosimilitud entre «cae en un tercio de
+/// pulso» y «cae en una semicorchea» con ruido gaussiano de desviación `σ`. `σ` se estima de los
+/// propios datos (mediana de la distancia de cada inicio a la rejilla más cercana), de modo que
+/// con un tempo inestable cada inicio pesa menos y hacen falta más pruebas. Se suma la evidencia
+/// del pulso con la mitad de la de sus vecinos y debe superar `TRIPLET_MIN_EVIDENCE`.
 pub fn detect_triplet_beats(ticks: &[f64]) -> HashSet<u32> {
-    let mut by_beat: BTreeMap<u32, (usize, usize, usize)> = BTreeMap::new(); // (de tresillo, rectas, total)
-    for &t in ticks {
-        if t < 0.0 {
-            continue;
-        }
+    let phase = |t: f64| {
         let beat = (t / PPQ as f64).floor() as u32;
-        let phi = t / PPQ as f64 - beat as f64;
-        let d16 = (phi * 4.0 - (phi * 4.0).round()).abs() / 4.0;
-        let d3 = (phi * 3.0 - (phi * 3.0).round()).abs() / 3.0;
-        let e = by_beat.entry(beat).or_insert((0, 0, 0));
-        e.2 += 1;
-        if d3 + 0.02 < d16 && d3 < 0.08 {
-            e.0 += 1;
-        } else if d16 + 0.02 < d3 && d16 < 0.08 {
-            e.1 += 1;
-        }
+        (beat, t / PPQ as f64 - beat as f64)
+    };
+    let dists = |phi: f64| ((phi * 4.0 - (phi * 4.0).round()).abs() / 4.0, (phi * 3.0 - (phi * 3.0).round()).abs() / 3.0);
+    let mut nearest: Vec<f64> = ticks
+        .iter()
+        .filter(|&&t| t >= 0.0)
+        .map(|&t| {
+            let (d16, d3) = dists(phase(t).1);
+            d16.min(d3)
+        })
+        .collect();
+    if nearest.len() < 2 {
+        return HashSet::new();
     }
-    // Semilla: dos inicios de tresillo, o uno solo sin ninguno recto en un pulso con otro inicio
-    // (p. ej. una negra y una corchea de tresillo).
-    let mut set: HashSet<u32> =
-        by_beat.iter().filter(|(_, &(tr, st, n))| (tr >= 2 && tr > st) || (tr == 1 && st == 0 && n >= 2)).map(|(&b, _)| b).collect();
-    // Propagación: un solo inicio de tresillo basta junto a un pulso ya detectado.
-    loop {
-        let extra: Vec<u32> = by_beat
-            .iter()
-            .filter(|(b, &(tr, st, _))| tr >= 1 && tr > st && !set.contains(*b) && (set.contains(&(**b + 1)) || (**b > 0 && set.contains(&(**b - 1)))))
-            .map(|(&b, _)| b)
-            .collect();
-        if extra.is_empty() {
-            break;
-        }
-        set.extend(extra);
+    nearest.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let sigma = (1.4826 * nearest[nearest.len() / 2]).clamp(0.015, 0.1);
+    let mut score: BTreeMap<u32, f64> = BTreeMap::new();
+    for &t in ticks.iter().filter(|&&t| t >= 0.0) {
+        let (beat, phi) = phase(t);
+        let (d16, d3) = dists(phi);
+        *score.entry(beat).or_insert(0.0) += (d16 * d16 - d3 * d3) / (2.0 * sigma * sigma);
     }
-    set
+    score
+        .iter()
+        .filter(|(&b, &s)| {
+            let near = |b2: u32| score.get(&b2).copied().unwrap_or(0.0);
+            let window = s + 0.5 * (near(b.wrapping_add(1)) + if b > 0 { near(b - 1) } else { 0.0 });
+            s > 0.0 && window > TRIPLET_MIN_EVIDENCE
+        })
+        .map(|(&b, _)| b)
+        .collect()
 }
 
 /// Ajusta una posición (ticks) a la rejilla de su pulso: tercios de negra en un pulso de
@@ -344,6 +362,8 @@ pub struct CleanStats {
     pub merged: usize,
     pub harmonics: usize,
     pub chromatic: usize,
+    /// La tonalidad estimada no es fiable: no se quitaron notas cromáticas.
+    pub key_doubtful: bool,
 }
 
 /// Une las notas de la misma altura separadas por un hueco mínimo (el modelo parte las notas
@@ -417,8 +437,11 @@ fn remove_chromatic(notes: &[RawNote], fifths: i8) -> (Vec<RawNote>, usize) {
 pub fn clean_notes(notes: &[RawNote]) -> (Vec<RawNote>, CleanStats) {
     let (a, merged) = merge_fragments(notes, 0.12);
     let (b, harmonics) = remove_harmonics(&a, 0.6);
-    let (c, chromatic) = remove_chromatic(&b, estimate_fifths(&b));
-    (c, CleanStats { merged, harmonics, chromatic })
+    let (fifths, corr, margin) = estimate_key(&b);
+    // Calibrado con tres grabaciones: margen 0,33 (Canon), 0,11 (Air) y 0,06 (Londonderry, dudosa).
+    let key_doubtful = margin < KEY_MIN_MARGIN || corr < KEY_MIN_CORR;
+    let (c, chromatic) = if key_doubtful { (b, 0) } else { remove_chromatic(&b, fifths) };
+    (c, CleanStats { merged, harmonics, chromatic, key_doubtful })
 }
 
 /// Peso de cada inicio para el seguimiento de pulso: los acordes, los graves y las notas largas
@@ -466,6 +489,9 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
 
     let notes = if o.clean {
         let (clean, st) = clean_notes(&notes);
+        if st.key_doubtful {
+            warnings.push("La tonalidad estimada es dudosa: no se eliminaron notas cromáticas (revisa las alteraciones).".into());
+        }
         if st.merged + st.harmonics + st.chromatic > 0 {
             warnings.push(format!(
                 "Limpieza: {} fragmentos unidos, {} armónicos y {} notas cromáticas débiles eliminados.",
@@ -751,6 +777,48 @@ mod tests {
         // semicorcheas rectas: ninguno
         let straight = [0.0, 120.0, 240.0, 360.0, 480.0, 600.0, 720.0, 840.0];
         assert!(detect_triplet_beats(&straight).is_empty());
+    }
+
+    #[test]
+    fn triplets_need_more_evidence_when_timing_is_unstable() {
+        // tresillos limpios repetidos durante 40 pulsos: se detectan todos
+        let clean: Vec<f64> = (0..40).flat_map(|b| (0..3).map(move |k| b as f64 * 480.0 + k as f64 * 160.0)).collect();
+        assert_eq!(detect_triplet_beats(&clean).len(), 40);
+        // inicios con fase aleatoria (tempo libre): casi ningún pulso debe salir como tresillo
+        let mut seed = 99u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f64 / (1u32 << 24) as f64
+        };
+        let random: Vec<f64> = (0..40).flat_map(|b| (0..3).map(move |k| (b, k))).map(|(b, _)| b as f64 * 480.0 + rnd() * 480.0).collect();
+        let found = detect_triplet_beats(&random).len();
+        assert!(found <= 8, "{found} pulsos de tresillos en inicios aleatorios");
+        // tresillos con mucho ruido (±45 ticks ≈ ±0,09 pulso): menos que con ruido pequeño
+        let noisy: Vec<f64> = (0..40).flat_map(|b| (0..3).map(move |k| (b, k))).map(|(b, k)| b as f64 * 480.0 + k as f64 * 160.0 + (rnd() - 0.5) * 90.0).collect();
+        assert!(detect_triplet_beats(&noisy).len() < 40);
+    }
+
+    #[test]
+    fn doubtful_key_keeps_weak_chromatic_notes() {
+        // escala de do mayor muy clara + una nota débil y corta de do♯: se quita
+        let mut notes: Vec<RawNote> = [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60, 67, 64, 60, 62, 64]
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| RawNote { start: i as f64 * 0.5, end: i as f64 * 0.5 + 0.45, pitch: p, amplitude: 0.8, onset: true })
+            .collect();
+        notes.push(RawNote { start: 4.0, end: 4.2, pitch: 61, amplitude: 0.3, onset: true });
+        let (clean, st) = clean_notes(&notes);
+        assert!(!st.key_doubtful, "{st:?}");
+        assert_eq!(st.chromatic, 1);
+        assert!(clean.iter().all(|n| n.pitch != 61));
+        // histograma casi plano (todas las alturas parecidas): tonalidad dudosa, no se quita nada
+        let flat: Vec<RawNote> = (0..48)
+            .map(|i| RawNote { start: i as f64 * 0.3, end: i as f64 * 0.3 + 0.25, pitch: 60 + (i % 12) as u8, amplitude: if i == 5 { 0.2 } else { 0.8 }, onset: true })
+            .collect();
+        let (clean, st) = clean_notes(&flat);
+        assert!(st.key_doubtful);
+        assert_eq!(st.chromatic, 0);
+        assert_eq!(clean.len(), flat.len());
     }
 
     #[test]

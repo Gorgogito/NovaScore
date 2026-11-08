@@ -1,6 +1,6 @@
 //! Diagnóstico de una grabación: distribución de amplitudes y puntuación de tempos.
 //! Uso: cargo run --release --example analyze -- audio.mp3
-use nova_core::quantize::estimate_beat;
+use nova_core::quantize::{estimate_beat, estimate_key, RawNote};
 
 fn main() {
     let path = std::env::args().nth(1).expect("falta el audio");
@@ -28,6 +28,9 @@ fn main() {
         let b = estimate_beat(&on);
         println!("min_amp {min:.1}: {} notas → {:.1} bpm, confianza {:.2}", on.len(), b.bpm, b.confidence);
     }
+    let raw: Vec<RawNote> = notes.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
+    let (fifths, best, margin) = estimate_key(&raw);
+    println!("tonalidad: {fifths} alteraciones, correlación {best:.3}, margen {margin:.3}");
     // candidatos a armónico: nota más aguda a 12/19/24/28/31 semitonos de otra que empieza a la vez
     let mut ratios = Vec::new();
     for n in &notes {
