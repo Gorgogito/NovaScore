@@ -59,3 +59,73 @@ pub fn audio_to_score(path: &str, o: &AudioImportOptions) -> Result<ImportReport
     r.warnings.insert(0, format!("Transcripción automática ({} notas detectadas): es un borrador, revísalo.", raw.len()));
     Ok(r)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WAV mono de 16 bits con una melodía de tonos puros: (inicio s, duración s, MIDI).
+    fn write_wav(path: &std::path::Path, notes: &[(f64, f64, i32)], secs: f64) {
+        let sr = 22050u32;
+        let n = (secs * sr as f64) as usize;
+        let mut x = vec![0.0f64; n];
+        for &(s, d, m) in notes {
+            let f = 440.0 * 2f64.powf((m as f64 - 69.0) / 12.0);
+            for i in 0..(d * sr as f64) as usize {
+                let k = (s * sr as f64) as usize + i;
+                if k < n {
+                    let t = i as f64 / sr as f64;
+                    let env = (t / 0.01).min(1.0) * (-t).exp() * ((d - t) / 0.04).clamp(0.0, 1.0);
+                    x[k] += 0.25 * env * (std::f64::consts::TAU * f * t).sin();
+                }
+            }
+        }
+        let data: Vec<u8> = x.iter().flat_map(|v| ((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // mono
+        out.extend_from_slice(&sr.to_le_bytes());
+        out.extend_from_slice(&(sr * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn options_parse_from_the_json_the_ui_sends() {
+        // lo que envía el diálogo (App.tsx): claves en camelCase; `tempo` ausente = automático
+        let o: AudioImportOptions = serde_json::from_str(r#"{"minRelative":0.65,"num":3,"den":4,"maxVoices":2}"#).unwrap();
+        assert_eq!((o.min_relative, o.num, o.den, o.max_voices, o.tempo), (Some(0.65), Some(3), Some(4), Some(2), None));
+        let o: AudioImportOptions = serde_json::from_str(r#"{"tempo":84}"#).unwrap();
+        assert_eq!(o.tempo, Some(84.0));
+        let o: AudioImportOptions = serde_json::from_str("{}").unwrap();
+        assert!(o.min_relative.is_none() && o.max_voices.is_none());
+    }
+
+    #[test]
+    fn audio_file_becomes_a_score_honouring_the_options() {
+        let dir = std::env::temp_dir().join("novascore_audio_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("escala.wav");
+        // do re mi fa sol fa mi re, una nota por segundo (negra = 1 s a 60 por minuto)
+        let notes: Vec<(f64, f64, i32)> = [60, 62, 64, 65, 67, 65, 64, 62].iter().enumerate().map(|(i, m)| (0.5 + i as f64, 0.95, *m)).collect();
+        write_wav(&wav, &notes, 9.5);
+        let o = AudioImportOptions { tempo: Some(60.0), num: Some(4), den: Some(4), max_voices: Some(1), ..Default::default() };
+        let r = audio_to_score(wav.to_str().unwrap(), &o).unwrap();
+        assert_eq!(r.score.tempo, 60);
+        assert_eq!((r.score.time.num, r.score.time.den), (4, 4));
+        assert_eq!(r.score.title, "escala");
+        let n = nova_core::io::sounds(&r.score).len();
+        assert!((6..=10).contains(&n), "{n} notas");
+        assert!(r.warnings[0].contains("borrador"));
+        // un archivo que no existe da un error legible, no un pánico
+        assert!(audio_to_score(dir.join("no_existe.wav").to_str().unwrap(), &Default::default()).is_err());
+    }
+}
