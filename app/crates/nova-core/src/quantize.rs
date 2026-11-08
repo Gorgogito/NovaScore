@@ -8,6 +8,7 @@
 use crate::beats::{find_beats, BeatMap};
 use crate::io::ImportReport;
 use crate::{Clef, Measure, Part, Pitch, Score, TimeSig, PPQ};
+use std::collections::{BTreeMap, HashSet};
 
 /// Rejilla de cuantización: semicorchea.
 const GRID: u32 = PPQ / 4;
@@ -49,6 +50,8 @@ pub struct QuantizeOptions {
     pub clean: bool,
     /// Máximo de voces por pentagrama.
     pub max_voices: usize,
+    /// Detectar pulsos de tresillos de corchea y escribirlos como tresillos.
+    pub triplets: bool,
 }
 
 impl Default for QuantizeOptions {
@@ -65,6 +68,7 @@ impl Default for QuantizeOptions {
             tightness: 30.0,
             clean: true,
             max_voices: 1,
+            triplets: true,
         }
     }
 }
@@ -193,8 +197,68 @@ struct Group {
     pitches: Vec<u8>,
 }
 
+/// Ticks de una ranura de tresillo de corchea (un tercio de negra).
+const TRIPLET_SLOT: u32 = PPQ / 3;
+
+/// Pulsos (índices de negra) cuyos inicios encajan mejor en tresillos de corchea que en
+/// semicorcheas. `ticks` son las posiciones sin cuantizar, en ticks desde el primer pulso.
+pub fn detect_triplet_beats(ticks: &[f64]) -> HashSet<u32> {
+    let mut by_beat: BTreeMap<u32, (usize, usize, usize)> = BTreeMap::new(); // (de tresillo, rectas, total)
+    for &t in ticks {
+        if t < 0.0 {
+            continue;
+        }
+        let beat = (t / PPQ as f64).floor() as u32;
+        let phi = t / PPQ as f64 - beat as f64;
+        let d16 = (phi * 4.0 - (phi * 4.0).round()).abs() / 4.0;
+        let d3 = (phi * 3.0 - (phi * 3.0).round()).abs() / 3.0;
+        let e = by_beat.entry(beat).or_insert((0, 0, 0));
+        e.2 += 1;
+        if d3 + 0.02 < d16 && d3 < 0.08 {
+            e.0 += 1;
+        } else if d16 + 0.02 < d3 && d16 < 0.08 {
+            e.1 += 1;
+        }
+    }
+    // Semilla: dos inicios de tresillo, o uno solo sin ninguno recto en un pulso con otro inicio
+    // (p. ej. una negra y una corchea de tresillo).
+    let mut set: HashSet<u32> =
+        by_beat.iter().filter(|(_, &(tr, st, n))| (tr >= 2 && tr > st) || (tr == 1 && st == 0 && n >= 2)).map(|(&b, _)| b).collect();
+    // Propagación: un solo inicio de tresillo basta junto a un pulso ya detectado.
+    loop {
+        let extra: Vec<u32> = by_beat
+            .iter()
+            .filter(|(b, &(tr, st, _))| tr >= 1 && tr > st && !set.contains(*b) && (set.contains(&(**b + 1)) || (**b > 0 && set.contains(&(**b - 1)))))
+            .map(|(&b, _)| b)
+            .collect();
+        if extra.is_empty() {
+            break;
+        }
+        set.extend(extra);
+    }
+    set
+}
+
+/// Ajusta una posición (ticks) a la rejilla de su pulso: tercios de negra en un pulso de
+/// tresillos y semicorcheas en los demás.
+fn snap(t: f64, triplets: &HashSet<u32>) -> u32 {
+    let t = t.max(0.0);
+    let beat = (t / PPQ as f64).floor() as u32;
+    if triplets.contains(&beat) {
+        let within = t - (beat * PPQ) as f64;
+        beat * PPQ + (within / TRIPLET_SLOT as f64).round() as u32 * TRIPLET_SLOT
+    } else {
+        (t / GRID as f64).round() as u32 * GRID
+    }
+}
+
+/// ¿Toca el intervalo `[s, e)` algún pulso de tresillos?
+fn touches_triplet(s: u32, e: u32, triplets: &HashSet<u32>) -> bool {
+    !triplets.is_empty() && (s / PPQ..=e.saturating_sub(1).max(s) / PPQ).any(|b| triplets.contains(&b))
+}
+
 /// Reparte notas ya cuantizadas de un pentagrama en hasta 4 voces (la 0 = la más aguda).
-fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32) -> Vec<Vec<Group>> {
+fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32, triplets: &HashSet<u32>) -> Vec<Vec<Group>> {
     notes.sort_by(|a, b| a.s.cmp(&b.s).then(b.pitch.cmp(&a.pitch)));
     let mut voices: Vec<Vec<Group>> = Vec::new();
     let mean = |g: &Group| g.pitches.iter().map(|&p| p as f64).sum::<f64>() / g.pitches.len() as f64;
@@ -261,7 +325,7 @@ fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32) -> Vec<Vec
         for i in 0..v.len() {
             let next = v.get(i + 1).map(|g| g.s);
             let d = v[i].e - v[i].s;
-            if next != Some(v[i].e) && d <= 1920 && !SIMPLE.contains(&d) {
+            if next != Some(v[i].e) && d <= 1920 && !SIMPLE.contains(&d) && !touches_triplet(v[i].s, v[i].e, triplets) {
                 let best = SIMPLE.iter().copied().min_by_key(|&s| (s.abs_diff(d), s)).unwrap();
                 v[i].e = v[i].s + best;
             }
@@ -452,24 +516,21 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
 
     // Cuantización
     let to_ticks = |t: f64| -> f64 { (map.pos(t) - origin) * PPQ as f64 };
+    let raw_ticks: Vec<(f64, f64)> = notes.iter().map(|n| (to_ticks(n.start).max(0.0), to_ticks(n.end).max(0.0))).collect();
+    let triplet_beats: HashSet<u32> = if o.triplets {
+        detect_triplet_beats(&raw_ticks.iter().map(|r| r.0).collect::<Vec<_>>())
+    } else {
+        HashSet::new()
+    };
     let mut on_grid = 0usize;
     let mut q: Vec<Q> = Vec::new();
-    let mut triplet_like = 0usize;
-    for n in &notes {
-        let ts = to_ticks(n.start).max(0.0);
-        let te = to_ticks(n.end).max(0.0);
-        let s = ((ts / GRID as f64).round() as u32) * GRID;
-        if (ts / GRID as f64 - (ts / GRID as f64).round()).abs() < 0.15 {
+    for (n, &(ts, te)) in notes.iter().zip(&raw_ticks) {
+        let s = snap(ts, &triplet_beats);
+        let unit = if triplet_beats.contains(&(s / PPQ)) { TRIPLET_SLOT } else { GRID };
+        if (ts - s as f64).abs() < 0.15 * unit as f64 {
             on_grid += 1;
         }
-        let e = (((te / GRID as f64).round() as u32) * GRID).max(s + GRID);
-        // ¿cae mejor en una rejilla de tresillos de corchea (1/3 de negra)?
-        let frac = (ts / PPQ as f64).fract();
-        let e16 = (frac * 4.0 - (frac * 4.0).round()).abs() / 4.0;
-        let e3 = (frac * 3.0 - (frac * 3.0).round()).abs() / 3.0;
-        if e16 > 0.04 && e3 < 0.02 {
-            triplet_like += 1;
-        }
+        let e = snap(te, &triplet_beats).max(s + unit);
         q.push(Q { s, e, pitch: n.pitch });
     }
     let end_tick = q.iter().map(|x| x.e).max().unwrap();
@@ -481,8 +542,8 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     if on_grid_pct < 60.0 {
         warnings.push(format!("Solo el {on_grid_pct:.0} % de las notas cae en la rejilla de semicorcheas: el ritmo es irregular o el pulso no es el adecuado. Prueba a indicar el tempo (o la mitad / el doble)."));
     }
-    if triplet_like * 20 > q.len() {
-        warnings.push(format!("{triplet_like} notas parecen tresillos; se cuantizaron a semicorcheas (aún no se generan tresillos)."));
+    if !triplet_beats.is_empty() {
+        warnings.push(format!("Se detectaron tresillos en {} pulsos.", triplet_beats.len()));
     }
     warnings.push(format!("Compás {}/{} supuesto; la primera nota se coloca en el primer tiempo (sin anacrusa). Cuantizado a semicorcheas.", o.time.num, o.time.den));
 
@@ -505,16 +566,54 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     score.parts.clear();
     let mut dropped_voices = false;
     for (name, clef, notes) in staves {
-        let voices = allocate_voices(notes, o.max_voices.clamp(1, crate::MAX_VOICES), o.legato_ticks);
+        let voices = allocate_voices(notes, o.max_voices.clamp(1, crate::MAX_VOICES), o.legato_ticks, &triplet_beats);
         let mut part = Part::new(name, clef, o.program, vec![Measure::empty(mlen)]);
         part.percussion = false;
         score.parts.push(part);
         let pi = score.parts.len() - 1;
         for (vi, v) in voices.iter().enumerate() {
+            // pulsos de tresillos de esta voz: pulso → (ranura, nº de ranuras, alturas, ligada)
+            let mut beats: BTreeMap<u32, Vec<(u32, u32, Vec<Pitch>, bool)>> = BTreeMap::new();
             for g in v {
                 let mut ps: Vec<Pitch> = g.pitches.iter().map(|&m| Pitch::from_midi(m as i32, sharps)).collect();
                 ps.sort_by_key(|p| p.midi());
-                if score.put_abs_voice(pi, vi, g.s, g.e - g.s, &ps).is_err() {
+                let mut pos = g.s;
+                while pos < g.e {
+                    let beat = pos / PPQ;
+                    if triplet_beats.contains(&beat) {
+                        let seg_end = g.e.min((beat + 1) * PPQ);
+                        let slot = ((pos - beat * PPQ) as f64 / TRIPLET_SLOT as f64).round() as u32;
+                        let n = (((seg_end - pos) as f64 / TRIPLET_SLOT as f64).round() as u32).max(1);
+                        let tie = seg_end < g.e;
+                        if n >= 3 || slot + n > 3 {
+                            // llena el pulso: una negra normal, sin grupo de tresillo
+                            if score.put_abs_voice_tied(pi, vi, pos, seg_end - pos, &ps, tie).is_err() {
+                                dropped_voices = true;
+                            }
+                        } else {
+                            beats.entry(beat).or_default().push((slot, n, ps.clone(), tie));
+                        }
+                        pos = seg_end;
+                    } else {
+                        // tramo recto hasta el siguiente pulso de tresillos
+                        let mut seg_end = g.e;
+                        let mut b = beat + 1;
+                        while b * PPQ < g.e {
+                            if triplet_beats.contains(&b) {
+                                seg_end = b * PPQ;
+                                break;
+                            }
+                            b += 1;
+                        }
+                        if score.put_abs_voice_tied(pi, vi, pos, seg_end - pos, &ps, seg_end < g.e).is_err() {
+                            dropped_voices = true;
+                        }
+                        pos = seg_end;
+                    }
+                }
+            }
+            for (beat, items) in beats {
+                if score.put_triplet_beat(pi, vi, beat * PPQ, &items).is_err() {
                     dropped_voices = true;
                 }
             }
@@ -634,6 +733,75 @@ mod tests {
         assert_eq!(right.measures[0].voices.len(), 1);
         assert_eq!(right.measures[0].events.len(), 1);
         assert_eq!(right.measures[0].events[0].ticks, 1920);
+    }
+
+    #[test]
+    fn detects_triplet_beats_from_onset_phases() {
+        // pulso 0: tres corcheas de tresillo; pulso 1: negra; pulso 2: dos corcheas rectas
+        let ticks = [0.0, 160.0, 320.0, 480.0, 960.0, 1200.0];
+        let set = detect_triplet_beats(&ticks);
+        assert!(set.contains(&0));
+        assert!(!set.contains(&1) && !set.contains(&2));
+        // con ruido de ±10 ticks se mantiene
+        let noisy = [6.0, 150.0, 330.0, 490.0, 950.0, 1210.0];
+        assert_eq!(detect_triplet_beats(&noisy), set);
+        // negra + corchea de tresillo en tres pulsos seguidos
+        let swing = [0.0, 320.0, 480.0, 800.0, 960.0, 1280.0];
+        assert_eq!(detect_triplet_beats(&swing), [0u32, 1, 2].into_iter().collect());
+        // semicorcheas rectas: ninguno
+        let straight = [0.0, 120.0, 240.0, 360.0, 480.0, 600.0, 720.0, 840.0];
+        assert!(detect_triplet_beats(&straight).is_empty());
+    }
+
+    #[test]
+    fn triplet_eighths_are_written_as_tuplets() {
+        let bpm = 100.0;
+        let b = 60.0 / bpm;
+        let mut raw = Vec::new();
+        // dos compases de tresillos de corchea (24 notas) y dos de negras
+        for i in 0..24 {
+            let beat = i as f64 / 3.0;
+            raw.push(RawNote { start: 1.3 + beat * b, end: 1.3 + (beat + 1.0 / 3.0) * b - 0.02, pitch: [60, 62, 64][i % 3] + 5 * ((i / 12) as u8), amplitude: 0.8, onset: true });
+        }
+        for k in 0..8 {
+            raw.push(n(8.0 + k as f64, 1.0, 67 + (k % 3) as u8, bpm));
+        }
+        let q = QuantizeOptions { tempo: Some(bpm), min_relative: None, min_amplitude: 0.0, clean: false, ..Default::default() };
+        let r = notes_to_score(&raw, &q).unwrap();
+        let part = &r.score.parts[0];
+        let m0: Vec<&crate::Event> = part.measures[0].events.iter().collect();
+        assert_eq!(m0.len(), 12, "{:?}", m0.iter().map(|e| e.ticks).collect::<Vec<_>>());
+        assert!(m0.iter().all(|e| e.ticks == 160 && e.tuplet.is_some()));
+        let m2: Vec<u32> = part.measures[2].events.iter().map(|e| e.ticks).collect();
+        assert_eq!(m2, vec![480, 480, 480, 480]);
+        assert!(part.measures[2].events.iter().all(|e| e.tuplet.is_none()));
+        assert_eq!(sounds(&r.score).len(), 32);
+        assert!(r.warnings.iter().any(|w| w.contains("tresillos en 8 pulsos")), "{:?}", r.warnings);
+        // sin detección de tresillos se cuantiza a semicorcheas (no hay grupos)
+        let q2 = QuantizeOptions { triplets: false, ..q.clone() };
+        let r2 = notes_to_score(&raw, &q2).unwrap();
+        assert!(r2.score.parts[0].measures[0].events.iter().all(|e| e.tuplet.is_none()));
+    }
+
+    #[test]
+    fn long_note_into_a_triplet_beat_is_split_and_tied() {
+        let bpm = 100.0;
+        let b = 60.0 / bpm;
+        let mut raw = Vec::new();
+        // pulso 0: negra; pulso 1: tres corcheas de tresillo (la primera es una nota larga que
+        // viene de la negra anterior con otra altura); se repite en pulso 2-3
+        for rep in 0..8 {
+            let base = rep as f64 * 2.0;
+            raw.push(n(base, 1.0, 64, bpm));
+            for k in 0..3 {
+                raw.push(RawNote { start: 1.3 + (base + 1.0 + k as f64 / 3.0) * b, end: 1.3 + (base + 1.0 + (k as f64 + 1.0) / 3.0) * b - 0.02, pitch: 67 + k as u8, amplitude: 0.8, onset: true });
+            }
+        }
+        let q = QuantizeOptions { tempo: Some(bpm), min_relative: None, min_amplitude: 0.0, clean: false, ..Default::default() };
+        let r = notes_to_score(&raw, &q).unwrap();
+        assert_eq!(sounds(&r.score).len(), 32);
+        let m0 = &r.score.parts[0].measures[0].events;
+        assert_eq!(m0.iter().map(|e| (e.start, e.ticks, e.tuplet.is_some())).collect::<Vec<_>>(), vec![(0, 480, false), (480, 160, true), (640, 160, true), (800, 160, true), (960, 480, false), (1440, 160, true), (1600, 160, true), (1760, 160, true)]);
     }
 
     #[test]

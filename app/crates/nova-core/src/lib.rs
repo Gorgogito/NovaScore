@@ -901,6 +901,11 @@ impl Score {
 
     /// Like [`Score::put_abs`] but in any voice (0-3); the voice is created where needed.
     pub fn put_abs_voice(&mut self, part: usize, voice: usize, abs: u32, ticks: u32, pitches: &[Pitch]) -> Result<(), EditError> {
+        self.put_abs_voice_tied(part, voice, abs, ticks, pitches, false)
+    }
+
+    /// Like [`Score::put_abs_voice`]; with `tie_out` the last piece is also tied to what follows.
+    pub fn put_abs_voice_tied(&mut self, part: usize, voice: usize, abs: u32, ticks: u32, pitches: &[Pitch], tie_out: bool) -> Result<(), EditError> {
         if part >= self.parts.len() || voice >= MAX_VOICES || ticks < MIN_TICKS || pitches.is_empty() {
             return Err(EditError::OutOfRange);
         }
@@ -921,13 +926,70 @@ impl Score {
             let mut p = start;
             for (i, piece) in pieces.into_iter().enumerate() {
                 let last = remaining == seg && i + 1 == n;
-                self.put(part, voice, m, p, piece, Content::note(pitches.to_vec(), !last))?;
+                self.put(part, voice, m, p, piece, Content::note(pitches.to_vec(), !last || tie_out))?;
                 p += piece;
             }
             let used = p - start;
             pos += used;
             remaining -= used;
         }
+        Ok(())
+    }
+
+    /// Build one beat (a quarter note, starting at absolute tick `abs`) as a group of three
+    /// triplet eighths (3:2). `items` are `(first slot 0-2, slots 1-2, pitches, tied to next)`;
+    /// the slots left empty become rests and whatever the voice had in the beat is replaced.
+    /// The beat must lie inside one measure. Used by importers.
+    pub fn put_triplet_beat(&mut self, part: usize, voice: usize, abs: u32, items: &[(u32, u32, Vec<Pitch>, bool)]) -> Result<(), EditError> {
+        const SLOT: u32 = PPQ / 3;
+        if part >= self.parts.len() || voice >= MAX_VOICES || items.is_empty() {
+            return Err(EditError::OutOfRange);
+        }
+        let (m, start) = self.locate(abs);
+        let len = self.measure_len(m);
+        if start + PPQ > len {
+            return Err(EditError::OutOfRange);
+        }
+        let mut sorted: Vec<&(u32, u32, Vec<Pitch>, bool)> = items.iter().collect();
+        sorted.sort_by_key(|i| i.0);
+        let mut slot = 0u32;
+        for i in &sorted {
+            if i.1 == 0 || i.1 > 2 || i.0 < slot || i.0 + i.1 > 3 || i.2.is_empty() {
+                return Err(EditError::BadDuration);
+            }
+            slot = i.0 + i.1;
+        }
+        while self.parts[part].measures.len() <= m {
+            let l = self.measure_len(self.parts[part].measures.len());
+            self.parts[part].measures.push(Measure::empty(l));
+        }
+        let t = Tuplet { actual: 3, normal: 2, start };
+        let mk = |slot: u32, n: u32, content: Content| Event {
+            start: start + slot * SLOT,
+            ticks: n * SLOT,
+            content,
+            tuplet: Some(t),
+            extras: Vec::new(),
+            dynamic: None,
+            articulations: Vec::new(),
+        };
+        let mut new_events: Vec<Event> = Vec::new();
+        let mut pos = 0u32;
+        for i in &sorted {
+            if i.0 > pos {
+                new_events.push(mk(pos, i.0 - pos, Content::Rest));
+            }
+            new_events.push(mk(i.0, i.1, Content::note(i.2.clone(), i.3)));
+            pos = i.0 + i.1;
+        }
+        if pos < 3 {
+            new_events.push(mk(pos, 3 - pos, Content::Rest));
+        }
+        let meas = self.measure_mut(part, m)?;
+        let events = meas.voice_create(voice, len);
+        let mut kept: Vec<Event> = events.iter().filter(|e| e.start + e.ticks <= start || e.start >= start + PPQ).cloned().collect();
+        kept.extend(new_events);
+        *events = fill_rests(kept, len);
         Ok(())
     }
 
@@ -1602,6 +1664,24 @@ mod tests {
         assert_eq!(s.time_changes.len(), 1);
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Score>(&j).unwrap(), s);
+    }
+
+    #[test]
+    fn triplet_beat_places_notes_and_rests() {
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        let p = |m| Pitch::from_midi(m, true);
+        // pulso 2 (tick 480): nota, nota larga de 2 huecos
+        s.put_triplet_beat(0, 0, 480, &[(0, 1, vec![p(60)], false), (1, 2, vec![p(62)], false)]).unwrap();
+        let ev: Vec<(u32, u32, bool)> = s.parts[0].measures[0].events.iter().map(|e| (e.start, e.ticks, e.tuplet.is_some())).collect();
+        assert_eq!(ev, vec![(0, 480, false), (480, 160, true), (640, 320, true), (960, 960, false)]);
+        // un hueco vacío al principio y al final
+        s.put_triplet_beat(0, 0, 1440, &[(1, 1, vec![p(64)], false)]).unwrap();
+        let tail: Vec<(u32, u32, bool)> = s.parts[0].measures[0].events.iter().filter(|e| e.start >= 1440).map(|e| (e.start, e.ticks, e.content != Content::Rest)).collect();
+        assert_eq!(tail, vec![(1440, 160, false), (1600, 160, true), (1760, 160, false)]);
+        assert_eq!(crate::io::sounds(&s).len(), 3);
+        // fuera de lugar: dos notas solapadas o un pulso que cruza la barra
+        assert!(s.put_triplet_beat(0, 0, 480, &[(0, 2, vec![p(60)], false), (1, 1, vec![p(62)], false)]).is_err());
+        assert!(s.put_triplet_beat(0, 0, 1700, &[(0, 1, vec![p(60)], false)]).is_err());
     }
 
     #[test]

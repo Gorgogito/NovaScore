@@ -96,6 +96,48 @@ fn synthetic(bars: u32) -> nova_core::Score {
     s
 }
 
+/// Pieza sintética con tresillos: melodía de negras y pulsos de tres corcheas de tresillo (o
+/// negra + corchea de tresillo) sobre un bajo en negras.
+fn synthetic_triplets(bars: u32) -> nova_core::Score {
+    use nova_core::{Clef, Pitch, Score, TimeSig};
+    let mut s = Score::new("tresillos", TimeSig { num: 4, den: 4 }, 0, 1);
+    let lh = s.add_part("Bajo", Clef::Bass, 0, false);
+    let p = |m: i32| Pitch::from_midi(m, true);
+    let scale = [60, 62, 64, 67, 69, 72, 74, 76];
+    let mut seed = 777u32;
+    let mut rnd = |n: u32| {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 16) % n
+    };
+    let mut idx = 3i32;
+    let mut step = |idx: &mut i32, rnd: &mut dyn FnMut(u32) -> u32| {
+        *idx = (*idx + rnd(3) as i32 - 1).clamp(0, 7);
+        scale[*idx as usize]
+    };
+    for bar in 0..bars {
+        let base = bar * 1920;
+        let root = [48, 43, 45, 41][(bar % 4) as usize];
+        for q in 0..4 {
+            s.put_abs(lh, base + q * 480, 480, &[p(root + [0, 7, 12, 7][q as usize])]).unwrap();
+        }
+        for beat in 0..4u32 {
+            let at = base + beat * 480;
+            if beat % 2 == 1 {
+                // pulso de tresillos
+                let items: Vec<(u32, u32, Vec<Pitch>, bool)> = if rnd(3) == 0 {
+                    vec![(0, 2, vec![p(step(&mut idx, &mut rnd))], false), (2, 1, vec![p(step(&mut idx, &mut rnd))], false)]
+                } else {
+                    (0..3).map(|k| (k, 1, vec![p(step(&mut idx, &mut rnd))], false)).collect()
+                };
+                s.put_triplet_beat(0, 0, at, &items).unwrap();
+            } else {
+                s.put_abs(0, at, 480, &[p(step(&mut idx, &mut rnd))]).unwrap();
+            }
+        }
+    }
+    s
+}
+
 fn main() {
     let rubato = env_f("NOVA_RUBATO", 0.0);
     let period_beats = env_f("NOVA_PERIOD", 16.0);
@@ -103,7 +145,9 @@ fn main() {
     let tight = env_f("NOVA_TIGHT", 30.0);
     let (mut sum_c, mut sum_f, mut cnt) = (0.0, 0.0, 0);
     for path in std::env::args().skip(1) {
-        let src = if path.starts_with("@synthetic") {
+        let src = if path.starts_with("@triplets") {
+            synthetic_triplets(path.trim_start_matches("@triplets").parse().unwrap_or(32))
+        } else if path.starts_with("@synthetic") {
             synthetic(path.trim_start_matches("@synthetic").parse().unwrap_or(48))
         } else {
             import_musicxml(&std::fs::read_to_string(&path).unwrap()).unwrap().score
@@ -154,7 +198,7 @@ fn main() {
 
         let mut res = Vec::new();
         for follow in [false, true] {
-            let qo = QuantizeOptions { min_amplitude: min_amp, min_relative: if std::env::var("NOVA_MINAMP").is_ok() { None } else { Some(env_f("NOVA_REL", 0.65) as f32) }, follow_tempo: follow, tightness: tight, clean: env_f("NOVA_CLEAN", 1.0) > 0.5, ..Default::default() };
+            let qo = QuantizeOptions { min_amplitude: min_amp, min_relative: if std::env::var("NOVA_MINAMP").is_ok() { None } else { Some(env_f("NOVA_REL", 0.65) as f32) }, follow_tempo: follow, tightness: tight, clean: env_f("NOVA_CLEAN", 1.0) > 0.5, triplets: env_f("NOVA_TRIPLETS", 1.0) > 0.5, ..Default::default() };
             let r = match notes_to_score(&raw, &qo) {
                 Ok(r) => r,
                 Err(e) => {
@@ -169,7 +213,7 @@ fn main() {
             for scale in [0.5, 1.0, 2.0] {
                 let got: BTreeSet<(i32, i64)> =
                     out.iter().map(|s| (s.midi, ((s.start as i64 - o0) as f64 * scale).round() as i64)).collect();
-                let (p, rc, f) = f1(&reference, &got, 60);
+                let (p, rc, f) = f1(&reference, &got, env_f("NOVA_TOL", 60.0) as i64);
                 if f > best.2 {
                     best = (p, rc, f, scale);
                 }
