@@ -5,6 +5,7 @@
 //! (hasta 4 por pentagrama) → duraciones. Tempo constante: no sigue rubato.
 //! No se generan tresillos; se avisa si parece haberlos.
 
+use crate::beats::{find_beats, BeatMap};
 use crate::io::ImportReport;
 use crate::{Clef, Measure, Part, Pitch, Score, TimeSig, PPQ};
 
@@ -21,6 +22,8 @@ pub struct RawNote {
     pub pitch: u8,
     /// 0..1
     pub amplitude: f32,
+    /// La nota nace de un inicio claro (reataque). `false` = continuación / posible fragmento.
+    pub onset: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +31,9 @@ pub struct QuantizeOptions {
     pub title: String,
     /// Descarta notas con menos amplitud (suele eliminar armónicos falsos).
     pub min_amplitude: f32,
+    /// Si es `Some(r)`, el umbral es `r` × el percentil 90 de las amplitudes (se adapta a lo
+    /// fuerte que suene la grabación) y `min_amplitude` se ignora.
+    pub min_relative: Option<f32>,
     /// Tempo en negras por minuto; `None` = estimarlo.
     pub tempo: Option<f64>,
     pub time: TimeSig,
@@ -35,6 +41,14 @@ pub struct QuantizeOptions {
     pub program: u8,
     /// Huecos menores que esto (ticks) entre notas de una voz se rellenan alargando la nota.
     pub legato_ticks: u32,
+    /// Seguir las variaciones de tempo (rubato) con un mapa de pulsos; `false` = tempo constante.
+    pub follow_tempo: bool,
+    /// Rigidez del seguimiento: mayor = el tempo varía menos.
+    pub tightness: f64,
+    /// Limpiar la transcripción (unir fragmentos, quitar armónicos y notas cromáticas débiles).
+    pub clean: bool,
+    /// Máximo de voces por pentagrama.
+    pub max_voices: usize,
 }
 
 impl Default for QuantizeOptions {
@@ -42,10 +56,15 @@ impl Default for QuantizeOptions {
         QuantizeOptions {
             title: "Transcripción de audio".into(),
             min_amplitude: 0.5,
+            min_relative: Some(0.65),
             tempo: None,
             time: TimeSig { num: 4, den: 4 },
             program: 0,
-            legato_ticks: PPQ * 3 / 8,
+            legato_ticks: PPQ * 3 / 4,
+            follow_tempo: true,
+            tightness: 30.0,
+            clean: true,
+            max_voices: 1,
         }
     }
 }
@@ -256,54 +275,193 @@ fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32) -> Vec<Vec
     voices
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CleanStats {
+    pub merged: usize,
+    pub harmonics: usize,
+    pub chromatic: usize,
+}
+
+/// Une las notas de la misma altura separadas por un hueco mínimo (el modelo parte las notas
+/// largas en fragmentos contiguos).
+fn merge_fragments(notes: &[RawNote], max_gap: f64) -> (Vec<RawNote>, usize) {
+    let mut v: Vec<RawNote> = notes.to_vec();
+    v.sort_by(|a, b| (a.pitch, a.start.to_bits()).cmp(&(b.pitch, b.start.to_bits())));
+    let mut out: Vec<RawNote> = Vec::with_capacity(v.len());
+    let mut merged = 0;
+    for n in v {
+        match out.last_mut() {
+            Some(last) if last.pitch == n.pitch && !n.onset && n.start - last.end <= max_gap => {
+                let (dl, dn) = (last.end - last.start, n.end - n.start);
+                last.amplitude = (last.amplitude * dl as f32 + n.amplitude * dn as f32) / (dl + dn) as f32;
+                last.end = last.end.max(n.end);
+                merged += 1;
+            }
+            _ => out.push(n),
+        }
+    }
+    (out, merged)
+}
+
+/// Quita notas que son armónicos de otra más fuerte: 12, 19, 24, 28 o 31 semitonos más
+/// agudas, que empiezan a la vez y con amplitud claramente menor.
+fn remove_harmonics(notes: &[RawNote], max_ratio: f32) -> (Vec<RawNote>, usize) {
+    let mut sorted: Vec<RawNote> = notes.to_vec();
+    sorted.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    let mut keep = vec![true; sorted.len()];
+    for i in 0..sorted.len() {
+        let n = sorted[i];
+        let mut j = i;
+        while j > 0 && n.start - sorted[j - 1].start < 0.08 {
+            j -= 1;
+        }
+        let ghost = (j..sorted.len()).take_while(|&k| sorted[k].start - n.start < 0.08).any(|k| {
+            let l = &sorted[k];
+            n.pitch > l.pitch && [12, 19, 24, 28, 31].contains(&(n.pitch - l.pitch)) && n.amplitude <= max_ratio * l.amplitude
+        });
+        keep[i] = !ghost;
+    }
+    let out: Vec<RawNote> = sorted.iter().zip(&keep).filter(|(_, k)| **k).map(|(n, _)| *n).collect();
+    let removed = sorted.len() - out.len();
+    (out, removed)
+}
+
+/// Quita notas cortas y débiles cuya clase de altura no está en la tonalidad (ni en las
+/// alteraciones habituales del modo menor).
+fn remove_chromatic(notes: &[RawNote], fifths: i8) -> (Vec<RawNote>, usize) {
+    let tonic = ((fifths as i32 * 7).rem_euclid(12)) as u8;
+    let mut allowed = [false; 12];
+    for s in [0, 2, 4, 5, 7, 9, 11] {
+        allowed[((tonic + s) % 12) as usize] = true;
+    }
+    let minor = (tonic + 9) % 12;
+    allowed[((minor + 11) % 12) as usize] = true; // sensible
+    allowed[((minor + 6) % 12) as usize] = true; // sexto grado melódico
+    let mut amps: Vec<f32> = notes.iter().map(|n| n.amplitude).collect();
+    amps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let weak = amps.get(amps.len() * 6 / 10).copied().unwrap_or(0.0);
+    let out: Vec<RawNote> = notes
+        .iter()
+        .copied()
+        .filter(|n| allowed[(n.pitch % 12) as usize] || n.amplitude >= weak || n.end - n.start >= 0.5)
+        .collect();
+    let removed = notes.len() - out.len();
+    (out, removed)
+}
+
+/// Limpieza previa a la cuantización. Devuelve las notas y cuántas se unieron / quitaron.
+pub fn clean_notes(notes: &[RawNote]) -> (Vec<RawNote>, CleanStats) {
+    let (a, merged) = merge_fragments(notes, 0.12);
+    let (b, harmonics) = remove_harmonics(&a, 0.6);
+    let (c, chromatic) = remove_chromatic(&b, estimate_fifths(&b));
+    (c, CleanStats { merged, harmonics, chromatic })
+}
+
+/// Peso de cada inicio para el seguimiento de pulso: los acordes, los graves y las notas largas
+/// suelen marcar los tiempos fuertes, así que cuentan más que una nota suelta y breve.
+fn accent_weights(notes: &[RawNote]) -> Vec<(f64, f32)> {
+    notes
+        .iter()
+        .map(|n| {
+            let simultaneous = notes.iter().filter(|m| (m.start - n.start).abs() < 0.04).count() as f32;
+            let mut w = n.amplitude * (1.0 + 0.5 * (simultaneous - 1.0).min(3.0));
+            if n.pitch < 55 {
+                w *= 1.3;
+            }
+            if n.end - n.start > 0.7 {
+                w *= 1.3;
+            }
+            (n.start, w)
+        })
+        .collect()
+}
+
 pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportReport, String> {
     let mut warnings = Vec::new();
     let all = raw.len();
+    let threshold = match o.min_relative {
+        Some(r) => {
+            let mut amps: Vec<f32> = raw.iter().map(|n| n.amplitude).collect();
+            amps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p90 = amps.get(amps.len() * 9 / 10).copied().unwrap_or(0.0);
+            (r * p90).max(0.2)
+        }
+        None => o.min_amplitude,
+    };
     let notes: Vec<RawNote> = raw
         .iter()
         .copied()
-        .filter(|n| n.amplitude >= o.min_amplitude && n.end > n.start && (21..=108).contains(&n.pitch))
+        .filter(|n| n.amplitude >= threshold && n.end > n.start && (21..=108).contains(&n.pitch))
         .collect();
     if notes.is_empty() {
         return Err("No se detectaron notas (prueba a bajar el umbral de amplitud).".into());
     }
     if all > notes.len() {
-        warnings.push(format!("Se descartaron {} de {all} notas por amplitud baja (< {:.2}).", all - notes.len(), o.min_amplitude));
+        warnings.push(format!("Se descartaron {} de {all} notas por amplitud baja (< {:.2}).", all - notes.len(), threshold));
     }
+
+    let notes = if o.clean {
+        let (clean, st) = clean_notes(&notes);
+        if st.merged + st.harmonics + st.chromatic > 0 {
+            warnings.push(format!(
+                "Limpieza: {} fragmentos unidos, {} armónicos y {} notas cromáticas débiles eliminados.",
+                st.merged, st.harmonics, st.chromatic
+            ));
+        }
+        if clean.is_empty() {
+            return Err("No quedaron notas tras la limpieza.".into());
+        }
+        clean
+    } else {
+        notes
+    };
 
     // Pulso
     let onsets: Vec<(f64, f32)> = notes.iter().map(|n| (n.start, n.amplitude)).collect();
-    let est = estimate_beat(&onsets);
-    let (bpm, phase) = match o.tempo {
-        Some(t) => {
-            let t = t.clamp(20.0, 300.0);
-            (t, concentration(&onsets, t).1.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU * 60.0 / t)
-        }
-        None => (est.bpm, est.phase),
-    };
-    let beat = 60.0 / bpm;
     let first = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
-    let k = ((first - phase) / beat + 0.25).floor();
-    let origin = phase + k * beat;
-    if o.tempo.is_none() {
-        warnings.push(format!("Tempo estimado: {:.1} negras/min (confianza {:.0} %). Tempo constante: no se sigue el rubato.", bpm, est.confidence * 100.0));
-        if est.confidence < 0.5 {
-            warnings.push("El ritmo es irregular: la cuantización puede ser poco fiable. Prueba a indicar el tempo.".into());
-        }
-    }
+    let last = notes.iter().map(|n| n.end).fold(0.0, f64::max);
+    // Con muy pocas notas el seguimiento no es fiable: se usa tempo constante.
+    let map = if o.follow_tempo && onsets.len() >= 24 {
+        let seed = o.tempo.map(|t| 60.0 / t.clamp(20.0, 300.0));
+        let beats = find_beats(&accent_weights(&notes), seed, o.tightness);
+        BeatMap::from_beats(beats, seed.unwrap_or(0.6))
+    } else {
+        let est = estimate_beat(&onsets);
+        let (bpm, phase) = match o.tempo {
+            Some(t) => {
+                let t = t.clamp(20.0, 300.0);
+                (t, concentration(&onsets, t).1.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU * 60.0 / t)
+            }
+            None => (est.bpm, est.phase),
+        };
+        BeatMap::regular(phase, 60.0 / bpm, last)
+    };
+    let bpm = map.median_bpm();
+    // primer pulso de compás: el pulso más cercano por debajo de la primera nota
+    let origin = (map.pos(first) + 0.25).floor();
+    warnings.push(format!(
+        "Tempo {}: {:.1} negras/min.{}",
+        if o.tempo.is_some() { "indicado" } else { "estimado" },
+        bpm,
+        if o.follow_tempo { " Se siguen las variaciones de tempo." } else { " Tempo constante: no se sigue el rubato." }
+    ));
 
     // Tonalidad
     let fifths = estimate_fifths(&notes);
     let sharps = fifths >= 0;
 
     // Cuantización
-    let to_ticks = |t: f64| -> f64 { (t - origin) / beat * PPQ as f64 };
+    let to_ticks = |t: f64| -> f64 { (map.pos(t) - origin) * PPQ as f64 };
+    let mut on_grid = 0usize;
     let mut q: Vec<Q> = Vec::new();
     let mut triplet_like = 0usize;
     for n in &notes {
         let ts = to_ticks(n.start).max(0.0);
         let te = to_ticks(n.end).max(0.0);
         let s = ((ts / GRID as f64).round() as u32) * GRID;
+        if (ts / GRID as f64 - (ts / GRID as f64).round()).abs() < 0.15 {
+            on_grid += 1;
+        }
         let e = (((te / GRID as f64).round() as u32) * GRID).max(s + GRID);
         // ¿cae mejor en una rejilla de tresillos de corchea (1/3 de negra)?
         let frac = (ts / PPQ as f64).fract();
@@ -318,6 +476,10 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     let mlen = o.time.measure_ticks();
     if end_tick / mlen >= MAX_MEASURES {
         return Err(format!("La pieza supera {MAX_MEASURES} compases con el tempo estimado."));
+    }
+    let on_grid_pct = on_grid as f64 * 100.0 / q.len() as f64;
+    if on_grid_pct < 60.0 {
+        warnings.push(format!("Solo el {on_grid_pct:.0} % de las notas cae en la rejilla de semicorcheas: el ritmo es irregular o el pulso no es el adecuado. Prueba a indicar el tempo (o la mitad / el doble)."));
     }
     if triplet_like * 20 > q.len() {
         warnings.push(format!("{triplet_like} notas parecen tresillos; se cuantizaron a semicorcheas (aún no se generan tresillos)."));
@@ -343,7 +505,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     score.parts.clear();
     let mut dropped_voices = false;
     for (name, clef, notes) in staves {
-        let voices = allocate_voices(notes, crate::MAX_VOICES, o.legato_ticks);
+        let voices = allocate_voices(notes, o.max_voices.clamp(1, crate::MAX_VOICES), o.legato_ticks);
         let mut part = Part::new(name, clef, o.program, vec![Measure::empty(mlen)]);
         part.percussion = false;
         score.parts.push(part);
@@ -378,7 +540,7 @@ mod tests {
 
     fn n(start_beats: f64, dur_beats: f64, pitch: u8, bpm: f64) -> RawNote {
         let b = 60.0 / bpm;
-        RawNote { start: 1.3 + start_beats * b, end: 1.3 + (start_beats + dur_beats) * b - 0.02, pitch, amplitude: 0.8 }
+        RawNote { start: 1.3 + start_beats * b, end: 1.3 + (start_beats + dur_beats) * b - 0.02, pitch, amplitude: 0.8, onset: true }
     }
 
     #[test]
@@ -406,7 +568,7 @@ mod tests {
     #[test]
     fn key_of_c_major_and_a_minor_and_d_major() {
         let scale = |tonic: u8, steps: &[u8]| -> Vec<RawNote> {
-            steps.iter().enumerate().map(|(i, s)| RawNote { start: i as f64, end: i as f64 + 0.9, pitch: tonic + s, amplitude: 0.8 }).collect()
+            steps.iter().enumerate().map(|(i, s)| RawNote { start: i as f64, end: i as f64 + 0.9, pitch: tonic + s, amplitude: 0.8, onset: true }).collect()
         };
         let maj = [0, 2, 4, 5, 7, 9, 11, 12, 0, 4, 7, 12, 7, 4, 0];
         assert_eq!(estimate_fifths(&scale(60, &maj)), 0);
@@ -464,7 +626,7 @@ mod tests {
         for i in 0..4 {
             raw.push(n(i as f64, 1.0, [60, 62, 64, 62][i], bpm)); // melodía grave, misma mano
         }
-        let q = QuantizeOptions { min_amplitude: 0.0, ..Default::default() };
+        let q = QuantizeOptions { min_amplitude: 0.0, min_relative: None, max_voices: 2, ..Default::default() };
         let r = notes_to_score(&raw, &q).unwrap();
         let sp = &r.score.parts;
         // una mano derecha con 2 voces (el 67 sostenido arriba, la melodía abajo)
@@ -479,7 +641,7 @@ mod tests {
         let bpm = 100.0;
         let b = 60.0 / bpm;
         // negra que el modelo alarga a 1,25 negras y sigue silencio
-        let raw = vec![n(0.0, 1.0, 60, bpm), n(1.0, 1.0, 62, bpm), RawNote { start: 1.3 + 2.0 * b, end: 1.3 + 3.25 * b, pitch: 64, amplitude: 0.8 }];
+        let raw = vec![n(0.0, 1.0, 60, bpm), n(1.0, 1.0, 62, bpm), RawNote { start: 1.3 + 2.0 * b, end: 1.3 + 3.25 * b, pitch: 64, amplitude: 0.8, onset: true }];
         let r = notes_to_score(&raw, &QuantizeOptions::default()).unwrap();
         let evs = &r.score.parts[0].measures[0].events;
         assert_eq!(evs[2].ticks, 480, "{:?}", evs.iter().map(|e| e.ticks).collect::<Vec<_>>());

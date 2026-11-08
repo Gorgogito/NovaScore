@@ -28,6 +28,32 @@ fn main() {
         let b = estimate_beat(&on);
         println!("min_amp {min:.1}: {} notas → {:.1} bpm, confianza {:.2}", on.len(), b.bpm, b.confidence);
     }
+    // candidatos a armónico: nota más aguda a 12/19/24/28/31 semitonos de otra que empieza a la vez
+    let mut ratios = Vec::new();
+    for n in &notes {
+        for l in &notes {
+            if n.pitch > l.pitch && [12, 19, 24, 28, 31].contains(&(n.pitch - l.pitch)) && (n.start - l.start).abs() < 0.08 {
+                ratios.push((n.amplitude / l.amplitude, n.pitch - l.pitch));
+            }
+        }
+    }
+    let mut hist = [0usize; 8];
+    for (r, _) in &ratios {
+        hist[((r * 5.0) as usize).min(7)] += 1;
+    }
+    println!("pares armónico/fundamental: {} | razón de amplitud (0-0.2,0.2-0.4,…,1.4+): {hist:?}", ratios.len());
+    let mut gaps = [0usize; 8];
+    let mut sorted: Vec<_> = notes.iter().collect();
+    sorted.sort_by(|a, b| (a.pitch, a.start.to_bits()).cmp(&(b.pitch, b.start.to_bits())));
+    for w in sorted.windows(2) {
+        if w[0].pitch == w[1].pitch {
+            let g = w[1].start - w[0].end;
+            if (-0.2..0.4).contains(&g) {
+                gaps[(((g + 0.2) / 0.075) as usize).min(7)] += 1;
+            }
+        }
+    }
+    println!("huecos entre notas iguales consecutivas (-0.2..0.4 s en pasos de 75 ms): {gaps:?}");
     // intervalos entre inicios: histograma en pasos de 50 ms
     let mut starts: Vec<f64> = notes.iter().map(|n| n.start).collect();
     starts.sort_by(|a, b| a.partial_cmp(b).unwrap());

@@ -1,6 +1,7 @@
 //! NovaScore core: score model, editing operations and undo/redo.
 //! Licensed under GPL-3.0-or-later.
 
+pub mod beats;
 pub mod io;
 pub mod mscx;
 pub mod mscx_write;

@@ -16,6 +16,9 @@ pub struct NoteEvent {
     pub pitch: u8,
     /// Amplitud media del modelo, 0..1.
     pub amplitude: f32,
+    /// `true` si la nota nace de un inicio claro del modelo; `false` si es una continuación
+    /// hallada por el truco melodia (a menudo un fragmento de una nota ya existente).
+    pub onset: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +84,7 @@ fn inferred_onsets(onsets: &Matrix, frames: &Matrix) -> Matrix {
 }
 
 /// Notas en fotogramas: (inicio, fin, índice 0..88, amplitud).
-pub fn frames_to_notes(frames: &Matrix, onsets_in: &Matrix, p: &Params) -> Vec<(usize, usize, usize, f32)> {
+pub fn frames_to_notes(frames: &Matrix, onsets_in: &Matrix, p: &Params) -> Vec<(usize, usize, usize, f32, bool)> {
     let n = frames.rows;
     if n < 3 {
         return Vec::new();
@@ -141,7 +144,9 @@ pub fn frames_to_notes(frames: &Matrix, onsets_in: &Matrix, p: &Params) -> Vec<(
             continue;
         }
         clear(&mut rem, start, end, f);
-        notes.push((start, end, f, mean(start, end, f)));
+        // ¿El modelo predice de verdad un inicio aquí (no solo inferido de cambios de amplitud)?
+        let strong = (start.saturating_sub(1)..=(start + 1).min(n - 1)).any(|t| onsets_in.get(t, f) >= p.onset_threshold);
+        notes.push((start, end, f, mean(start, end, f), strong));
     }
 
     if p.melodia {
@@ -188,7 +193,7 @@ pub fn frames_to_notes(frames: &Matrix, onsets_in: &Matrix, p: &Params) -> Vec<(
             if i_end - i_start <= min_len {
                 continue;
             }
-            notes.push((i_start as usize, i_end as usize, f, mean(i_start as usize, i_end as usize, f)));
+            notes.push((i_start as usize, i_end as usize, f, mean(i_start as usize, i_end as usize, f), false));
         }
     }
     notes
@@ -204,14 +209,15 @@ pub fn frame_time(frame: usize) -> f64 {
     (w * hop + j * FFT_HOP) as f64 / SAMPLE_RATE as f64
 }
 
-pub fn to_events(frame_notes: &[(usize, usize, usize, f32)]) -> Vec<NoteEvent> {
+pub fn to_events(frame_notes: &[(usize, usize, usize, f32, bool)]) -> Vec<NoteEvent> {
     let mut v: Vec<NoteEvent> = frame_notes
         .iter()
-        .map(|&(s, e, f, a)| NoteEvent {
+        .map(|&(s, e, f, a, on)| NoteEvent {
             start: frame_time(s),
             end: frame_time(e),
             pitch: (f as i32 + MIDI_OFFSET) as u8,
             amplitude: a,
+            onset: on,
         })
         .collect();
     v.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap().then(a.pitch.cmp(&b.pitch)));

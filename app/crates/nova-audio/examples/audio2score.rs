@@ -11,11 +11,18 @@ fn main() {
         eprintln!("ERROR: {e}");
         std::process::exit(1);
     });
-    let raw: Vec<RawNote> = notes.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude }).collect();
+    let raw: Vec<RawNote> = notes.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
     let mut opt = QuantizeOptions::default();
     opt.tempo = a.get(3).and_then(|s| s.parse().ok());
     if let Some(v) = a.get(4).and_then(|s| s.parse().ok()) {
         opt.min_amplitude = v;
+        opt.min_relative = None;
+    }
+    if let Some(v) = std::env::var("NOVA_VOICES").ok().and_then(|s| s.parse().ok()) {
+        opt.max_voices = v;
+    }
+    if let Some(v) = std::env::var("NOVA_LEGATO").ok().and_then(|s| s.parse().ok()) {
+        opt.legato_ticks = v;
     }
     match notes_to_score(&raw, &opt) {
         Ok(r) => {
