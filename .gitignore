@@ -5,3 +5,9 @@ dist/
 app/src-tauri/gen/
 # local tooling output
 *.log
+
+# grabaciones del usuario para pruebas (con derechos de autor): no versionar
+*.mp3
+*.wav
+*.flac
+*.m4a
