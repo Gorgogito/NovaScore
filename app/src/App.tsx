@@ -714,7 +714,8 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
   const [auto, setAuto] = createSignal(true);
   const [tempo, setTempo] = createSignal(100);
   const [time, setTime] = createSignal("4/4");
-  const [amp, setAmp] = createSignal(0.5);
+  const [amp, setAmp] = createSignal(0.65);
+  const [voices, setVoices] = createSignal(1);
   const name = () => props.path.split(/[\\/]/).pop() ?? props.path;
   return (
     <div class="modal" onClick={props.onCancel}>
@@ -724,7 +725,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
         onSubmit={(e) => {
           e.preventDefault();
           const [num, den] = time().split("/").map(Number);
-          props.onImport(props.path, { minAmplitude: amp(), tempo: auto() ? undefined : tempo(), num, den });
+          props.onImport(props.path, { minRelative: amp(), tempo: auto() ? undefined : tempo(), num, den, maxVoices: voices() });
         }}
       >
         <h2>Importar audio</h2>
@@ -745,10 +746,16 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
             <For each={["2/4", "3/4", "4/4", "5/4", "6/8", "9/8", "12/8", "2/2", "3/8"]}>{(t) => <option>{t}</option>}</For>
           </select>
         </label>
-        <label>Sensibilidad: se descartan notas con amplitud menor que {amp().toFixed(2)}
-          <input type="range" min="0.2" max="0.8" step="0.05" value={amp()} onInput={(e) => setAmp(Number(e.currentTarget.value))} />
+        <label>Voces por pentagrama
+          <select value={voices()} onChange={(e) => setVoices(Number(e.currentTarget.value))}>
+            <option value="1">1 (más limpio)</option>
+            <option value="2">2 (separa notas largas)</option>
+          </select>
         </label>
-        <p>Menos amplitud = más notas, pero con más falsas (armónicos). Es un borrador: revísalo.</p>
+        <label>Sensibilidad: se descartan las notas que suenan menos de {Math.round(amp() * 100)} % de lo que suenan las fuertes
+          <input type="range" min="0.4" max="0.9" step="0.05" value={amp()} onInput={(e) => setAmp(Number(e.currentTarget.value))} />
+        </label>
+        <p>Un porcentaje menor = más notas, pero con más falsas (armónicos). Es un borrador: revísalo.</p>
         <div class="actions">
           <button type="button" onClick={props.onCancel}>Cancelar</button>
           <button type="submit" class="primary">Transcribir</button>

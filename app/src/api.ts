@@ -38,7 +38,7 @@ export interface Playback {
 }
 type Imported = { score: Score; warnings: string[] };
 /** Opciones de la transcripción de audio; sin un campo se usa el valor automático. */
-export type AudioOptions = { minAmplitude?: number; tempo?: number; num?: number; den?: number };
+export type AudioOptions = { minAmplitude?: number; minRelative?: number; tempo?: number; num?: number; den?: number; maxVoices?: number };
 
 export const api = {
   getScore: () => invoke<Score>("get_score"),
