@@ -38,10 +38,33 @@ pub const PIANO_MODEL_FILE: &str = "piano.onnx";
 pub const PIANO_URL: &str = "https://github.com/Gorgogito/NovaScore/releases/download/models-v1/piano.onnx";
 pub const PIANO_SHA256: &str = "2b43528170ada21dc95da555b39f9926239ebd5caec061daac8614d36eb59546";
 pub const PIANO_SIZE: u64 = 98_684_797;
+/// Mensaje (y marca) de una descarga cancelada por el usuario.
+pub const CANCELLED: &str = "Descarga cancelada.";
+
+/// Borra el modelo de piano instalado en la carpeta de datos (se puede volver a descargar).
+/// No toca rutas indicadas con `NOVASCORE_PIANO_MODEL` (son del usuario).
+pub fn delete_piano_model(models_dir: &std::path::Path) -> Result<(), String> {
+    if std::env::var_os("NOVASCORE_PIANO_MODEL").is_some() {
+        return Err("El modelo se indica con NOVASCORE_PIANO_MODEL: bórralo a mano.".into());
+    }
+    let p = models_dir.join(PIANO_MODEL_FILE);
+    match std::fs::remove_file(&p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("No se pudo borrar {}: {e}", p.display())),
+    }
+}
 
 /// Descarga `url` a `dest` comprobando tamaño y SHA-256; escribe en `dest.part` y renombra al final,
 /// así nunca queda un modelo a medias. `progress(descargado, total)` se llama cada ~256 KB.
-pub fn download_verified(url: &str, dest: &std::path::Path, sha256: &str, size: u64, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
+pub fn download_verified(
+    url: &str,
+    dest: &std::path::Path,
+    sha256: &str,
+    size: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     if let Some(dir) = dest.parent() {
@@ -57,6 +80,9 @@ pub fn download_verified(url: &str, dest: &std::path::Path, sha256: &str, size: 
     let (mut done, mut last) = (0u64, 0u64);
     let result = (|| -> Result<(), String> {
         loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(CANCELLED.into());
+            }
             let n = reader.read(&mut buf).map_err(|e| format!("Descarga interrumpida: {e}"))?;
             if n == 0 {
                 break;
@@ -151,6 +177,72 @@ pub fn audio_to_score(path: &str, o: &AudioImportOptions, models_dir: &std::path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Servidor HTTP local que sirve `body` (para probar descarga, cancelación y suma sin red).
+    fn serve(body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut b = [0u8; 1024];
+                let _ = c.read(&mut b);
+                let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                for ch in body.chunks(16 * 1024) {
+                    if c.write_all(ch).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        format!("http://{addr}/m.onnx")
+    }
+
+    fn sha(b: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn download_local_ok_cancel_and_corrupt() {
+        let dir = std::env::temp_dir().join("novascore-test-dl");
+        let _ = std::fs::remove_dir_all(&dir);
+        let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8).collect();
+        // correcta
+        let dest = dir.join("ok.onnx");
+        download_verified(&serve(body.clone()), &dest, &sha(&body), body.len() as u64, &AtomicBool::new(false), |_, _| {}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        // cancelada a mitad: no queda ni el modelo ni el .part
+        let dest = dir.join("cancel.onnx");
+        let flag = AtomicBool::new(false);
+        let e = download_verified(&serve(body.clone()), &dest, &sha(&body), body.len() as u64, &flag, |d, _| {
+            if d > 300_000 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap_err();
+        assert_eq!(e, CANCELLED);
+        assert!(!dest.exists() && !dest.with_extension("part").exists());
+        // suma incorrecta: se rechaza
+        let dest = dir.join("bad.onnx");
+        let e = download_verified(&serve(body.clone()), &dest, &"0".repeat(64), body.len() as u64, &AtomicBool::new(false), |_, _| {}).unwrap_err();
+        assert!(e.contains("SHA-256"), "{e}");
+        assert!(!dest.exists() && !dest.with_extension("part").exists());
+    }
+
+    #[test]
+    fn delete_model_removes_file_and_is_idempotent() {
+        if std::env::var_os("NOVASCORE_PIANO_MODEL").is_some() {
+            return;
+        }
+        let dir = std::env::temp_dir().join("novascore-test-del");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(PIANO_MODEL_FILE), b"x").unwrap();
+        delete_piano_model(&dir).unwrap();
+        assert!(!dir.join(PIANO_MODEL_FILE).exists());
+        delete_piano_model(&dir).unwrap();
+    }
 
     /// Descarga real del modelo (98 MB); se ejecuta a mano: `cargo test -- --ignored download`.
     #[test]
@@ -159,7 +251,7 @@ mod tests {
         let dest = std::env::temp_dir().join("novascore-test-models").join(PIANO_MODEL_FILE);
         let _ = std::fs::remove_file(&dest);
         let mut last = 0;
-        download_verified(PIANO_URL, &dest, PIANO_SHA256, PIANO_SIZE, |d, t| {
+        download_verified(PIANO_URL, &dest, PIANO_SHA256, PIANO_SIZE, &AtomicBool::new(false), |d, t| {
             last = d;
             assert!(d <= t);
         })
@@ -172,7 +264,7 @@ mod tests {
     fn download_rejects_bad_url_and_leaves_no_file() {
         let dest = std::env::temp_dir().join("novascore-test-models").join("x.onnx");
         let _ = std::fs::remove_file(&dest);
-        assert!(download_verified("http://127.0.0.1:1/nada", &dest, "00", 1, |_, _| {}).is_err());
+        assert!(download_verified("http://127.0.0.1:1/nada", &dest, "00", 1, &AtomicBool::new(false), |_, _| {}).is_err());
         assert!(!dest.exists() && !dest.with_extension("part").exists());
     }
 

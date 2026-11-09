@@ -12,3 +12,4 @@ app/src-tauri/gen/
 *.flac
 *.m4a
 artefactos/
+app/src-tauri/resources/

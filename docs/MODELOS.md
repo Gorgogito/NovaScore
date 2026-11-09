@@ -18,7 +18,9 @@
 - Probado: descarga real (test `--ignored download_real_model`, 10 s) y flujo completo en la interfaz (descargar → motor piano → transcribir Chopin, 1408 notas).
 - `ureq` está fijado a 3.1.4 en `Cargo.lock` (la 3.5.1 pide `webpki-roots` 1.0.10, no disponible en este índice).
 
+- **Cancelar y borrar** (2026-11-09): `cancel_piano_download` activa una bandera que `download_verified` comprueba en cada bloque (borra el `.part` y devuelve «Descarga cancelada.»); `delete_piano_model` borra el modelo de la carpeta de datos (no toca rutas de `NOVASCORE_PIANO_MODEL`). En el diálogo: «Cancelar descarga» mientras se descarga y «Borrar modelo de piano» con confirmación en dos pasos. Probado en la interfaz real: borrar (No conserva, Sí borra), cancelar al 27 % (sin archivos a medias, sin error visible), volver a descargar (mismo SHA-256). Tests: servidor HTTP local con descarga correcta, cancelada y de suma incorrecta; borrado idempotente.
+- **`DirectML.dll` en el instalador** (2026-11-09): `src-tauri/build.rs` copia la DLL que `ort` descarga (primero `target/<perfil>/`, luego la caché `%LOCALAPPDATA%/ort.pyke.io`) a `src-tauri/resources/` (ignorada por git) y `bundle.resources` la pone junto al ejecutable. Comprobado en el script del instalador NSIS (`File ... DirectML.dll` y su desinstalación); instalador de 51 MB. **No se ha ejecutado el instalador** (cambia el equipo): falta comprobar en una instalación real que el motor usa la GPU. Licencia: Microsoft publica `Microsoft.AI.DirectML` como paquete redistribuible y su repositorio es MIT, pero **no he podido leer el texto de licencia del binario del paquete NuGet**: verificarlo antes de publicar un instalador.
+
 ## Pendiente
-- Empaquetar `DirectML.dll` junto al ejecutable en el instalador (ort la copia a `target/`).
-- Botón para cancelar la descarga y para borrar el modelo instalado.
+- Instalar el `.exe` de NSIS en una máquina limpia y comprobar que usa la GPU (y que sin la DLL cae a CPU).
 - Probar en otra máquina/GPU (solo RTX 3050 probada) y sin conexión (mensaje de error).

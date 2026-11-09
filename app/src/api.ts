@@ -96,5 +96,7 @@ export const api = {
   importMidi: (path: string) => invoke<Imported>("import_midi", { path }),
   pianoModelStatus: () => invoke<string | null>("piano_model_status"),
   downloadPianoModel: () => invoke<string>("download_piano_model"),
+  cancelPianoDownload: () => invoke<void>("cancel_piano_download"),
+  deletePianoModel: () => invoke<void>("delete_piano_model"),
   importAudio: (path: string, options: AudioOptions) => invoke<Imported>("import_audio", { path, options }),
 };

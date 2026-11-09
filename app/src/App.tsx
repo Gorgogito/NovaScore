@@ -730,11 +730,23 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
       setPianoModel(await api.downloadPianoModel());
       setEngine("piano");
     } catch (e) {
-      setDlError(String(e));
+      // una cancelación del usuario no es un error que mostrar
+      if (!String(e).includes("cancelada")) setDlError(String(e));
     } finally {
       un();
       setDl(null);
     }
+  };
+  const [confirmDel, setConfirmDel] = createSignal(false);
+  const deleteModel = async () => {
+    try {
+      await api.deletePianoModel();
+      setPianoModel(null);
+      if (engine() === "piano") setEngine("general");
+    } catch (e) {
+      setDlError(String(e));
+    }
+    setConfirmDel(false);
   };
   const name = () => props.path.split(/[\\/]/).pop() ?? props.path;
   return (
@@ -762,6 +774,24 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
             <button type="button" disabled={dl() !== null} onClick={downloadModel}>
               {dl() ? `Descargando… ${Math.round((dl()!.done / dl()!.total) * 100)} %` : "Descargar modelo de piano"}
             </button>
+            <Show when={dl() !== null}>
+              {" "}<button type="button" onClick={() => api.cancelPianoDownload()}>Cancelar descarga</button>
+            </Show>
+          </p>
+          <Show when={dlError()}><p class="error">{dlError()}</p></Show>
+        </Show>
+        <Show when={pianoModel()}>
+          <p>
+            Modelo de piano instalado (98 MB).{" "}
+            <Show when={!confirmDel()} fallback={
+              <>
+                ¿Borrarlo? Se puede volver a descargar.{" "}
+                <button type="button" onClick={deleteModel}>Sí, borrar</button>{" "}
+                <button type="button" onClick={() => setConfirmDel(false)}>No</button>
+              </>
+            }>
+              <button type="button" onClick={() => setConfirmDel(true)}>Borrar modelo de piano</button>
+            </Show>
           </p>
           <Show when={dlError()}><p class="error">{dlError()}</p></Show>
         </Show>

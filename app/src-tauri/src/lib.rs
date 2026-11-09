@@ -258,20 +258,36 @@ fn piano_model_status(app: tauri::AppHandle) -> Option<String> {
     p.is_file().then(|| p.display().to_string())
 }
 
+/// Bandera de cancelación de la descarga en curso.
+static PIANO_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Descarga el modelo de piano (hilo aparte). Emite `piano-download` con `{done, total}` en bytes.
 #[tauri::command]
 async fn download_piano_model(app: tauri::AppHandle) -> Result<String, String> {
     let dest = audio::piano_model_path(&models_dir(&app));
     let handle = app.clone();
     let d = dest.clone();
+    PIANO_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
     tauri::async_runtime::spawn_blocking(move || {
-        audio::download_verified(audio::PIANO_URL, &d, audio::PIANO_SHA256, audio::PIANO_SIZE, |done, total| {
+        audio::download_verified(audio::PIANO_URL, &d, audio::PIANO_SHA256, audio::PIANO_SIZE, &PIANO_CANCEL, |done, total| {
             let _ = handle.emit("piano-download", serde_json::json!({ "done": done, "total": total }));
         })
     })
     .await
     .map_err(|e| format!("La descarga se interrumpió: {e}"))??;
     Ok(dest.display().to_string())
+}
+
+/// Cancela la descarga del modelo de piano en curso (no deja archivos a medias).
+#[tauri::command]
+fn cancel_piano_download() {
+    PIANO_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Borra el modelo de piano instalado (libera 98 MB; se puede volver a descargar).
+#[tauri::command]
+fn delete_piano_model(app: tauri::AppHandle) -> Result<(), String> {
+    audio::delete_piano_model(&models_dir(&app))
 }
 
 #[tauri::command]
@@ -442,7 +458,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())
