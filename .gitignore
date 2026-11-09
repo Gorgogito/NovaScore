@@ -11,3 +11,4 @@ app/src-tauri/gen/
 *.wav
 *.flac
 *.m4a
+artefactos/

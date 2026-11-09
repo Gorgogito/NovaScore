@@ -18,6 +18,9 @@ fn main() {
         opt.min_amplitude = v;
         opt.min_relative = None;
     }
+    if let Some(v) = std::env::var("NOVA_REL").ok().and_then(|s| s.parse().ok()) {
+        opt.min_relative = Some(v);
+    }
     if let Some(v) = std::env::var("NOVA_VOICES").ok().and_then(|s| s.parse().ok()) {
         opt.max_voices = v;
     }
@@ -30,6 +33,18 @@ fn main() {
                 eprintln!("aviso: {w}");
             }
             std::fs::write(&a[2], nova_core::io::export_musicxml(&r.score)).unwrap();
+            let (mut notes, mut rests) = (0, 0);
+            for p in &r.score.parts {
+                for m in &p.measures {
+                    for e in m.events.iter().chain(m.voices.iter().flatten()) {
+                        match e.content {
+                            nova_core::Content::Rest => rests += 1,
+                            _ => notes += 1,
+                        }
+                    }
+                }
+            }
+            eprintln!("resumen: {notes} notas, {rests} silencios");
             eprintln!("{} pentagramas, {} compases, tempo {}, alteraciones {}", r.score.parts.len(), r.score.parts[0].measures.len(), r.score.tempo, r.score.fifths);
         }
         Err(e) => {

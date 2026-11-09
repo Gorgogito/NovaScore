@@ -62,7 +62,7 @@ impl Default for QuantizeOptions {
         QuantizeOptions {
             title: "Transcripción de audio".into(),
             min_amplitude: 0.5,
-            min_relative: Some(0.65),
+            min_relative: Some(0.5),
             tempo: None,
             time: TimeSig { num: 4, den: 4 },
             program: 0,
@@ -453,7 +453,7 @@ fn remove_harmonics(notes: &[RawNote], max_ratio: f32) -> (Vec<RawNote>, usize) 
 
 /// Quita notas cortas y débiles cuya clase de altura no está en la tonalidad (ni en las
 /// alteraciones habituales del modo menor).
-fn remove_chromatic(notes: &[RawNote], fifths: i8) -> (Vec<RawNote>, usize) {
+fn remove_chromatic(notes: &[RawNote], fifths: i8, pct: usize) -> (Vec<RawNote>, usize) {
     let tonic = ((fifths as i32 * 7).rem_euclid(12)) as u8;
     let mut allowed = [false; 12];
     for s in [0, 2, 4, 5, 7, 9, 11] {
@@ -464,7 +464,7 @@ fn remove_chromatic(notes: &[RawNote], fifths: i8) -> (Vec<RawNote>, usize) {
     allowed[((minor + 6) % 12) as usize] = true; // sexto grado melódico
     let mut amps: Vec<f32> = notes.iter().map(|n| n.amplitude).collect();
     amps.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let weak = amps.get(amps.len() * 6 / 10).copied().unwrap_or(0.0);
+    let weak = amps.get(amps.len() * pct / 100).copied().unwrap_or(0.0);
     let out: Vec<RawNote> = notes
         .iter()
         .copied()
@@ -474,14 +474,36 @@ fn remove_chromatic(notes: &[RawNote], fifths: i8) -> (Vec<RawNote>, usize) {
     (out, removed)
 }
 
+/// Parámetros de la limpieza (los valores por defecto son los calibrados; ver `docs/CALIBRACION.md`).
+#[derive(Debug, Clone, Copy)]
+pub struct CleanParams {
+    /// Margen de tonalidad por debajo del cual se considera dudosa.
+    pub key_min_margin: f64,
+    /// Correlación de tonalidad por debajo de la cual se considera dudosa.
+    pub key_min_corr: f64,
+    /// Razón de amplitud máxima armónico/fundamental para borrar un armónico.
+    pub harmonic_ratio: f32,
+    /// Percentil (0-100) de amplitud bajo el cual una nota cromática débil se borra.
+    pub chromatic_pct: usize,
+}
+
+impl Default for CleanParams {
+    fn default() -> Self {
+        CleanParams { key_min_margin: KEY_MIN_MARGIN, key_min_corr: KEY_MIN_CORR, harmonic_ratio: 0.6, chromatic_pct: 60 }
+    }
+}
+
 /// Limpieza previa a la cuantización. Devuelve las notas y cuántas se unieron / quitaron.
 pub fn clean_notes(notes: &[RawNote]) -> (Vec<RawNote>, CleanStats) {
+    clean_notes_with(notes, &CleanParams::default())
+}
+
+pub fn clean_notes_with(notes: &[RawNote], p: &CleanParams) -> (Vec<RawNote>, CleanStats) {
     let (a, merged) = merge_fragments(notes, 0.12);
-    let (b, harmonics) = remove_harmonics(&a, 0.6);
+    let (b, harmonics) = remove_harmonics(&a, p.harmonic_ratio);
     let (fifths, corr, margin) = estimate_key(&b);
-    // Calibrado con tres grabaciones: margen 0,33 (Canon), 0,11 (Air) y 0,06 (Londonderry, dudosa).
-    let key_doubtful = margin < KEY_MIN_MARGIN || corr < KEY_MIN_CORR;
-    let (c, chromatic) = if key_doubtful { (b, 0) } else { remove_chromatic(&b, fifths) };
+    let key_doubtful = margin < p.key_min_margin || corr < p.key_min_corr;
+    let (c, chromatic) = if key_doubtful { (b, 0) } else { remove_chromatic(&b, fifths, p.chromatic_pct) };
     (c, CleanStats { merged, harmonics, chromatic, key_doubtful })
 }
 

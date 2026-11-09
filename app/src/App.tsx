@@ -714,7 +714,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
   const [auto, setAuto] = createSignal(true);
   const [tempo, setTempo] = createSignal(100);
   const [time, setTime] = createSignal("4/4");
-  const [amp, setAmp] = createSignal(0.65);
+  const [amp, setAmp] = createSignal(0.5);
   const [voices, setVoices] = createSignal(1);
   const name = () => props.path.split(/[\\/]/).pop() ?? props.path;
   return (
