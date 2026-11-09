@@ -57,3 +57,27 @@ Límites: no se detectan compases compuestos (6/8, 9/8, 12/8: el pulso sigue sie
 **Probado y descartado**: elegir entre los 5 mejores picos usando la confianza de la detección de compás como evidencia extra (puntuación × (0,5 + confianza)). Estabilizaba el tempo pero movía grabaciones sin motivo verificable (Chopin 100→71, Love Story 100→66, Autumn Leaves 95→87), porque la confianza de compás tampoco discrimina bien entre niveles métricos. Y puntuar el apoyo armónico (puntuación a 2p, p/2): el paisaje es demasiado plano.
 
 **Límites que quedan**: (1) con motores distintos el tempo puede diferir (Chopin 100 con Basic Pitch y 92 con piano: ambos coherentes con el rubato); (2) el nivel métrico (negra / corchea / blanca) sigue siendo ambiguo y se decide por el prior (~100 negras/min): para Canon, Chopin y Londonderry el usuario puede forzar el tempo en el diálogo; (3) la «verdad» de tempo solo se puede estimar con el alineamiento DTW, que es fiable para Chopin y apenas para Canon (Londonderry: inservible, la grabación son variaciones de 637 s frente a 72 compases).
+
+## Banco con verdad conocida (`eval_scores`) — resuelve la falta de referencias
+Problema anterior: solo Chopin servía como referencia (las demás partituras son otros arreglos que la grabación). Solución: **renderizar las propias partituras a audio** con el SoundFont de MuseScore (`oxisynth`, solo dev-dependency de los ejemplos: LGPL-2.1, no se distribuye; el SoundFont es MIT) y comparar la transcripción con la partitura original, que ahora es la verdad exacta (tempo, compás, tonalidad y cada nota en su tick). Sin rubato (tempo constante), 32 compases, 1 s de silencio inicial. 8 partituras: Londonderry, Canon Rock (guitarra eléctrica + cello + batería), Canon (fácil, completo y en Do), Chopin, Für Elise, Air. `cargo run --release --example eval_scores -- artefactos/partituras/*.mscz` (`NOVA_PIANO=modelo.onnx` para el motor de piano; `NOVA_HARM`, `NOVA_CHROMA`, `NOVA_MARGIN`, `NOVA_REL`, `NOVA_NOCLEAN`, `NOVA_NOTUPLETS`, `NOVA_TOL`…). Guarda las transcripciones en `target/evalset/` para experimentar sin repetir el audio (`key_eval`).
+
+| Métrica | Basic Pitch | Piano |
+|---|---|---|
+| Tempo correcto (módulo octavas, ±4 %) | 8/8 | 8/8 |
+| Compás | 6/8 | 6/8 (fallan Chopin 12/8→4/4 y Für Elise 3/8→3/4) |
+| Tonalidad | **8/8** (antes 5/8) | **8/8** (antes 6/8) |
+| F1 de notas, posición exacta ±60 ticks | 0,77 | **0,855** |
+| F1 en las 5 piezas de piano real (sin Canon Rock) | 0,70–0,91 (Canon 0,53) | **0,94–1,00** |
+
+- **El modelo de piano queda confirmado con datos exactos**: 0,97–1,00 en Canon fácil, Air, Canon en Do, Für Elise y Londonderry, frente al 0,53–0,94 de Basic Pitch. En Canon Rock (guitarra y batería) no sirve (0,03): es un modelo solo de piano.
+- **Tonalidad**: los perfiles de Krumhansl fallaban en dominantes y menores (Londonderry A→E, Air G→D, Für Elise Am→E): 62 % (BP) y 75 % (piano) de acierto en las 8 piezas × 12 transposiciones. Los **perfiles de Temperley dan 96/96 (100 %) con ambos motores**; ahora son el valor por defecto (`KeyParams`). Los pesos extra del bajo o del final solo ayudaban a veces (final ×6: 100 % con piano, 75 % con BP). Con las 11 grabaciones reales ambos perfiles dan la misma tonalidad; los márgenes de Temperley son más uniformes (0,16–0,28), así que el umbral de «tonalidad dudosa» (0,08) deja de distinguir casos: queda como red de seguridad. Sin errores de tonalidad en el banco no se puede calibrar mejor.
+- **Umbral relativo** (Basic Pitch): 0,3 → 0,736; 0,4 → 0,737; 0,5 → 0,749; 0,65 → 0,747. Se mantiene 0,5.
+- **Limpieza** (Basic Pitch / piano, 20 compases): sin limpieza 0,799 / 0,852; por defecto 0,794 / 0,851; armónicos ≤0,4 0,798, ≤0,8 **0,758** (borra notas reales); cromático percentil 30 / 80: 0,796 / 0,793; margen de tonalidad 0 (siempre quitar) 0,792 / 0,849, 9 (nunca) 0,796 / 0,852. **La limpieza es neutra en audio limpio** (su razón de ser son las grabaciones reales ruidosas: silencios espurios, armónicos) y quitar cromáticas con un margen bajo no ayuda: se conservan los valores y no se endurecen.
+- **Tresillos**: activar/desactivar no cambia el F1 (0,851 = 0,851): estas partituras no los tienen en los compases evaluados, así que **no hay falsos tresillos** en 8 piezas, pero tampoco se calibran las penalizaciones: faltan partituras con tresillos, quintillos o seisillos.
+- **Compás**: los 4/4 salen bien; los compuestos (Chopin 12/8) y 3/8 no se detectan solos (ver sección de compases compuestos).
+
+## Lo que sigue sin calibrar
+- Penalizaciones de tresillos/quintillos/seisillos (hacen falta partituras con ellos; `@triplets32` y similares siguen en `roundtrip`).
+- Rubato: el banco usa tempo constante. Se podría deformar el audio con una curva de tempo (`roundtrip` ya tiene `NOVA_RUBATO` con partituras sintéticas).
+- Compases distintos de 4/4 y anacrusas reales: el banco apenas tiene (Für Elise 3/8, Chopin 12/8).
+- Instrumentos que no son piano: solo Canon Rock (0,30 con Basic Pitch).

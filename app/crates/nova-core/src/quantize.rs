@@ -64,6 +64,8 @@ pub struct QuantizeOptions {
     /// Seguir el pulso con un conjunto fijo de notas (las más fuertes de todas las detectadas), de modo
     /// que el tempo no dependa del umbral de amplitud elegido por el usuario.
     pub robust_tempo: bool,
+    /// Ajustes de la limpieza previa (armónicos, notas cromáticas, margen de tonalidad).
+    pub clean_params: CleanParams,
 }
 
 impl Default for QuantizeOptions {
@@ -85,6 +87,7 @@ impl Default for QuantizeOptions {
             auto_pickup: false,
             compound: false,
             robust_tempo: false,
+            clean_params: CleanParams::default(),
         }
     }
 }
@@ -169,13 +172,48 @@ pub fn estimate_fifths(notes: &[RawNote]) -> i8 {
 /// margen es la diferencia con la mejor tonalidad de otro armado (la relativa mayor/menor cuenta
 /// como la misma). Un margen pequeño o una correlación baja indican una tonalidad dudosa.
 pub fn estimate_key(notes: &[RawNote]) -> (i8, f64, f64) {
-    const MAJOR: [f64; 12] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-    const MINOR: [f64; 12] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+    estimate_key_with(notes, &KeyParams::default())
+}
+
+/// Ajustes de la estimación de tonalidad.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyParams {
+    /// Peso de las notas graves (< E3): la tónica y la dominante suelen estar en el bajo.
+    pub bass_gain: f64,
+    /// Peso de las notas del último 8 % de la pieza (el final suele ser la tónica).
+    pub end_gain: f64,
+    /// Perfiles de Temperley (por defecto: 96/96 en el banco `eval_scores`) en vez de los de Krumhansl (60-72/96).
+    pub temperley: bool,
+}
+
+impl Default for KeyParams {
+    fn default() -> Self {
+        KeyParams { bass_gain: 1.0, end_gain: 1.0, temperley: true }
+    }
+}
+
+pub fn estimate_key_with(notes: &[RawNote], p: &KeyParams) -> (i8, f64, f64) {
+    let mut major: [f64; 12] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+    let mut minor: [f64; 12] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+    if p.temperley {
+        major = [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0];
+        minor = [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0];
+    }
     // alteraciones de la tonalidad mayor cuya tónica es la clase de altura i
     const MAJOR_FIFTHS: [i8; 12] = [0, -5, 2, -3, 4, -1, 6, 1, -4, 3, -2, 5];
+    let end = notes.iter().map(|n| n.end).fold(0.0, f64::max);
+    let begin = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
+    let tail_from = end - 0.08 * (end - begin).max(0.0);
     let mut hist = [0.0f64; 12];
     for n in notes {
-        hist[(n.pitch % 12) as usize] += (n.end - n.start).max(0.05) * n.amplitude as f64;
+        let mut w = (n.end - n.start).max(0.05) * n.amplitude as f64;
+        if n.pitch < 53 {
+            w *= p.bass_gain;
+        }
+        if n.start >= tail_from {
+            w *= p.end_gain;
+        }
+        hist[(n.pitch % 12) as usize] += w;
     }
     if hist.iter().sum::<f64>() <= 0.0 {
         return (0, 0.0, 0.0);
@@ -194,7 +232,7 @@ pub fn estimate_key(notes: &[RawNote]) -> (i8, f64, f64) {
     // mejor correlación por armado (mayor o menor relativa)
     let mut by_fifths: std::collections::BTreeMap<i8, f64> = std::collections::BTreeMap::new();
     for tonic in 0..12 {
-        for (c, f) in [(corr(&MAJOR, tonic), MAJOR_FIFTHS[tonic]), (corr(&MINOR, tonic), MAJOR_FIFTHS[(tonic + 3) % 12])] {
+        for (c, f) in [(corr(&major, tonic), MAJOR_FIFTHS[tonic]), (corr(&minor, tonic), MAJOR_FIFTHS[(tonic + 3) % 12])] {
             let e = by_fifths.entry(f).or_insert(f64::MIN);
             if c > *e {
                 *e = c;
@@ -751,7 +789,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     }
 
     let notes = if o.clean {
-        let (clean, st) = clean_notes(&notes);
+        let (clean, st) = clean_notes_with(&notes, &o.clean_params);
         if st.key_doubtful {
             warnings.push("La tonalidad estimada es dudosa: no se eliminaron notas cromáticas (revisa las alteraciones).".into());
         }
@@ -781,7 +819,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         amps.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let p90 = amps.get(amps.len() * 9 / 10).copied().unwrap_or(0.0);
         let c: Vec<RawNote> = raw.iter().copied().filter(|n| n.amplitude >= TRACK_REL * p90 && n.end > n.start && (21..=108).contains(&n.pitch)).collect();
-        if o.clean && !c.is_empty() { clean_notes(&c).0 } else { c }
+        if o.clean && !c.is_empty() { clean_notes_with(&c, &o.clean_params).0 } else { c }
     } else {
         notes.clone()
     };

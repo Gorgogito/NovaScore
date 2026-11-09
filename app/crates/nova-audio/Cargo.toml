@@ -11,3 +11,4 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm
 
 [dev-dependencies]
 nova-core = { path = "../nova-core" }
+oxisynth = { version = "0.1", features = ["sf3"] }
