@@ -132,6 +132,26 @@ fn dp(onsets: &[(f64, f32)], period: f64, tightness: f64) -> (Vec<f64>, f64) {
     (frames.into_iter().map(|f| f as f64 * DT).collect(), total)
 }
 
+/// Puntuación media por pulso del mejor camino con ese periodo (0 si hay menos de 4 pulsos).
+pub fn score_at(onsets: &[(f64, f32)], period: f64, tightness: f64) -> f64 {
+    let (b, total) = dp(onsets, period, tightness);
+    if b.len() >= 4 { total / b.len() as f64 } else { 0.0 }
+}
+
+/// Puntuación de cada periodo candidato (s) para diagnóstico: `(periodo, puntuación sin prior, pulsos)`.
+pub fn period_scores(onsets: &[(f64, f32)], tightness: f64) -> Vec<(f64, f64, usize)> {
+    let mut out = Vec::new();
+    let mut p = 0.35;
+    while p <= 1.2 {
+        let (b, total) = dp(onsets, p, tightness);
+        if b.len() >= 4 {
+            out.push((p, total / b.len() as f64, b.len()));
+        }
+        p *= 1.03;
+    }
+    out
+}
+
 /// Busca el pulso sin periodo de partida fiable: prueba periodos candidatos (≈ 50–170
 /// negras/min), puntúa cada camino (fuerza media de inicio por pulso × prior de tempo) y
 /// refina el mejor. Con `seed` se parte de ese periodo. Si el elegido supera las 120 negras/min

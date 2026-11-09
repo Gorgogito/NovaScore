@@ -4,7 +4,7 @@ use nova_core::quantize::{notes_to_score, QuantizeOptions, RawNote};
 use std::path::{Path, PathBuf};
 
 fn load(path: &Path) -> Vec<RawNote> {
-    let cache = PathBuf::from("target/cache").join(format!("{}.tsv", path.file_stem().unwrap().to_string_lossy()));
+    let cache = PathBuf::from("target/cache").join(format!("{}{}.tsv", path.file_stem().unwrap().to_string_lossy(), if std::env::var("NOVA_PIANO").is_ok() { "-piano" } else { "" }));
     if let Ok(s) = std::fs::read_to_string(&cache) {
         return s.lines().filter_map(|l| {
             let v: Vec<&str> = l.split('\t').collect();
@@ -26,7 +26,7 @@ fn main() {
         let raw = load(Path::new(&a));
         let mut line = format!("{:<44}", Path::new(&a).file_stem().unwrap().to_string_lossy().chars().take(42).collect::<String>());
         for r in rels {
-            let o = QuantizeOptions { min_relative: Some(r), ..Default::default() };
+            let o = QuantizeOptions { min_relative: Some(r), robust_tempo: std::env::var("NOVA_ROBUST").is_ok(), ..Default::default() };
             line += &match notes_to_score(&raw, &o) {
                 Ok(x) => format!("{:>8}", x.score.tempo),
                 Err(_) => format!("{:>8}", "-"),

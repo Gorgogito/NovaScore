@@ -21,6 +21,7 @@ fn main() {
     opt.auto_meter = std::env::var("NOVA_NOMETER").is_err();
     opt.auto_pickup = true;
     opt.compound = true;
+    opt.robust_tempo = true;
     if let Some((n, d)) = std::env::var("NOVA_TIME").ok().and_then(|s| s.split_once('/').map(|(a, b)| (a.parse().ok(), b.parse().ok()))) {
         if let (Some(n), Some(d)) = (n, d) {
             opt.time = nova_core::TimeSig { num: n, den: d };

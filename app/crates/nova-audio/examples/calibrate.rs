@@ -20,6 +20,7 @@ struct Piece {
     /// (inicio s, fin s, altura) de referencia
     refn: Vec<(f64, f64, u8)>,
     ref_fifths: i8,
+    ref_tempo: f64,
     /// frames de audio → segundo de referencia
     map: Vec<f64>,
     quality: f64,
@@ -160,6 +161,7 @@ fn load(audio: &str, score: &str) -> Piece {
         raw,
         refn,
         ref_fifths: sc.fifths,
+        ref_tempo: sc.tempo as f64,
         map: map_f.iter().map(|f| f * HOP).collect(),
         quality,
     }
@@ -208,6 +210,17 @@ fn main() {
             let (au, sc) = a.split_once('=').expect("formato audio=partitura");
             let p = load(au, sc);
             let (fifths, corr, margin) = estimate_key(&p.raw);
+            // tempo de la grabación según la pendiente del alineamiento (negras/min de la partitura)
+            let mut slopes: Vec<f64> = Vec::new();
+            let w = 10.0;
+            let mut a = 0.0;
+            while a + w < p.map.len() as f64 * HOP {
+                slopes.push((to_ref_time(&p, a + w) - to_ref_time(&p, a)) / w);
+                a += w / 2.0;
+            }
+            slopes.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let q = |f: f64| p.ref_tempo * slopes[((slopes.len() - 1) as f64 * f) as usize];
+            println!("  tempo por alineamiento (negras/min de la partitura): P25 {:.0} · mediana {:.0} · P75 {:.0}", q(0.25), q(0.5), q(0.75));
             println!("{}: {} notas detectadas, {} de referencia, calidad de alineación {:.3}, tonalidad ref {} / audio {} (corr {:.2}, margen {:.2})", p.name, p.raw.len(), p.refn.len(), p.quality, p.ref_fifths, fifths, corr, margin);
             p
         })

@@ -61,6 +61,9 @@ pub struct QuantizeOptions {
     pub auto_pickup: bool,
     /// Reconocer compases compuestos (6/8, 9/8, 12/8) cuando casi todos los pulsos se dividen en tres.
     pub compound: bool,
+    /// Seguir el pulso con un conjunto fijo de notas (las más fuertes de todas las detectadas), de modo
+    /// que el tempo no dependa del umbral de amplitud elegido por el usuario.
+    pub robust_tempo: bool,
 }
 
 impl Default for QuantizeOptions {
@@ -81,6 +84,7 @@ impl Default for QuantizeOptions {
             auto_meter: false,
             auto_pickup: false,
             compound: false,
+            robust_tempo: false,
         }
     }
 }
@@ -697,6 +701,8 @@ const METER_MIN_CONFIDENCE: f64 = 0.15;
 const METER_CHORD_GAIN: f64 = 0.15;
 /// Parte mínima de los pulsos con notas que deben dividirse en tres para suponer compás compuesto.
 const COMPOUND_MIN_SHARE: f64 = 0.5;
+/// Umbral relativo (a P90 de la amplitud) del conjunto fijo de notas con el que se sigue el pulso.
+const TRACK_REL: f32 = 0.5;
 const METER_PRIOR_3: f64 = 0.10;
 const METER_PRIOR_2: f64 = 0.15;
 const PICKUP_PRIOR: f64 = 0.15;
@@ -768,10 +774,22 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     let onsets: Vec<(f64, f32)> = notes.iter().map(|n| (n.start, n.amplitude)).collect();
     let first = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
     let last = notes.iter().map(|n| n.end).fold(0.0, f64::max);
+    // con `robust_tempo` el pulso se busca en un conjunto fijo de notas (las más fuertes de todas
+    // las detectadas), de modo que el tempo no cambia al mover el umbral de amplitud
+    let track_notes: Vec<RawNote> = if o.robust_tempo {
+        let mut amps: Vec<f32> = raw.iter().map(|n| n.amplitude).collect();
+        amps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p90 = amps.get(amps.len() * 9 / 10).copied().unwrap_or(0.0);
+        let c: Vec<RawNote> = raw.iter().copied().filter(|n| n.amplitude >= TRACK_REL * p90 && n.end > n.start && (21..=108).contains(&n.pitch)).collect();
+        if o.clean && !c.is_empty() { clean_notes(&c).0 } else { c }
+    } else {
+        notes.clone()
+    };
+    let track_notes = if track_notes.len() >= 24 { track_notes } else { notes.clone() };
     // Con muy pocas notas el seguimiento no es fiable: se usa tempo constante.
-    let map = if o.follow_tempo && onsets.len() >= 24 {
+    let map = if o.follow_tempo && track_notes.len() >= 24 {
         let seed = o.tempo.map(|t| 60.0 / t.clamp(20.0, 300.0));
-        let w = accent_weights(&notes);
+        let w = accent_weights(&track_notes);
         let mut beats = find_beats(&w, seed, o.tightness);
         if forced_compound && seed.is_none() && beats.len() > 4 {
             // compás compuesto indicado sin tempo: el pulso es la negra con puntillo, ~1,5 veces el de la negra
@@ -1420,5 +1438,28 @@ mod tests {
     fn simple_meter_with_eighths_is_not_compound() {
         let r = notes_to_score(&metered(4, 24, 0, 96.0), &compound_opts(96.0)).unwrap();
         assert_eq!((r.score.time.num, r.score.time.den), (4, 4), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn robust_tempo_does_not_depend_on_the_amplitude_threshold() {
+        // compases de 4 tiempos a 96 con negras fuertes y corcheas suaves (amplitudes 0,9 / 0,45 / 0,25)
+        let b = 60.0 / 96.0;
+        let mut v = Vec::new();
+        for bar in 0..20 {
+            for k in 0..4 {
+                let t0 = 1.3 + (bar * 4 + k) as f64 * b;
+                v.push(RawNote { start: t0, end: t0 + b * 0.9, pitch: if k == 0 { 40 } else { 64 }, amplitude: if k == 0 { 0.9 } else { 0.6 }, onset: true });
+                v.push(RawNote { start: t0 + b / 2.0, end: t0 + b * 0.95, pitch: 67 + (k as u8 % 2), amplitude: if (bar + k) % 2 == 0 { 0.45 } else { 0.25 }, onset: true });
+            }
+        }
+        let tempo_with = |rel: f32| {
+            let o = QuantizeOptions { min_relative: Some(rel), robust_tempo: true, clean: false, triplets: false, ..Default::default() };
+            notes_to_score(&v, &o).unwrap().score.tempo
+        };
+        let reference = tempo_with(0.3);
+        for rel in [0.4, 0.5, 0.65, 0.8] {
+            assert_eq!(tempo_with(rel), reference, "umbral {rel}");
+        }
+        assert!((reference as i32 - 96).abs() <= 2 || (reference as i32 - 192).abs() <= 4 || (reference as i32 - 48).abs() <= 2, "{reference}");
     }
 }
