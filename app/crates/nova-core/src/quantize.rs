@@ -884,9 +884,10 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
                 }
                 pickup = g.pickup;
                 warnings.push(format!(
-                    "Compás {}/{} detectado (confianza {:.0} %){}.",
+                    "Compás {}/{} {} (confianza {:.0} %){}.",
                     time.num,
                     time.den,
+                    if o.auto_meter { "detectado" } else { "indicado" },
                     g.confidence * 100.0,
                     if pickup > 0 { format!("; anacrusa de {pickup} tiempo(s): el primer compás empieza con silencios") } else { String::new() }
                 ));
