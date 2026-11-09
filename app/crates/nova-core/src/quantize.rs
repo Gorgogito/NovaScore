@@ -857,7 +857,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     } else if o.compound && o.auto_meter && o.triplets {
         let tb = detect_tuplet_beats(&prov);
         let busy: std::collections::BTreeSet<u32> = prov.iter().map(|&t| (t / PPQ as f64) as u32).collect();
-        let triple = tb.iter().filter(|(b, &k)| (k == 3 || k == 6) && busy.contains(b)).count();
+        let triple = tb.iter().filter(|(b, &k)| k == 3 && busy.contains(b)).count();
         busy.len() >= 8 && triple as f64 >= COMPOUND_MIN_SHARE * busy.len() as f64
     } else {
         false

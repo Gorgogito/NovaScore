@@ -76,8 +76,13 @@ Problema anterior: solo Chopin servía como referencia (las demás partituras so
 - **Tresillos**: activar/desactivar no cambia el F1 (0,851 = 0,851): estas partituras no los tienen en los compases evaluados, así que **no hay falsos tresillos** en 8 piezas, pero tampoco se calibran las penalizaciones: faltan partituras con tresillos, quintillos o seisillos.
 - **Compás**: los 4/4 salen bien; los compuestos (Chopin 12/8) y 3/8 no se detectan solos (ver sección de compases compuestos).
 
+## Grupos irregulares (tresillos, quintillos, seisillos) en el banco
+`scripts/gen_tuplet_scores.py` genera MusicXML con verdad exacta: `Tresillos.musicxml` (línea de violín, c. 1-8 de `Tresillos.pdf`, transcrita a mano) y 6 melodías sintéticas en 4/4 (tresillos 3:2, quintillos 5:4, seisillos 6:4 en el 30 % y el 50 % de los tiempos). `eval_scores` ahora lee `.musicxml`. Resultados (piano, F1 con tolerancia 60 ticks): tresillos 0,97-0,98, quintillos 0,95-0,97, seisillos 0,93-0,96; Tresillos.pdf 0,91 (precisión 0,83 por notas repetidas del modelo); activar/desactivar grupos no cambia F1 (tolerancia amplia), tempo y compás 7/7 y tonalidad 7/7. Con Basic Pitch los quintillos y seisillos bajan a 0,77-0,89 por **notas no detectadas** (recall 0,69-0,85, notas de 120 ms), no por el cuantizador.
+- **Falso positivo hallado y corregido**: con un 50 % de tiempos en seisillos, la autodetección de compás compuesto saltaba (6/8, tempo ×1,5, F1 0,11) porque contaba los grupos de 6 como evidencia de compuesto. Ahora solo cuentan los de 3 (89 tests y banco completo sin cambios: 15 piezas, tempo 15/15, tonalidad 15/15, F1 medio 0,90).
+- `Quintillos.pdf`, `Nocturna.pdf` y `Love Story.pdf` **no** se usaron como verdad: sin OMR habría que transcribirlos a ojo (ligaduras y puntillos densos en Quintillos; Nocturna es un tango de bandoneón de 2/4 muy denso; Love Story es un arreglo de violín distinto de la grabación de Indila).
+
 ## Lo que sigue sin calibrar
-- Penalizaciones de tresillos/quintillos/seisillos (hacen falta partituras con ellos; `@triplets32` y similares siguen en `roundtrip`).
+- Penalizaciones de tresillos/quintillos/seisillos: el banco sintético no las discrimina (F1 igual con y sin grupos); haría falta una métrica de ritmo más estricta (tolerancia < 30 ticks) o grupos mezclados con subdivisiones binarias cercanas.
 - Rubato: el banco usa tempo constante. Se podría deformar el audio con una curva de tempo (`roundtrip` ya tiene `NOVA_RUBATO` con partituras sintéticas).
 - Compases distintos de 4/4 y anacrusas reales: el banco apenas tiene (Für Elise 3/8, Chopin 12/8).
 - Instrumentos que no son piano: solo Canon Rock (0,30 con Basic Pitch).

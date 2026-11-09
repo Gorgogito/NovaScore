@@ -77,7 +77,12 @@ fn main() {
     let (mut n, mut sf1, mut tempo_ok, mut meter_ok, mut key_ok) = (0, 0.0, 0, 0, 0);
     println!("{:<34} {:>22} {:>13} {:>9} {:>20}", "partitura", "tempo (ref → est, módulo 2^k)", "compás", "tonalidad", "notas P / R / F1");
     for path in std::env::args().skip(1) {
-        let sc = match import_mscz(&std::fs::read(&path).unwrap()) {
+        let imported = if path.ends_with(".musicxml") || path.ends_with(".xml") {
+            nova_core::io::import_musicxml(&std::fs::read_to_string(&path).unwrap())
+        } else {
+            import_mscz(&std::fs::read(&path).unwrap())
+        };
+        let sc = match imported {
             Ok(r) => r.score,
             Err(e) => {
                 println!("{path}: {e}");
