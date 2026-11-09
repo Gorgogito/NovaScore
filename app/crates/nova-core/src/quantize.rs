@@ -59,6 +59,8 @@ pub struct QuantizeOptions {
     pub auto_meter: bool,
     /// Detectar la anacrusa (tiempos antes del primer compás completo).
     pub auto_pickup: bool,
+    /// Reconocer compases compuestos (6/8, 9/8, 12/8) cuando casi todos los pulsos se dividen en tres.
+    pub compound: bool,
 }
 
 impl Default for QuantizeOptions {
@@ -78,6 +80,7 @@ impl Default for QuantizeOptions {
             triplets: true,
             auto_meter: false,
             auto_pickup: false,
+            compound: false,
         }
     }
 }
@@ -556,7 +559,7 @@ fn beat_strengths(notes: &[RawNote], map: &BeatMap, k0: i64) -> Vec<f64> {
         let j = j as usize;
         acc[j] += 0.25 * wt;
         peak[j] = peak[j].max(wt);
-        if bass[j].map_or(true, |b| n.pitch < b) {
+        if n.pitch < 55 && bass[j].map_or(true, |b| n.pitch < b) {
             bass[j] = Some(n.pitch);
         }
     }
@@ -579,11 +582,15 @@ fn beat_strengths(notes: &[RawNote], map: &BeatMap, k0: i64) -> Vec<f64> {
 }
 
 /// Puntuación de «los tiempos fuertes caen en `phase` módulo `m`» (m = 2, 3 o 4).
+/// Para m = 4 se mide el contraste de los tiempos 1 y 3 frente a 2 y 4, y se añade el bonus
+/// jerárquico: el primer tiempo más fuerte que el tercero (si son iguales es un patrón de dos tiempos).
 fn downbeat_score(s: &[f64], m: usize, phase: usize) -> f64 {
     let mean = s.iter().sum::<f64>() / s.len() as f64;
+    let step = if m == 4 { 2 } else { m };
+    let ph = if m == 4 { phase % 2 } else { phase };
     let (mut ds, mut dn, mut os, mut on) = (0.0, 0usize, 0.0, 0usize);
     for (j, &v) in s.iter().enumerate() {
-        if j % m == phase {
+        if j % step == ph {
             ds += v;
             dn += 1;
         } else {
@@ -596,20 +603,22 @@ fn downbeat_score(s: &[f64], m: usize, phase: usize) -> f64 {
     }
     let mut sc = (ds / dn as f64 - os / on as f64) / mean.max(1e-9);
     if m == 4 {
-        // en 4/4 el tercer tiempo es más fuerte que el segundo y el cuarto
-        let (mut a, mut an, mut b, mut bn) = (0.0, 0usize, 0.0, 0usize);
+        let (mut d, mut dn, mut a, mut an) = (0.0, 0usize, 0.0, 0usize);
         for (j, &v) in s.iter().enumerate() {
-            let r = (j + 4 - phase) % 4;
-            if r == 2 {
-                a += v;
-                an += 1;
-            } else if r != 0 {
-                b += v;
-                bn += 1;
+            match (j + 4 - phase) % 4 {
+                0 => {
+                    d += v;
+                    dn += 1;
+                }
+                2 => {
+                    a += v;
+                    an += 1;
+                }
+                _ => {}
             }
         }
-        if an > 0 && bn > 0 {
-            sc += 0.5 * (a / an as f64 - b / bn as f64) / mean.max(1e-9);
+        if dn > 0 && an > 0 {
+            sc += 0.5 * ((d / dn as f64 - a / an as f64) / mean.max(1e-9)).clamp(0.0, 1.0);
         }
     }
     sc
@@ -617,7 +626,7 @@ fn downbeat_score(s: &[f64], m: usize, phase: usize) -> f64 {
 
 /// Estima compás y anacrusa. `fixed` = negras por compás ya decididas por el usuario (solo se
 /// busca la anacrusa). Con poca evidencia devuelve 4 tiempos, sin anacrusa y confianza baja.
-pub fn detect_meter(notes: &[RawNote], map: &BeatMap, fixed: Option<u32>, detect_pickup: bool) -> MeterGuess {
+pub fn detect_meter(notes: &[RawNote], map: &BeatMap, fixed: Option<u32>, detect_pickup: bool, compound: bool) -> MeterGuess {
     let first = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
     let k0 = (map.pos(first) + 0.25).floor() as i64;
     let s = beat_strengths(notes, map, k0);
@@ -647,10 +656,14 @@ pub fn detect_meter(notes: &[RawNote], map: &BeatMap, fixed: Option<u32>, detect
                 continue;
             }
             let mut sc = downbeat_score(&s, m as usize, ph);
+            // sesgos: en compás simple se prefiere 4/4; en compuesto, 6/8 (el 12/8 necesita evidencia)
             if m == 3 {
                 sc -= METER_PRIOR_3;
             }
-            if m == 2 {
+            if m == 2 && !compound {
+                sc -= METER_PRIOR_2;
+            }
+            if m == 4 && compound {
                 sc -= METER_PRIOR_2;
             }
             if ph == 0 {
@@ -660,9 +673,15 @@ pub fn detect_meter(notes: &[RawNote], map: &BeatMap, fixed: Option<u32>, detect
         }
     }
     hyp.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    if std::env::var("NOVA_DEBUG_METER").is_ok() {
+        eprintln!("strengths {:?}", &s[..s.len().min(14)]);
+        for h in hyp.iter().take(6) {
+            eprintln!("  hyp {:.3} m {} ph {}", h.0, h.1, h.2);
+        }
+    }
     let (best, m, ph) = hyp[0];
-    // 2/4 y 4/4 con la misma fase comparten el primer tiempo fuerte: no son rivales a efectos de la anacrusa
-    let second = hyp.iter().skip(1).find(|h| !(h.2 == ph && (h.1 == 2 || h.1 == 4) && (m == 2 || m == 4))).map_or(best - 1.0, |h| h.0);
+    // 2/4 y 4/4 con tiempos fuertes anidados (misma paridad de fase) no son rivales a efectos de la anacrusa
+    let second = hyp.iter().skip(1).find(|h| !(h.1 != m && (h.1 == 2 || h.1 == 4) && (m == 2 || m == 4) && h.2 % 2 == ph % 2)).map_or(best - 1.0, |h| h.0);
     // en la fase, j ≡ ph (mod m) son los tiempos fuertes: la anacrusa son los ph tiempos previos
     MeterGuess { beats: m, pickup: ph as u32, confidence: ((best - second) / best.abs().max(0.2)).clamp(0.0, 1.0) }
 }
@@ -676,6 +695,8 @@ fn downbeat_score_n(s: &[f64], m: usize, phase: usize) -> f64 {
 const METER_MIN_CONFIDENCE: f64 = 0.15;
 /// Peso extra por cada nota simultánea (acordes) al medir la fuerza de un pulso.
 const METER_CHORD_GAIN: f64 = 0.15;
+/// Parte mínima de los pulsos con notas que deben dividirse en tres para suponer compás compuesto.
+const COMPOUND_MIN_SHARE: f64 = 0.5;
 const METER_PRIOR_3: f64 = 0.10;
 const METER_PRIOR_2: f64 = 0.15;
 const PICKUP_PRIOR: f64 = 0.15;
@@ -742,6 +763,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         notes
     };
 
+    let forced_compound = !o.auto_meter && o.time.den == 8 && o.time.num % 3 == 0 && o.time.num >= 6;
     // Pulso
     let onsets: Vec<(f64, f32)> = notes.iter().map(|n| (n.start, n.amplitude)).collect();
     let first = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
@@ -749,7 +771,14 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     // Con muy pocas notas el seguimiento no es fiable: se usa tempo constante.
     let map = if o.follow_tempo && onsets.len() >= 24 {
         let seed = o.tempo.map(|t| 60.0 / t.clamp(20.0, 300.0));
-        let beats = find_beats(&accent_weights(&notes), seed, o.tightness);
+        let w = accent_weights(&notes);
+        let mut beats = find_beats(&w, seed, o.tightness);
+        if forced_compound && seed.is_none() && beats.len() > 4 {
+            // compás compuesto indicado sin tempo: el pulso es la negra con puntillo, ~1,5 veces el de la negra
+            let mut d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
+            d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            beats = find_beats(&w, Some(1.5 * d[d.len() / 2]), o.tightness);
+        }
         BeatMap::from_beats(beats, seed.unwrap_or(0.6))
     } else {
         let est = estimate_beat(&onsets);
@@ -763,16 +792,39 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         BeatMap::regular(phase, 60.0 / bpm, last)
     };
     let bpm = map.median_bpm();
-    // Compás y anacrusa
+    // ¿Compás compuesto? El pulso seguido es la negra con puntillo si casi todos los pulsos con
+    // notas se dividen en tres (los tresillos de un compás simple son una minoría).
+    let origin0 = (map.pos(first) + 0.25).floor();
+    let prov: Vec<f64> = notes.iter().map(|n| ((map.pos(n.start) - origin0) * PPQ as f64).max(0.0)).collect();
+    let compound = if forced_compound {
+        true
+    } else if o.compound && o.auto_meter && o.triplets {
+        let tb = detect_tuplet_beats(&prov);
+        let busy: std::collections::BTreeSet<u32> = prov.iter().map(|&t| (t / PPQ as f64) as u32).collect();
+        let triple = tb.iter().filter(|(b, &k)| (k == 3 || k == 6) && busy.contains(b)).count();
+        busy.len() >= 8 && triple as f64 >= COMPOUND_MIN_SHARE * busy.len() as f64
+    } else {
+        false
+    };
+
+    // Compás y anacrusa (en compás compuesto el pulso es la negra con puntillo)
     let mut time = o.time;
     let mut pickup = 0u32;
     if o.auto_meter || o.auto_pickup {
-        let fixed = if o.auto_meter { None } else if o.time.measure_ticks() % PPQ == 0 { Some(o.time.measure_ticks() / PPQ) } else { None };
+        let fixed = if o.auto_meter {
+            None
+        } else if compound {
+            Some(o.time.num / 3)
+        } else if o.time.measure_ticks() % PPQ == 0 {
+            Some(o.time.measure_ticks() / PPQ)
+        } else {
+            None
+        };
         if o.auto_meter || fixed.is_some() {
-            let g = detect_meter(&notes, &map, fixed, o.auto_pickup);
+            let g = detect_meter(&notes, &map, fixed, o.auto_pickup, compound);
             if g.confidence >= METER_MIN_CONFIDENCE {
                 if o.auto_meter {
-                    time = TimeSig { num: g.beats, den: 4 };
+                    time = if compound { TimeSig { num: 3 * g.beats, den: 8 } } else { TimeSig { num: g.beats, den: 4 } };
                 }
                 pickup = g.pickup;
                 warnings.push(format!(
@@ -783,17 +835,29 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
                     if pickup > 0 { format!("; anacrusa de {pickup} tiempo(s): el primer compás empieza con silencios") } else { String::new() }
                 ));
             } else if o.auto_meter {
+                if compound {
+                    time = TimeSig { num: 6, den: 8 };
+                }
                 warnings.push(format!("No se pudo detectar el compás con fiabilidad (confianza {:.0} %): se supone {}/{}. Cámbialo si no es el correcto.", g.confidence * 100.0, time.num, time.den));
             }
+        } else if compound {
+            time = o.time;
         }
     }
-    let beats_per_bar = (time.measure_ticks() / PPQ).max(1);
+    if compound && !(time.den == 8 && time.num % 3 == 0) {
+        time = TimeSig { num: 6, den: 8 };
+    }
+    if compound {
+        warnings.push("Compás compuesto: el pulso es la negra con puntillo dividida en corcheas (sin grupos irregulares).".into());
+    }
+    let beats_per_bar = if compound { (time.num / 3).max(1) } else { (time.measure_ticks() / PPQ).max(1) };
     // origen de la rejilla: el primer pulso de compás anterior o igual a la primera nota
-    let origin = (map.pos(first) + 0.25).floor() - if pickup > 0 { (beats_per_bar - pickup % beats_per_bar) as f64 } else { 0.0 };
+    let origin = origin0 - if pickup > 0 { (beats_per_bar - pickup % beats_per_bar) as f64 } else { 0.0 };
     warnings.push(format!(
-        "Tempo {}: {:.1} negras/min.{}",
+        "Tempo {}: {:.1} {}/min.{}",
         if o.tempo.is_some() { "indicado" } else { "estimado" },
         bpm,
+        if compound { "negras con puntillo" } else { "negras" },
         if o.follow_tempo { " Se siguen las variaciones de tempo." } else { " Tempo constante: no se sigue el rubato." }
     ));
 
@@ -804,7 +868,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     // Cuantización
     let to_ticks = |t: f64| -> f64 { (map.pos(t) - origin) * PPQ as f64 };
     let raw_ticks: Vec<(f64, f64)> = notes.iter().map(|n| (to_ticks(n.start).max(0.0), to_ticks(n.end).max(0.0))).collect();
-    let tuplet_beats: HashMap<u32, u8> = if o.triplets {
+    let tuplet_beats: HashMap<u32, u8> = if o.triplets && !compound {
         detect_tuplet_beats(&raw_ticks.iter().map(|r| r.0).collect::<Vec<_>>())
     } else {
         HashMap::new()
@@ -812,6 +876,17 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     let mut on_grid = 0usize;
     let mut q: Vec<Q> = Vec::new();
     for (n, &(ts, te)) in notes.iter().zip(&raw_ticks) {
+        if compound {
+            // rejilla de 1/6 de pulso (semicorchea); los ticks internos (480 por pulso) pasan a reales ×3/2
+            let g = (PPQ / 6) as f64;
+            let s = (ts / g).round() as u32 * (PPQ / 6);
+            if (ts - s as f64).abs() < 0.15 * (PPQ / 3) as f64 {
+                on_grid += 1;
+            }
+            let e = ((te / g).round() as u32 * (PPQ / 6)).max(s + PPQ / 6);
+            q.push(Q { s: s * 3 / 2, e: e * 3 / 2, pitch: n.pitch });
+            continue;
+        }
         let s = snap(ts, &tuplet_beats);
         let unit = slot_ticks(s / PPQ, &tuplet_beats);
         if (ts - s as f64).abs() < 0.15 * unit as f64 {
@@ -859,7 +934,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     }
 
     let mut score = Score::new(&o.title, time, fifths, 1);
-    score.tempo = bpm.round().clamp(20.0, 300.0) as u32;
+    score.tempo = (if compound { bpm * 1.5 } else { bpm }).round().clamp(20.0, 300.0) as u32;
     score.parts.clear();
     let mut dropped_voices = false;
     for (name, clef, notes) in staves {
@@ -1280,5 +1355,70 @@ mod tests {
         let r = notes_to_score(&flat, &meter_opts(96.0)).unwrap();
         assert_eq!((r.score.time.num, r.score.time.den), (4, 4));
         assert_eq!(sounds(&r.score)[0].start, 0);
+    }
+
+    /// Compás compuesto: `beats` pulsos de negra con puntillo por compás, tres corcheas por pulso;
+    /// bajo fuerte en el primer pulso (y medio en el tercero de 12/8), empezando `skip` pulsos tarde.
+    fn compound_piece(beats: usize, bars: usize, skip: usize, bpm: f64) -> Vec<RawNote> {
+        let b = 60.0 / bpm; // un pulso = negra con puntillo
+        let mut v = Vec::new();
+        for bar in 0..bars {
+            let bass = [40u8, 43, 45, 38][bar % 4];
+            for k in 0..beats {
+                let beat = bar * beats + k;
+                if beat < skip {
+                    continue;
+                }
+                for e in 0..3 {
+                    let t0 = 1.3 + (beat as f64 + e as f64 / 3.0) * b;
+                    let (pitch, amp) = if e == 0 && k == 0 {
+                        (bass, 0.95)
+                    } else if e == 0 && beats == 4 && k == 2 {
+                        (bass, 0.6)
+                    } else {
+                        ([60u8, 64, 67, 64][(bar + k + e) % 4], 0.5)
+                    };
+                    v.push(RawNote { start: t0, end: t0 + b / 3.0 * 0.9, pitch, amplitude: amp, onset: true });
+                }
+            }
+        }
+        v
+    }
+
+    fn compound_opts(bpm: f64) -> QuantizeOptions {
+        QuantizeOptions { compound: true, triplets: true, ..meter_opts(bpm) }
+    }
+
+    #[test]
+    fn detects_six_eight_and_twelve_eight() {
+        for (beats, num) in [(2usize, 6u32), (4, 12)] {
+            let r = notes_to_score(&compound_piece(beats, 24, 0, 60.0), &compound_opts(60.0)).unwrap();
+            assert_eq!((r.score.time.num, r.score.time.den), (num, 8), "{:?}", r.warnings);
+            assert_eq!(r.score.tempo, 90); // negras por minuto: 60 pulsos de negra con puntillo × 1,5
+            let s = sounds(&r.score);
+            // las corcheas caen cada 240 ticks reales, sin grupos irregulares
+            assert!(s.iter().all(|x| x.start % 240 == 0 && x.ticks % 240 == 0), "{:?}", s.iter().take(8).map(|x| (x.start, x.ticks)).collect::<Vec<_>>());
+            assert_eq!(s.iter().map(|x| x.start).min(), Some(0));
+            assert!(r.score.parts.iter().flat_map(|p| p.measures.iter()).all(|m| m.events.iter().all(|e| e.tuplet.is_none())));
+        }
+    }
+
+    #[test]
+    fn compound_pickup_and_fixed_meter() {
+        // empieza un pulso antes del compás en 6/8: anacrusa de 1 pulso = 720 ticks de silencio inicial
+        let r = notes_to_score(&compound_piece(2, 24, 1, 60.0), &compound_opts(60.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (6, 8), "{:?}", r.warnings);
+        assert_eq!(sounds(&r.score).iter().map(|x| x.start).min(), Some(720), "{:?}", r.warnings);
+        // 12/8 indicado por el usuario, sin autodetección del compás
+        let o = QuantizeOptions { auto_meter: false, time: TimeSig { num: 12, den: 8 }, ..compound_opts(60.0) };
+        let r = notes_to_score(&compound_piece(4, 24, 0, 60.0), &o).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (12, 8));
+        assert!(sounds(&r.score).iter().all(|x| x.start % 240 == 0));
+    }
+
+    #[test]
+    fn simple_meter_with_eighths_is_not_compound() {
+        let r = notes_to_score(&metered(4, 24, 0, 96.0), &compound_opts(96.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (4, 4), "{:?}", r.warnings);
     }
 }

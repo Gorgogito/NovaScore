@@ -23,11 +23,16 @@ fn from_cache(path: &Path) -> Vec<RawNote> {
 }
 
 fn report(label: &str, raw: &[RawNote], tempo: Option<f64>) -> (String, u32) {
-    let o = QuantizeOptions { auto_meter: true, auto_pickup: true, min_relative: None, min_amplitude: 0.0, tempo, ..Default::default() };
+    let o = QuantizeOptions { auto_meter: true, auto_pickup: true, compound: true, min_relative: None, min_amplitude: 0.0, tempo, ..Default::default() };
     match notes_to_score(raw, &o) {
         Ok(r) => {
             let w = r.warnings.iter().find(|w| w.starts_with("Compás") || w.starts_with("No se pudo detectar")).cloned().unwrap_or_default();
             println!("  {label:<26} → {}/{}  {}", r.score.time.num, r.score.time.den, w);
+            if std::env::var("NOVA_ALL").is_ok() {
+                for x in &r.warnings {
+                    println!("      · {x}");
+                }
+            }
             (format!("{}/{}", r.score.time.num, r.score.time.den), 0)
         }
         Err(e) => {
@@ -60,7 +65,7 @@ fn main() {
                 }
                 let cut = (bar.floor() - pick as f64) * beat_s - 0.01;
                 let sub: Vec<RawNote> = notes.iter().filter(|n| n.start >= cut && n.start < cut + 28.0 * bar * beat_s).copied().collect();
-                report(&format!("anacrusa simulada {pick}"), &sub, Some(sc.tempo as f64));
+                report(&format!("anacrusa simulada {pick}"), &sub, Some(std::env::var("NOVA_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(sc.tempo as f64)));
             }
         } else {
             report("grabación", &from_cache(Path::new(f)), None);

@@ -772,7 +772,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
           </select>
         </label>
         <Show when={!auto()}>
-          <label>Negras por minuto
+          <label>{["6/8", "9/8", "12/8"].includes(time()) ? "Pulsos (negra con puntillo) por minuto" : "Negras por minuto"}
             <input type="number" min="20" max="300" value={tempo()} onInput={(e) => setTempo(Number(e.currentTarget.value) || 100)} />
           </label>
         </Show>

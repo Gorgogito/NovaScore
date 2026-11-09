@@ -132,6 +132,7 @@ pub fn audio_to_score(path: &str, o: &AudioImportOptions, models_dir: &std::path
     // sin compás indicado se detecta (2/4, 3/4 o 4/4); la anacrusa se busca siempre
     q.auto_meter = true;
     q.auto_pickup = true;
+    q.compound = true;
     if let (Some(num), Some(den)) = (o.num, o.den) {
         if (1..=32).contains(&num) && matches!(den, 1 | 2 | 4 | 8 | 16) {
             q.time = TimeSig { num, den };
