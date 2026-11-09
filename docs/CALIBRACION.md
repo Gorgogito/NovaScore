@@ -88,6 +88,11 @@ Descargadas a `artefactos/partituras/musetrainer/` (no versionadas; uso solo loc
 - **Compás**: solo 2/10 exactos (el modelo solo conoce 2/4, 3/4, 4/4 y compuestos de 3 tiempos; 6/4, 9/8, 6/8 y 2/2 se leen como 3/4 o 4/4).
 - **Límite conocido**: no se cuantizan grupos 7:4, 11:6, 15:8, 20:6… (adornos de Chopin): se aproximan a la rejilla más cercana.
 
+## Ambigüedad de pulso en texturas uniformes (rejilla o «tatum»)
+Problema: en arpegios regulares sin acentos el pulso queda ambiguo entre 3 y 4 divisiones de la rejilla (BWV 846: pulso 97 = 3 semicorcheas en vez de 72 = 4, leído como 6/8; Clair de Lune v2: 100 en vez de 75). `beats::tatum` estima la unidad mínima de la rejilla (intervalo corto más frecuente) y `find_beats` multiplica por `1 − 0,3` la puntuación de los periodos que equivalen a un múltiplo de 3 de esa unidad (`TATUM_TERNARY_PENALTY`). Barrido 0 / 0,15 / 0,3 / 0,5 en 25 piezas (piano): F1 medio 0,825 / 0,836 / 0,833 / 0,833; BWV 846 pasa de 0,29 a 0,94 (4/4 correcto) y Clair de Lune v2 de 0,09 a 0,98 con 0,3 (0,15 solo arregla el BWV 846). Sin regresiones en el banco.
+- **Solo se aplica si la rejilla es fiable** (unidad ≥ 80 ms y ≥ 35 % de los intervalos la igualan): sin esta condición, Chopin (grabación) pasaba de 100 a 87 y Londonderry de 98 a 90 porque en audio ruidoso la «unidad» sale de 60 ms. Con la condición, las 11 grabaciones dan el mismo tempo que antes (comprobado con `tempo_sweep`).
+- **Queda sin resolver**: BWV 847 (145 → 115, no es múltiplo de 3 ni potencia de 2 de la rejilla: 5,2 unidades) y las grabaciones ruidosas, donde la rejilla no se puede estimar y la ambigüedad sigue decidiéndose por el prior de ~100/min.
+
 ## Lo que sigue sin calibrar
 - Penalizaciones de tresillos/quintillos/seisillos: el banco sintético no las discrimina (F1 igual con y sin grupos); haría falta una métrica de ritmo más estricta (tolerancia < 30 ticks) o grupos mezclados con subdivisiones binarias cercanas.
 - Rubato: el banco usa tempo constante. Se podría deformar el audio con una curva de tempo (`roundtrip` ya tiene `NOVA_RUBATO` con partituras sintéticas).

@@ -152,15 +152,77 @@ pub fn period_scores(onsets: &[(f64, f32)], tightness: f64) -> Vec<(f64, f64, us
     out
 }
 
+/// Penalización del periodo de pulso que equivale a un múltiplo de 3 de la rejilla (tatum).
+pub const TATUM_TERNARY_PENALTY: f64 = 0.3;
+
+/// Unidad mínima de la rejilla rítmica (s): el intervalo entre inicios más corto con peso
+/// significativo (≥ 25 % del más frecuente). `None` con muy pocos inicios.
+pub fn tatum(onsets: &[(f64, f32)]) -> Option<f64> {
+    let mut t: Vec<f64> = onsets.iter().map(|o| o.0).collect();
+    t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut u: Vec<f64> = Vec::new();
+    for x in t {
+        if u.last().map_or(true, |&l| x - l > 0.04) {
+            u.push(x);
+        }
+    }
+    if u.len() < 24 {
+        return None;
+    }
+    let mut hist = vec![0u32; 60]; // casillas de 10 ms entre 60 ms y 660 ms
+    for w in u.windows(2) {
+        let d = w[1] - w[0];
+        if (0.06..0.66).contains(&d) {
+            hist[((d - 0.06) / 0.01) as usize] += 1;
+        }
+    }
+    // suaviza con los vecinos para no depender del borde de casilla
+    let sm: Vec<u32> = (0..60).map(|i| hist[i] + hist[i.saturating_sub(1)] + hist[(i + 1).min(59)]).collect();
+    let max = *sm.iter().max()?;
+    if max < 8 {
+        return None;
+    }
+    let i = sm.iter().position(|&c| c as f64 >= 0.25 * max as f64)?;
+    // centro de masa local
+    let (mut sw, mut s) = (0.0, 0.0);
+    for j in i.saturating_sub(1)..=(i + 1).min(59) {
+        sw += hist[j] as f64;
+        s += hist[j] as f64 * (0.06 + 0.01 * j as f64 + 0.005);
+    }
+    if sw <= 0.0 {
+        return None;
+    }
+    let t = s / sw;
+    // solo si la rejilla es fiable: unidad ≥ 80 ms y al menos el 35 % de los intervalos la igualan
+    // (en grabaciones ruidosas la «unidad» sale de 60 ms y casi ningún intervalo la sigue)
+    let iois: Vec<f64> = u.windows(2).map(|w| w[1] - w[0]).collect();
+    let share = iois.iter().filter(|&&d| (d - t).abs() < 0.2 * t).count() as f64 / iois.len() as f64;
+    (t >= 0.08 && share >= 0.35).then_some(t)
+}
+
 /// Busca el pulso sin periodo de partida fiable: prueba periodos candidatos (≈ 50–170
 /// negras/min), puntúa cada camino (fuerza media de inicio por pulso × prior de tempo) y
 /// refina el mejor. Con `seed` se parte de ese periodo. Si el elegido supera las 120 negras/min
 /// y el doble puntúa casi igual, se prefiere el doble (evita notar la corchea como negra).
 pub fn find_beats(onsets: &[(f64, f32)], seed: Option<f64>, tightness: f64) -> Vec<f64> {
     let prior = |period: f64| (-0.5 * ((60.0 / period / 100.0).log2() / 0.6).powi(2)).exp();
+    // En texturas uniformes (arpegios de semicorcheas) el pulso es ambiguo entre 3 y 4 divisiones
+    // de la rejilla; sin evidencia de compuesto se prefiere un múltiplo binario de la rejilla.
+    let tat = tatum(onsets);
+    let lambda = TATUM_TERNARY_PENALTY;
+    let ternary = |period: f64| -> f64 {
+        match tat {
+            Some(t) => {
+                let n = period / t;
+                let k = n.round();
+                if k >= 3.0 && (n - k).abs() < 0.12 * k && (k as u32) % 3 == 0 { 1.0 - lambda } else { 1.0 }
+            }
+            None => 1.0,
+        }
+    };
     let score = |period: f64| -> Option<f64> {
         let (b, total) = dp(onsets, period, tightness);
-        (b.len() >= 4).then(|| total / b.len() as f64 * prior(period))
+        (b.len() >= 4).then(|| total / b.len() as f64 * prior(period) * ternary(period))
     };
     let period = match seed {
         Some(p) => p,
@@ -270,6 +332,23 @@ impl BeatMap {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tatum_of_uniform_sixteenths_and_noise() {
+        let uniform: Vec<(f64, f32)> = (0..80).map(|i| (1.0 + i as f64 * 0.21, 1.0)).collect();
+        let t = tatum(&uniform).expect("rejilla");
+        assert!((t - 0.21).abs() < 0.02, "{t}");
+        // intervalos dispersos: sin rejilla fiable
+        let mut x = 7u64;
+        let noisy: Vec<(f64, f32)> = (0..80)
+            .scan(0.0, |a, _| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                *a += 0.07 + (x >> 40) as f64 / (1u64 << 24) as f64 * 0.5;
+                Some((*a, 1.0))
+            })
+            .collect();
+        assert!(tatum(&noisy).is_none());
+    }
+
     use super::*;
 
     /// Inicios en cada pulso de un tempo que cambia: 100 → 120 negras/min en 40 pulsos.
