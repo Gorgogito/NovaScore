@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { api, AudioOptions } from "./api";
 import { drumFromPos, DRUM_KEYS } from "./drum";
 import { INSTRUMENTS } from "./instruments";
@@ -719,6 +720,22 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
   const [engine, setEngine] = createSignal<"general" | "piano">("general");
   const [pianoModel, setPianoModel] = createSignal<string | null>(null);
   api.pianoModelStatus().then(setPianoModel).catch(() => setPianoModel(null));
+  const [dl, setDl] = createSignal<{ done: number; total: number } | null>(null);
+  const [dlError, setDlError] = createSignal("");
+  const downloadModel = async () => {
+    setDlError("");
+    setDl({ done: 0, total: 98684797 });
+    const un = await listen<{ done: number; total: number }>("piano-download", (e) => setDl(e.payload));
+    try {
+      setPianoModel(await api.downloadPianoModel());
+      setEngine("piano");
+    } catch (e) {
+      setDlError(String(e));
+    } finally {
+      un();
+      setDl(null);
+    }
+  };
   const name = () => props.path.split(/[\\/]/).pop() ?? props.path;
   return (
     <div class="modal" onClick={props.onCancel}>
@@ -739,6 +756,15 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
             <option value="piano" disabled={!pianoModel()}>{pianoModel() ? "Piano (alta precisión, usa la GPU)" : "Piano (alta precisión): modelo no instalado"}</option>
           </select>
         </label>
+        <Show when={!pianoModel()}>
+          <p>
+            El motor de piano usa un modelo de 98 MB (licencia CC-BY-4.0, Kong et al.) que se descarga una sola vez y se guarda en tu equipo.{" "}
+            <button type="button" disabled={dl() !== null} onClick={downloadModel}>
+              {dl() ? `Descargando… ${Math.round((dl()!.done / dl()!.total) * 100)} %` : "Descargar modelo de piano"}
+            </button>
+          </p>
+          <Show when={dlError()}><p class="error">{dlError()}</p></Show>
+        </Show>
         <label>Tempo
           <select value={auto() ? "auto" : "fixed"} onChange={(e) => setAuto(e.currentTarget.value === "auto")}>
             <option value="auto">Automático</option>

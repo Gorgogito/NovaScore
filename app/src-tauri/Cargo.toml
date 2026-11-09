@@ -23,6 +23,8 @@ nova-core = { path = "../crates/nova-core" }
 nova-audio = { path = "../crates/nova-audio" }
 svg2pdf = "0.13"
 pdf-writer = "0.12"
+ureq = "3"
+sha2 = "0.10"
 
 [profile.release]
 codegen-units = 1

@@ -34,6 +34,61 @@ pub struct AudioImportOptions {
 /// Nombre del archivo del modelo de piano dentro de la carpeta de modelos.
 pub const PIANO_MODEL_FILE: &str = "piano.onnx";
 
+/// Dónde se publica el modelo de piano (release `models-v1`, ver `docs/MODELOS.md`).
+pub const PIANO_URL: &str = "https://github.com/Gorgogito/NovaScore/releases/download/models-v1/piano.onnx";
+pub const PIANO_SHA256: &str = "2b43528170ada21dc95da555b39f9926239ebd5caec061daac8614d36eb59546";
+pub const PIANO_SIZE: u64 = 98_684_797;
+
+/// Descarga `url` a `dest` comprobando tamaño y SHA-256; escribe en `dest.part` y renombra al final,
+/// así nunca queda un modelo a medias. `progress(descargado, total)` se llama cada ~256 KB.
+pub fn download_verified(url: &str, dest: &std::path::Path, sha256: &str, size: u64, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("No se pudo crear {}: {e}", dir.display()))?;
+    }
+    let part = dest.with_extension("part");
+    let resp = ureq::get(url).call().map_err(|e| format!("No se pudo descargar el modelo: {e}"))?;
+    let total = resp.body().content_length().unwrap_or(size);
+    let mut reader = resp.into_body().into_reader();
+    let mut file = std::fs::File::create(&part).map_err(|e| format!("No se pudo escribir {}: {e}", part.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let (mut done, mut last) = (0u64, 0u64);
+    let result = (|| -> Result<(), String> {
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| format!("Descarga interrumpida: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            file.write_all(&buf[..n]).map_err(|e| format!("No se pudo escribir el modelo: {e}"))?;
+            done += n as u64;
+            if done - last >= 256 * 1024 {
+                last = done;
+                progress(done, total);
+            }
+        }
+        progress(done, total);
+        if done != size {
+            return Err(format!("El modelo descargado tiene {done} bytes y se esperaban {size}."));
+        }
+        let got: String = hasher.finalize_reset().iter().map(|b| format!("{b:02x}")).collect();
+        if got != sha256 {
+            return Err("La descarga está corrupta (la suma SHA-256 no coincide).".into());
+        }
+        Ok(())
+    })();
+    drop(file);
+    match result {
+        Ok(()) => std::fs::rename(&part, dest).map_err(|e| format!("No se pudo instalar el modelo: {e}")),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
+}
+
 /// Dónde está el modelo de piano: `NOVASCORE_PIANO_MODEL` o `<datos de la app>/modelos/piano.onnx`.
 pub fn piano_model_path(models_dir: &std::path::Path) -> std::path::PathBuf {
     match std::env::var_os("NOVASCORE_PIANO_MODEL") {
@@ -90,6 +145,30 @@ pub fn audio_to_score(path: &str, o: &AudioImportOptions, models_dir: &std::path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Descarga real del modelo (98 MB); se ejecuta a mano: `cargo test -- --ignored download`.
+    #[test]
+    #[ignore]
+    fn download_real_model() {
+        let dest = std::env::temp_dir().join("novascore-test-models").join(PIANO_MODEL_FILE);
+        let _ = std::fs::remove_file(&dest);
+        let mut last = 0;
+        download_verified(PIANO_URL, &dest, PIANO_SHA256, PIANO_SIZE, |d, t| {
+            last = d;
+            assert!(d <= t);
+        })
+        .unwrap();
+        assert_eq!(last, PIANO_SIZE);
+        assert!(dest.is_file() && !dest.with_extension("part").exists());
+    }
+
+    #[test]
+    fn download_rejects_bad_url_and_leaves_no_file() {
+        let dest = std::env::temp_dir().join("novascore-test-models").join("x.onnx");
+        let _ = std::fs::remove_file(&dest);
+        assert!(download_verified("http://127.0.0.1:1/nada", &dest, "00", 1, |_, _| {}).is_err());
+        assert!(!dest.exists() && !dest.with_extension("part").exists());
+    }
 
     /// WAV mono de 16 bits con una melodía de tonos puros: (inicio s, duración s, MIDI).
     fn write_wav(path: &std::path::Path, notes: &[(f64, f64, i32)], secs: f64) {

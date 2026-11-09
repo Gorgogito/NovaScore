@@ -12,6 +12,13 @@
 - Ubicación: `NOVASCORE_PIANO_MODEL` o `<datos de la app>/modelos/piano.onnx`. El diálogo «Importar audio» habilita el motor «Piano» solo si existe.
 - Atribución obligatoria (CC-BY-4.0): «High-resolution Piano Transcription with Pedals by Regressing Onsets and Offsets Times», Q. Kong, B. Li, X. Song, Y. Wan, Y. Wang; los pesos convertidos a ONNX son una obra derivada y deben indicarlo.
 
+## Descarga bajo demanda
+- Alojado como *release* `models-v1` de GitHub: https://github.com/Gorgogito/NovaScore/releases/tag/models-v1 (`piano.onnx`, 98 684 797 bytes, SHA-256 `2b43528170ada21dc95da555b39f9926239ebd5caec061daac8614d36eb59546`). Las notas del release llevan la atribución CC-BY-4.0.
+- `audio::download_verified` descarga a `piano.onnx.part`, comprueba tamaño y SHA-256 y solo entonces renombra: nunca queda un modelo a medias ni corrupto. Comando `download_piano_model` (emite `piano-download {done,total}`); el diálogo «Importar audio» muestra el botón y el progreso, y activa el motor al terminar.
+- Probado: descarga real (test `--ignored download_real_model`, 10 s) y flujo completo en la interfaz (descargar → motor piano → transcribir Chopin, 1408 notas).
+- `ureq` está fijado a 3.1.4 en `Cargo.lock` (la 3.5.1 pide `webpki-roots` 1.0.10, no disponible en este índice).
+
 ## Pendiente
-- Alojar el ONNX para la descarga (p. ej. un *release* de GitHub) y añadir el descargador con barra de progreso y SHA-256. Mientras tanto se instala a mano.
-- Empaquetar `DirectML.dll` junto al ejecutable (ort la copia a `target/`; falta incluirla en el instalador).
+- Empaquetar `DirectML.dll` junto al ejecutable en el instalador (ort la copia a `target/`).
+- Botón para cancelar la descarga y para borrar el modelo instalado.
+- Probar en otra máquina/GPU (solo RTX 3050 probada) y sin conexión (mensaje de error).
