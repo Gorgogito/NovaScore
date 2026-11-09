@@ -937,11 +937,26 @@ impl Score {
     }
 
     /// Build one beat (a quarter note, starting at absolute tick `abs`) as a group of three
-    /// triplet eighths (3:2). `items` are `(first slot 0-2, slots 1-2, pitches, tied to next)`;
-    /// the slots left empty become rests and whatever the voice had in the beat is replaced.
-    /// The beat must lie inside one measure. Used by importers.
+    /// triplet eighths (3:2). See [`Score::put_tuplet_beat`].
     pub fn put_triplet_beat(&mut self, part: usize, voice: usize, abs: u32, items: &[(u32, u32, Vec<Pitch>, bool)]) -> Result<(), EditError> {
-        const SLOT: u32 = PPQ / 3;
+        self.put_tuplet_beat(part, voice, abs, 3, items)
+    }
+
+    /// Build one beat (a quarter note starting at absolute tick `abs`) as a tuplet group of
+    /// `slots` equal slots: 3 (3:2, 160 ticks each), 5 (5:4, 96) or 6 (6:4, 80). `items` are
+    /// `(first slot, slots, pitches, tied to next)`; the slots left empty become rests and
+    /// whatever the voice had in the beat is replaced. A note or rest longer than the notation
+    /// allows (e.g. 5 of 6 slots) is split into tied pieces. The beat must lie inside one
+    /// measure. Used by importers.
+    pub fn put_tuplet_beat(&mut self, part: usize, voice: usize, abs: u32, slots: u32, items: &[(u32, u32, Vec<Pitch>, bool)]) -> Result<(), EditError> {
+        // (actual, normal) of the group and the longest span (in slots) with a standard value
+        let (normal, max_n) = match slots {
+            3 => (2u8, 2u32),
+            5 => (4, 4),
+            6 => (4, 4),
+            _ => return Err(EditError::BadDuration),
+        };
+        let slot_ticks = PPQ / slots;
         if part >= self.parts.len() || voice >= MAX_VOICES || items.is_empty() {
             return Err(EditError::OutOfRange);
         }
@@ -954,7 +969,7 @@ impl Score {
         sorted.sort_by_key(|i| i.0);
         let mut slot = 0u32;
         for i in &sorted {
-            if i.1 == 0 || i.1 > 2 || i.0 < slot || i.0 + i.1 > 3 || i.2.is_empty() {
+            if i.1 == 0 || i.0 < slot || i.0 + i.1 > slots || i.2.is_empty() {
                 return Err(EditError::BadDuration);
             }
             slot = i.0 + i.1;
@@ -963,10 +978,10 @@ impl Score {
             let l = self.measure_len(self.parts[part].measures.len());
             self.parts[part].measures.push(Measure::empty(l));
         }
-        let t = Tuplet { actual: 3, normal: 2, start };
+        let t = Tuplet { actual: slots as u8, normal, start };
         let mk = |slot: u32, n: u32, content: Content| Event {
-            start: start + slot * SLOT,
-            ticks: n * SLOT,
+            start: start + slot * slot_ticks,
+            ticks: n * slot_ticks,
             content,
             tuplet: Some(t),
             extras: Vec::new(),
@@ -974,16 +989,31 @@ impl Score {
             articulations: Vec::new(),
         };
         let mut new_events: Vec<Event> = Vec::new();
+        // pieces of at most `max_n` slots; a note keeps its tie on the last piece only
+        let push_span = |new_events: &mut Vec<Event>, first: u32, n: u32, pitches: Option<(&Vec<Pitch>, bool)>| {
+            let (mut at, mut left) = (first, n);
+            while left > 0 {
+                let piece = left.min(max_n);
+                let more = left > piece;
+                let content = match pitches {
+                    Some((p, tie)) => Content::note(p.clone(), tie || more),
+                    None => Content::Rest,
+                };
+                new_events.push(mk(at, piece, content));
+                at += piece;
+                left -= piece;
+            }
+        };
         let mut pos = 0u32;
         for i in &sorted {
             if i.0 > pos {
-                new_events.push(mk(pos, i.0 - pos, Content::Rest));
+                push_span(&mut new_events, pos, i.0 - pos, None);
             }
-            new_events.push(mk(i.0, i.1, Content::note(i.2.clone(), i.3)));
+            push_span(&mut new_events, i.0, i.1, Some((&i.2, i.3)));
             pos = i.0 + i.1;
         }
-        if pos < 3 {
-            new_events.push(mk(pos, 3 - pos, Content::Rest));
+        if pos < slots {
+            push_span(&mut new_events, pos, slots - pos, None);
         }
         let meas = self.measure_mut(part, m)?;
         let events = meas.voice_create(voice, len);
@@ -1682,6 +1712,27 @@ mod tests {
         // fuera de lugar: dos notas solapadas o un pulso que cruza la barra
         assert!(s.put_triplet_beat(0, 0, 480, &[(0, 2, vec![p(60)], false), (1, 1, vec![p(62)], false)]).is_err());
         assert!(s.put_triplet_beat(0, 0, 1700, &[(0, 1, vec![p(60)], false)]).is_err());
+    }
+
+    #[test]
+    fn quintuplet_and_sextuplet_beats() {
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        let p = |m| Pitch::from_midi(m, true);
+        // quintillo de semicorcheas: cinco notas de 96 ticks (5:4)
+        let five: Vec<(u32, u32, Vec<Pitch>, bool)> = (0..5).map(|k| (k, 1, vec![p(60 + k as i32)], false)).collect();
+        s.put_tuplet_beat(0, 0, 0, 5, &five).unwrap();
+        let ev: Vec<(u32, u32)> = s.parts[0].measures[0].events.iter().take(5).map(|e| (e.start, e.ticks)).collect();
+        assert_eq!(ev, vec![(0, 96), (96, 96), (192, 96), (288, 96), (384, 96)]);
+        assert!(s.parts[0].measures[0].events.iter().take(5).all(|e| e.tuplet == Some(Tuplet { actual: 5, normal: 4, start: 0 }) && e.notated_ticks() == 120));
+        // seisillo con una nota larga de 5 ranuras: se parte en 4 + 1 ligadas
+        s.put_tuplet_beat(0, 0, 480, 6, &[(0, 5, vec![p(67)], false), (5, 1, vec![p(69)], false)]).unwrap();
+        let six: Vec<(u32, u32, bool)> = s.parts[0].measures[0].events.iter().filter(|e| e.start >= 480 && e.start < 960).map(|e| (e.start, e.ticks, matches!(&e.content, Content::Note { tie: true, .. }))).collect();
+        assert_eq!(six, vec![(480, 320, true), (800, 80, false), (880, 80, false)]);
+        // un seisillo con una nota al final: el hueco de 5 ranuras se parte en 4 + 1 silencios
+        s.put_tuplet_beat(0, 0, 960, 6, &[(5, 1, vec![p(71)], false)]).unwrap();
+        let rests: Vec<u32> = s.parts[0].measures[0].events.iter().filter(|e| e.start >= 960 && e.start < 1440).map(|e| e.ticks).collect();
+        assert_eq!(rests, vec![320, 80, 80]);
+        assert!(s.put_tuplet_beat(0, 0, 1440, 4, &five).is_err()); // 4 ranuras no es un grupo soportado
     }
 
     #[test]

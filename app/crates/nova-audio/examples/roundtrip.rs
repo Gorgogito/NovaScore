@@ -110,7 +110,7 @@ fn synthetic_triplets(bars: u32) -> nova_core::Score {
         (seed >> 16) % n
     };
     let mut idx = 3i32;
-    let mut step = |idx: &mut i32, rnd: &mut dyn FnMut(u32) -> u32| {
+    let step = |idx: &mut i32, rnd: &mut dyn FnMut(u32) -> u32| {
         *idx = (*idx + rnd(3) as i32 - 1).clamp(0, 7);
         scale[*idx as usize]
     };
@@ -138,6 +138,50 @@ fn synthetic_triplets(bars: u32) -> nova_core::Score {
     s
 }
 
+/// Pieza sintética con grupos de `slots` notas por pulso (3, 5 o 6) en los pulsos 2 y 4 de cada
+/// compás, sobre un bajo en negras; en algunos pulsos la primera nota es larga.
+fn synthetic_tuplets(bars: u32, slots: u32) -> nova_core::Score {
+    use nova_core::{Clef, Pitch, Score, TimeSig};
+    let mut s = Score::new("grupos", TimeSig { num: 4, den: 4 }, 0, 1);
+    let lh = s.add_part("Bajo", Clef::Bass, 0, false);
+    let p = |m: i32| Pitch::from_midi(m, true);
+    let scale = [60, 62, 64, 67, 69, 72, 74, 76];
+    let mut seed = 4242u32;
+    let mut rnd = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 16) % 3
+    };
+    let mut idx = 3i32;
+    for bar in 0..bars {
+        let base = bar * 1920;
+        let root = [48, 43, 45, 41][(bar % 4) as usize];
+        for q in 0..4 {
+            s.put_abs(lh, base + q * 480, 480, &[p(root + [0, 7, 12, 7][q as usize])]).unwrap();
+        }
+        for beat in 0..4u32 {
+            let at = base + beat * 480;
+            let mut next = |idx: &mut i32| {
+                *idx = (*idx + rnd() as i32 - 1).clamp(0, 7);
+                p(scale[*idx as usize])
+            };
+            if beat % 2 == 1 {
+                let items: Vec<(u32, u32, Vec<Pitch>, bool)> = if bar % 3 == 2 {
+                    vec![(0, 2, vec![next(&mut idx)], false), (2, slots - 2, vec![next(&mut idx)], false)]
+                        .into_iter()
+                        .filter(|i| i.1 > 0)
+                        .collect()
+                } else {
+                    (0..slots).map(|k| (k, 1, vec![next(&mut idx)], false)).collect()
+                };
+                s.put_tuplet_beat(0, 0, at, slots, &items).unwrap();
+            } else {
+                s.put_abs(0, at, 480, &[next(&mut idx)]).unwrap();
+            }
+        }
+    }
+    s
+}
+
 fn main() {
     let rubato = env_f("NOVA_RUBATO", 0.0);
     let period_beats = env_f("NOVA_PERIOD", 16.0);
@@ -145,14 +189,18 @@ fn main() {
     let tight = env_f("NOVA_TIGHT", 30.0);
     let (mut sum_c, mut sum_f, mut cnt) = (0.0, 0.0, 0);
     for path in std::env::args().skip(1) {
-        let src = if path.starts_with("@triplets") {
+        let src = if path.starts_with("@quint") {
+            synthetic_tuplets(path.trim_start_matches("@quint").parse().unwrap_or(32), 5)
+        } else if path.starts_with("@sext") {
+            synthetic_tuplets(path.trim_start_matches("@sext").parse().unwrap_or(32), 6)
+        } else if path.starts_with("@triplets") {
             synthetic_triplets(path.trim_start_matches("@triplets").parse().unwrap_or(32))
         } else if path.starts_with("@synthetic") {
             synthetic(path.trim_start_matches("@synthetic").parse().unwrap_or(48))
         } else {
             import_musicxml(&std::fs::read_to_string(&path).unwrap()).unwrap().score
         };
-        let tempo = src.tempo as f64;
+        let tempo = env_f("NOVA_BPM", src.tempo as f64);
         let snd: Vec<_> = sounds(&src).into_iter().filter(|s| !src.parts[s.part].percussion).collect();
         if snd.len() < 8 {
             continue;
@@ -206,6 +254,11 @@ fn main() {
                     continue;
                 }
             };
+            if follow && std::env::var("NOVA_WARN").is_ok() {
+                for w in r.warnings.iter().filter(|w| w.contains("irregulares") || w.contains("rejilla")) {
+                    println!("  aviso: {w}");
+                }
+            }
             let out = sounds(&r.score);
             let o0 = out.iter().map(|s| s.start).min().unwrap() as i64;
             // El pulso hallado puede ser la mitad o el doble del original: se prueba cada escala.
