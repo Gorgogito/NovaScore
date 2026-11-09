@@ -192,7 +192,7 @@ fn main() {
     got {} notas {:?} (detectadas {})", reference.len(), reference.iter().take(10).collect::<Vec<_>>(), out.len(), g, raw.len());
         }
         let mut best = (0.0, 0.0, 0.0);
-        for scale in [0.5, 1.0, 2.0] {
+        for scale in [1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 1.5, 2.0, 3.0] {
             let got: BTreeSet<(i32, i64)> = out.iter().map(|s| (s.midi, ((s.start as i64 - o0) as f64 * scale).round() as i64)).collect();
             let x = f1(&reference, &got, tol);
             if x.2 > best.2 {
