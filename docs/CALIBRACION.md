@@ -22,3 +22,12 @@ Herramientas (`app/crates/nova-audio/examples/`):
 ## Limitaciones
 - Una sola referencia fiable: el barrido orienta, no demuestra. Hacen falta grabaciones con su propia partitura (misma versión) para calibrar de verdad; los tresillos/quintillos (penalizaciones) no se pueden calibrar sin ritmo de referencia.
 - El tempo (octava y estabilidad) es el mayor riesgo de calidad, más que los umbrales de amplitud.
+
+## Motor de piano (ByteDance) frente a Basic Pitch — Chopin (única referencia fiable)
+| | Basic Pitch | Piano |
+|---|---|---|
+| F1 sin umbral | 0,83 (P 0,83 / R 0,83) | **0,86** (P 0,86 / R 0,86) |
+| Con umbral relativo 0,5 | 0,82 | 0,70 (recall 0,58) |
+| Notas en el pipeline completo / silencios | 1291 / 159 | 1237 / 85 |
+
+La velocidad del modelo de piano no es «ruido»: una velocidad baja es una nota suave real, así que con este motor **no se aplica umbral de amplitud** (el pipeline lo desactiva). La mejora medida es modesta porque la métrica (±0,3 s, DTW con calidad 0,70) es gruesa y la partitura de referencia no es exactamente la interpretación; no refleja el 0,97 publicado en MAESTRO. Canon y Air no sirven (arreglo distinto). Visualmente (PDF) la versión de piano tiene menos silencios espurios y acordes más limpios, pero el ritmo sigue limitado por el tempo/rubato (solo el 44 % de las notas cae en la rejilla).

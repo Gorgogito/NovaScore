@@ -4,6 +4,7 @@
 
 mod audio;
 pub mod notes;
+pub mod piano;
 
 pub use notes::{NoteEvent, Params};
 
@@ -35,6 +36,11 @@ struct Engine {
 }
 
 static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
+
+/// Entorno de ONNX Runtime compartido (solo se admite uno por proceso).
+pub(crate) fn environment() -> Result<&'static ort::environment::Environment, String> {
+    engine().map(|e| &e._env)
+}
 
 fn engine() -> Result<&'static Engine, String> {
     ENGINE

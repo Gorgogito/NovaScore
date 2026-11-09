@@ -5,7 +5,7 @@
 //! La grabación y la partitura no suelen coincidir en tempo ni en arreglo, así que se alinean con DTW
 //! sobre cromogramas y se comparan notas (altura exacta y clase de altura) en el tiempo alineado.
 //! Es una medida aproximada: sirve para comparar ajustes entre sí, no como verdad absoluta.
-//! Variables: NOVA_TOL=0.3 (tolerancia en segundos de referencia).
+//! Variables: NOVA_TOL=0.3 (tolerancia en segundos de referencia); NOVA_PIANO=modelo.onnx usa el modelo de piano.
 use nova_audio::Params;
 use nova_core::io::sounds;
 use nova_core::mscx::import_mscz;
@@ -26,7 +26,8 @@ struct Piece {
 }
 
 fn transcribe_cached(path: &Path) -> Vec<RawNote> {
-    let cache = PathBuf::from("target/cache").join(format!("{}.tsv", path.file_stem().unwrap().to_string_lossy()));
+    let piano = std::env::var("NOVA_PIANO").ok();
+    let cache = PathBuf::from("target/cache").join(format!("{}{}.tsv", path.file_stem().unwrap().to_string_lossy(), if piano.is_some() { "-piano" } else { "" }));
     if let Ok(s) = std::fs::read_to_string(&cache) {
         return s
             .lines()
@@ -36,7 +37,10 @@ fn transcribe_cached(path: &Path) -> Vec<RawNote> {
             })
             .collect();
     }
-    let notes = nova_audio::transcribe_file(path, &Params::default()).expect("transcripción");
+    let notes = match &piano {
+        Some(m) => nova_audio::piano::transcribe_file(Path::new(m), nova_audio::piano::Device::Auto, path, &Default::default()).expect("transcripción piano"),
+        None => nova_audio::transcribe_file(path, &Params::default()).expect("transcripción"),
+    };
     let raw: Vec<RawNote> = notes.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
     std::fs::create_dir_all("target/cache").unwrap();
     let txt: String = raw.iter().map(|n| format!("{}\t{}\t{}\t{}\t{}\n", n.start, n.end, n.pitch, n.amplitude, n.onset as u8)).collect();

@@ -5,7 +5,7 @@ use nova_core::io::{self, PedalEvent, Sound};
 use nova_core::{Artic, Clef, Content, Dynamic, Document, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, TimeSig};
 use serde::Serialize;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 
 struct AppState(Mutex<Document>);
 
@@ -246,9 +246,22 @@ fn import_midi(state: State<AppState>, path: String) -> Result<Imported, String>
 
 /// Transcribe an audio file (Basic Pitch) into a new score. The heavy work runs on a worker
 /// thread and outside the document lock so the window stays responsive.
+/// Carpeta de modelos de IA descargados (dentro de los datos de la app).
+fn models_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")).join("modelos")
+}
+
+/// ¿Está el modelo de piano de alta precisión? Devuelve su ruta si existe.
 #[tauri::command]
-async fn import_audio(state: State<'_, AppState>, path: String, options: audio::AudioImportOptions) -> Result<Imported, String> {
-    let r = tauri::async_runtime::spawn_blocking(move || audio::audio_to_score(&path, &options))
+fn piano_model_status(app: tauri::AppHandle) -> Option<String> {
+    let p = audio::piano_model_path(&models_dir(&app));
+    p.is_file().then(|| p.display().to_string())
+}
+
+#[tauri::command]
+async fn import_audio(app: tauri::AppHandle, state: State<'_, AppState>, path: String, options: audio::AudioImportOptions) -> Result<Imported, String> {
+    let models = models_dir(&app);
+    let r = tauri::async_runtime::spawn_blocking(move || audio::audio_to_score(&path, &options, &models))
         .await
         .map_err(|e| format!("La transcripción se interrumpió: {e}"))??;
     let mut doc = lock(&state);
@@ -383,7 +396,7 @@ fn initial_score() -> Score {
     if let Some(path) = std::env::args().nth(1) {
         let lower = path.to_lowercase();
         if audio::is_audio_path(&path) {
-            match audio::audio_to_score(&path, &Default::default()) {
+            match audio::audio_to_score(&path, &Default::default(), std::path::Path::new(".")) {
                 Ok(r) => return r.score,
                 Err(e) => eprintln!("No se pudo transcribir {path}: {e}"),
             }
@@ -413,7 +426,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

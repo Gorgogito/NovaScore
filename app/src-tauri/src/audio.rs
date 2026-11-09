@@ -27,15 +27,42 @@ pub struct AudioImportOptions {
     pub den: Option<u32>,
     /// Voces por pentagrama (1 = más limpio, 2 = separa notas largas de la melodía).
     pub max_voices: Option<usize>,
+    /// «general» (Basic Pitch, incluido) o «piano» (modelo de alta precisión, descargable).
+    pub engine: Option<String>,
 }
 
-pub fn audio_to_score(path: &str, o: &AudioImportOptions) -> Result<ImportReport, String> {
-    let notes = nova_audio::transcribe_file(std::path::Path::new(path), &nova_audio::Params::default())?;
+/// Nombre del archivo del modelo de piano dentro de la carpeta de modelos.
+pub const PIANO_MODEL_FILE: &str = "piano.onnx";
+
+/// Dónde está el modelo de piano: `NOVASCORE_PIANO_MODEL` o `<datos de la app>/modelos/piano.onnx`.
+pub fn piano_model_path(models_dir: &std::path::Path) -> std::path::PathBuf {
+    match std::env::var_os("NOVASCORE_PIANO_MODEL") {
+        Some(p) => p.into(),
+        None => models_dir.join(PIANO_MODEL_FILE),
+    }
+}
+
+pub fn audio_to_score(path: &str, o: &AudioImportOptions, models_dir: &std::path::Path) -> Result<ImportReport, String> {
+    let piano = o.engine.as_deref() == Some("piano");
+    let notes = if piano {
+        let model = piano_model_path(models_dir);
+        if !model.is_file() {
+            return Err(format!("Falta el modelo de piano ({}). Descárgalo o elige el motor general.", model.display()));
+        }
+        nova_audio::piano::transcribe_file(&model, nova_audio::piano::Device::Auto, std::path::Path::new(path), &Default::default())?
+    } else {
+        nova_audio::transcribe_file(std::path::Path::new(path), &nova_audio::Params::default())?
+    };
     let raw: Vec<RawNote> = notes
         .iter()
         .map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset })
         .collect();
     let mut q = QuantizeOptions::default();
+    if piano {
+        // el modelo de piano ya es preciso: la velocidad baja es una nota suave real, no ruido
+        q.min_relative = None;
+        q.min_amplitude = 0.0;
+    }
     if let Some(a) = o.min_amplitude {
         q.min_amplitude = a.clamp(0.0, 1.0);
         q.min_relative = None;
@@ -118,7 +145,7 @@ mod tests {
         let notes: Vec<(f64, f64, i32)> = [60, 62, 64, 65, 67, 65, 64, 62].iter().enumerate().map(|(i, m)| (0.5 + i as f64, 0.95, *m)).collect();
         write_wav(&wav, &notes, 9.5);
         let o = AudioImportOptions { tempo: Some(60.0), num: Some(4), den: Some(4), max_voices: Some(1), ..Default::default() };
-        let r = audio_to_score(wav.to_str().unwrap(), &o).unwrap();
+        let r = audio_to_score(wav.to_str().unwrap(), &o, std::path::Path::new(".")).unwrap();
         assert_eq!(r.score.tempo, 60);
         assert_eq!((r.score.time.num, r.score.time.den), (4, 4));
         assert_eq!(r.score.title, "escala");
@@ -126,6 +153,6 @@ mod tests {
         assert!((6..=10).contains(&n), "{n} notas");
         assert!(r.warnings[0].contains("borrador"));
         // un archivo que no existe da un error legible, no un pánico
-        assert!(audio_to_score(dir.join("no_existe.wav").to_str().unwrap(), &Default::default()).is_err());
+        assert!(audio_to_score(dir.join("no_existe.wav").to_str().unwrap(), &Default::default(), std::path::Path::new(".")).is_err());
     }
 }

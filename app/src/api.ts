@@ -38,7 +38,7 @@ export interface Playback {
 }
 type Imported = { score: Score; warnings: string[] };
 /** Opciones de la transcripción de audio; sin un campo se usa el valor automático. */
-export type AudioOptions = { minAmplitude?: number; minRelative?: number; tempo?: number; num?: number; den?: number; maxVoices?: number };
+export type AudioOptions = { minAmplitude?: number; minRelative?: number; tempo?: number; num?: number; den?: number; maxVoices?: number; engine?: "general" | "piano" };
 
 export const api = {
   getScore: () => invoke<Score>("get_score"),
@@ -94,5 +94,6 @@ export const api = {
   importMusicxml: (path: string) => invoke<Imported>("import_musicxml", { path }),
   importMscz: (path: string) => invoke<Imported>("import_mscz", { path }),
   importMidi: (path: string) => invoke<Imported>("import_midi", { path }),
+  pianoModelStatus: () => invoke<string | null>("piano_model_status"),
   importAudio: (path: string, options: AudioOptions) => invoke<Imported>("import_audio", { path, options }),
 };

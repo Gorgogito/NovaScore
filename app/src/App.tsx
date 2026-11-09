@@ -716,6 +716,9 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
   const [time, setTime] = createSignal("4/4");
   const [amp, setAmp] = createSignal(0.5);
   const [voices, setVoices] = createSignal(1);
+  const [engine, setEngine] = createSignal<"general" | "piano">("general");
+  const [pianoModel, setPianoModel] = createSignal<string | null>(null);
+  api.pianoModelStatus().then(setPianoModel).catch(() => setPianoModel(null));
   const name = () => props.path.split(/[\\/]/).pop() ?? props.path;
   return (
     <div class="modal" onClick={props.onCancel}>
@@ -725,11 +728,17 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
         onSubmit={(e) => {
           e.preventDefault();
           const [num, den] = time().split("/").map(Number);
-          props.onImport(props.path, { minRelative: amp(), tempo: auto() ? undefined : tempo(), num, den, maxVoices: voices() });
+          props.onImport(props.path, { engine: engine(), minRelative: engine() === "piano" ? undefined : amp(), tempo: auto() ? undefined : tempo(), num, den, maxVoices: voices() });
         }}
       >
         <h2>Importar audio</h2>
         <p title={props.path}>{name()}</p>
+        <label>Motor
+          <select value={engine()} onChange={(e) => setEngine(e.currentTarget.value as "general" | "piano")}>
+            <option value="general">General (cualquier instrumento)</option>
+            <option value="piano" disabled={!pianoModel()}>{pianoModel() ? "Piano (alta precisión, usa la GPU)" : "Piano (alta precisión): modelo no instalado"}</option>
+          </select>
+        </label>
         <label>Tempo
           <select value={auto() ? "auto" : "fixed"} onChange={(e) => setAuto(e.currentTarget.value === "auto")}>
             <option value="auto">Automático</option>
@@ -752,10 +761,12 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
             <option value="2">2 (separa notas largas)</option>
           </select>
         </label>
+        <Show when={engine() === "general"}>
         <label>Sensibilidad: se descartan las notas que suenan menos de {Math.round(amp() * 100)} % de lo que suenan las fuertes
           <input type="range" min="0.4" max="0.9" step="0.05" value={amp()} onInput={(e) => setAmp(Number(e.currentTarget.value))} />
         </label>
         <p>Un porcentaje menor = más notas, pero con más falsas (armónicos). Es un borrador: revísalo.</p>
+        </Show>
         <div class="actions">
           <button type="button" onClick={props.onCancel}>Cancelar</button>
           <button type="submit" class="primary">Transcribir</button>

@@ -7,13 +7,22 @@ fn main() {
         eprintln!("uso: audio2score entrada salida.musicxml [bpm|auto] [amplitud_minima]");
         std::process::exit(2);
     }
-    let notes = nova_audio::transcribe_file(std::path::Path::new(&a[1]), &nova_audio::Params::default()).unwrap_or_else(|e| {
+    let piano = std::env::var("NOVA_PIANO").ok();
+    let notes = match &piano {
+        Some(m) => nova_audio::piano::transcribe_file(std::path::Path::new(m), nova_audio::piano::Device::Auto, std::path::Path::new(&a[1]), &Default::default()),
+        None => nova_audio::transcribe_file(std::path::Path::new(&a[1]), &nova_audio::Params::default()),
+    }
+    .unwrap_or_else(|e| {
         eprintln!("ERROR: {e}");
         std::process::exit(1);
     });
     let raw: Vec<RawNote> = notes.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
     let mut opt = QuantizeOptions::default();
     opt.tempo = a.get(3).and_then(|s| s.parse().ok());
+    if piano.is_some() {
+        opt.min_relative = None;
+        opt.min_amplitude = 0.0;
+    }
     if let Some(v) = a.get(4).and_then(|s| s.parse().ok()) {
         opt.min_amplitude = v;
         opt.min_relative = None;
