@@ -55,6 +55,10 @@ pub struct QuantizeOptions {
     pub max_voices: usize,
     /// Detectar pulsos de tresillos de corchea y escribirlos como tresillos.
     pub triplets: bool,
+    /// Detectar el compás (2/4, 3/4 o 4/4) a partir de los acentos; sustituye a `time`.
+    pub auto_meter: bool,
+    /// Detectar la anacrusa (tiempos antes del primer compás completo).
+    pub auto_pickup: bool,
 }
 
 impl Default for QuantizeOptions {
@@ -72,6 +76,8 @@ impl Default for QuantizeOptions {
             clean: true,
             max_voices: 1,
             triplets: true,
+            auto_meter: false,
+            auto_pickup: false,
         }
     }
 }
@@ -507,6 +513,173 @@ pub fn clean_notes_with(notes: &[RawNote], p: &CleanParams) -> (Vec<RawNote>, Cl
     (c, CleanStats { merged, harmonics, chromatic, key_doubtful })
 }
 
+/// Compás y anacrusa estimados.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeterGuess {
+    /// Negras por compás.
+    pub beats: u32,
+    /// Tiempos que preceden al primer tiempo fuerte (0 = la pieza empieza en el primer tiempo).
+    pub pickup: u32,
+    /// 0..1: cuánto destaca la mejor hipótesis sobre la siguiente.
+    pub confidence: f64,
+}
+
+/// Fuerza de cada pulso (relativa al primer pulso con notas): acentos de las notas que empiezan
+/// en él más un bonus cuando cambia la nota más grave (cambio de armonía, típico del tiempo fuerte).
+fn beat_strengths(notes: &[RawNote], map: &BeatMap, k0: i64) -> Vec<f64> {
+    let last = notes.iter().map(|n| map.pos(n.start)).fold(0.0, f64::max);
+    let n_beats = ((last - k0 as f64).floor() as i64 + 1).max(1) as usize;
+    let mut acc = vec![0.0f64; n_beats];
+    let mut peak = vec![0.0f64; n_beats];
+    let mut bass: Vec<Option<u8>> = vec![None; n_beats];
+    for n in notes {
+        // fuerza de la nota: intensidad, más si es grave o larga (no se cuenta cuántas suenan a la vez:
+        // los acordes de los tiempos débiles no deben ganar al bajo del tiempo fuerte)
+        let mut wt = (n.amplitude as f64).powi(2);
+        let together = notes.iter().filter(|m| (m.start - n.start).abs() < 0.04).count() as f64;
+        wt *= 1.0 + METER_CHORD_GAIN * (together - 1.0).min(3.0);
+        if n.pitch < 55 {
+            wt *= 1.3;
+        }
+        if n.end - n.start > 0.7 {
+            wt *= 1.3;
+        }
+        let p = map.pos(n.start);
+        let k = p.round();
+        if (p - k).abs() > 0.3 {
+            continue;
+        }
+        let j = k as i64 - k0;
+        if j < 0 || j as usize >= n_beats {
+            continue;
+        }
+        let j = j as usize;
+        acc[j] += 0.25 * wt;
+        peak[j] = peak[j].max(wt);
+        if bass[j].map_or(true, |b| n.pitch < b) {
+            bass[j] = Some(n.pitch);
+        }
+    }
+    for j in 0..n_beats {
+        acc[j] += peak[j];
+    }
+    let mean = acc.iter().sum::<f64>() / acc.iter().filter(|&&a| a > 0.0).count().max(1) as f64;
+    let mut prev: Option<u8> = None;
+    let mut s = vec![0.0; n_beats];
+    for j in 0..n_beats {
+        s[j] = acc[j] / mean.max(1e-9);
+        if let Some(b) = bass[j] {
+            if prev.map_or(false, |p| p % 12 != b % 12) {
+                s[j] += 0.5;
+            }
+            prev = Some(b);
+        }
+    }
+    s
+}
+
+/// Puntuación de «los tiempos fuertes caen en `phase` módulo `m`» (m = 2, 3 o 4).
+fn downbeat_score(s: &[f64], m: usize, phase: usize) -> f64 {
+    let mean = s.iter().sum::<f64>() / s.len() as f64;
+    let (mut ds, mut dn, mut os, mut on) = (0.0, 0usize, 0.0, 0usize);
+    for (j, &v) in s.iter().enumerate() {
+        if j % m == phase {
+            ds += v;
+            dn += 1;
+        } else {
+            os += v;
+            on += 1;
+        }
+    }
+    if dn == 0 || on == 0 {
+        return f64::MIN;
+    }
+    let mut sc = (ds / dn as f64 - os / on as f64) / mean.max(1e-9);
+    if m == 4 {
+        // en 4/4 el tercer tiempo es más fuerte que el segundo y el cuarto
+        let (mut a, mut an, mut b, mut bn) = (0.0, 0usize, 0.0, 0usize);
+        for (j, &v) in s.iter().enumerate() {
+            let r = (j + 4 - phase) % 4;
+            if r == 2 {
+                a += v;
+                an += 1;
+            } else if r != 0 {
+                b += v;
+                bn += 1;
+            }
+        }
+        if an > 0 && bn > 0 {
+            sc += 0.5 * (a / an as f64 - b / bn as f64) / mean.max(1e-9);
+        }
+    }
+    sc
+}
+
+/// Estima compás y anacrusa. `fixed` = negras por compás ya decididas por el usuario (solo se
+/// busca la anacrusa). Con poca evidencia devuelve 4 tiempos, sin anacrusa y confianza baja.
+pub fn detect_meter(notes: &[RawNote], map: &BeatMap, fixed: Option<u32>, detect_pickup: bool) -> MeterGuess {
+    let first = notes.iter().map(|n| n.start).fold(f64::MAX, f64::min);
+    let k0 = (map.pos(first) + 0.25).floor() as i64;
+    let s = beat_strengths(notes, map, k0);
+    let default = MeterGuess { beats: fixed.unwrap_or(4), pickup: 0, confidence: 0.0 };
+    if s.len() < 12 {
+        return default;
+    }
+    let meters: Vec<u32> = match fixed {
+        Some(m) => vec![m],
+        None => vec![2, 3, 4],
+    };
+    // (puntuación, compás, fase)
+    let mut hyp: Vec<(f64, u32, usize)> = Vec::new();
+    for &m in &meters {
+        if !(2..=4).contains(&m) {
+            // compases largos: solo se busca la fase con el criterio de «un tiempo fuerte por compás»
+            for ph in 0..m as usize {
+                if !detect_pickup && ph != 0 {
+                    continue;
+                }
+                hyp.push((downbeat_score_n(&s, m as usize, ph), m, ph));
+            }
+            continue;
+        }
+        for ph in 0..m as usize {
+            if !detect_pickup && ph != 0 {
+                continue;
+            }
+            let mut sc = downbeat_score(&s, m as usize, ph);
+            if m == 3 {
+                sc -= METER_PRIOR_3;
+            }
+            if m == 2 {
+                sc -= METER_PRIOR_2;
+            }
+            if ph == 0 {
+                sc += PICKUP_PRIOR;
+            }
+            hyp.push((sc, m, ph));
+        }
+    }
+    hyp.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let (best, m, ph) = hyp[0];
+    // 2/4 y 4/4 con la misma fase comparten el primer tiempo fuerte: no son rivales a efectos de la anacrusa
+    let second = hyp.iter().skip(1).find(|h| !(h.2 == ph && (h.1 == 2 || h.1 == 4) && (m == 2 || m == 4))).map_or(best - 1.0, |h| h.0);
+    // en la fase, j ≡ ph (mod m) son los tiempos fuertes: la anacrusa son los ph tiempos previos
+    MeterGuess { beats: m, pickup: ph as u32, confidence: ((best - second) / best.abs().max(0.2)).clamp(0.0, 1.0) }
+}
+
+fn downbeat_score_n(s: &[f64], m: usize, phase: usize) -> f64 {
+    downbeat_score(s, m, phase)
+}
+
+/// Sesgo a favor del 4/4 frente al 3/4 y 2/4, y de «sin anacrusa» (calibrados en `docs/CALIBRACION.md`).
+/// Confianza mínima (0..1) para fiarse de la detección; por debajo se usa 4/4 sin anacrusa.
+const METER_MIN_CONFIDENCE: f64 = 0.15;
+/// Peso extra por cada nota simultánea (acordes) al medir la fuerza de un pulso.
+const METER_CHORD_GAIN: f64 = 0.15;
+const METER_PRIOR_3: f64 = 0.10;
+const METER_PRIOR_2: f64 = 0.15;
+const PICKUP_PRIOR: f64 = 0.15;
+
 /// Peso de cada inicio para el seguimiento de pulso: los acordes, los graves y las notas largas
 /// suelen marcar los tiempos fuertes, así que cuentan más que una nota suelta y breve.
 fn accent_weights(notes: &[RawNote]) -> Vec<(f64, f32)> {
@@ -590,8 +763,33 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         BeatMap::regular(phase, 60.0 / bpm, last)
     };
     let bpm = map.median_bpm();
-    // primer pulso de compás: el pulso más cercano por debajo de la primera nota
-    let origin = (map.pos(first) + 0.25).floor();
+    // Compás y anacrusa
+    let mut time = o.time;
+    let mut pickup = 0u32;
+    if o.auto_meter || o.auto_pickup {
+        let fixed = if o.auto_meter { None } else if o.time.measure_ticks() % PPQ == 0 { Some(o.time.measure_ticks() / PPQ) } else { None };
+        if o.auto_meter || fixed.is_some() {
+            let g = detect_meter(&notes, &map, fixed, o.auto_pickup);
+            if g.confidence >= METER_MIN_CONFIDENCE {
+                if o.auto_meter {
+                    time = TimeSig { num: g.beats, den: 4 };
+                }
+                pickup = g.pickup;
+                warnings.push(format!(
+                    "Compás {}/{} detectado (confianza {:.0} %){}.",
+                    time.num,
+                    time.den,
+                    g.confidence * 100.0,
+                    if pickup > 0 { format!("; anacrusa de {pickup} tiempo(s): el primer compás empieza con silencios") } else { String::new() }
+                ));
+            } else if o.auto_meter {
+                warnings.push(format!("No se pudo detectar el compás con fiabilidad (confianza {:.0} %): se supone {}/{}. Cámbialo si no es el correcto.", g.confidence * 100.0, time.num, time.den));
+            }
+        }
+    }
+    let beats_per_bar = (time.measure_ticks() / PPQ).max(1);
+    // origen de la rejilla: el primer pulso de compás anterior o igual a la primera nota
+    let origin = (map.pos(first) + 0.25).floor() - if pickup > 0 { (beats_per_bar - pickup % beats_per_bar) as f64 } else { 0.0 };
     warnings.push(format!(
         "Tempo {}: {:.1} negras/min.{}",
         if o.tempo.is_some() { "indicado" } else { "estimado" },
@@ -623,7 +821,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         q.push(Q { s, e, pitch: n.pitch });
     }
     let end_tick = q.iter().map(|x| x.e).max().unwrap();
-    let mlen = o.time.measure_ticks();
+    let mlen = time.measure_ticks();
     if end_tick / mlen >= MAX_MEASURES {
         return Err(format!("La pieza supera {MAX_MEASURES} compases con el tempo estimado."));
     }
@@ -641,7 +839,10 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         }
         warnings.push(format!("Se detectaron pulsos con grupos irregulares: {}.", parts.join(", ")));
     }
-    warnings.push(format!("Compás {}/{} supuesto; la primera nota se coloca en el primer tiempo (sin anacrusa). Cuantizado a semicorcheas.", o.time.num, o.time.den));
+    if !(o.auto_meter || o.auto_pickup) {
+        warnings.push(format!("Compás {}/{} supuesto; la primera nota se coloca en el primer tiempo (sin anacrusa).", time.num, time.den));
+    }
+    warnings.push("Cuantizado a semicorcheas.".into());
 
     // Pentagramas
     let low: Vec<Q> = q.iter().copied().filter(|x| x.pitch < SPLIT_PITCH).collect();
@@ -657,7 +858,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         staves.push(("Mano izquierda".into(), Clef::Bass, low));
     }
 
-    let mut score = Score::new(&o.title, o.time, fifths, 1);
+    let mut score = Score::new(&o.title, time, fifths, 1);
     score.tempo = bpm.round().clamp(20.0, 300.0) as u32;
     score.parts.clear();
     let mut dropped_voices = false;
@@ -1016,5 +1217,68 @@ mod tests {
         let raw = vec![weak, n(1.0, 1.0, 62, bpm), n(2.0, 1.0, 64, bpm), n(3.0, 1.0, 65, bpm)];
         let r = notes_to_score(&raw, &QuantizeOptions::default()).unwrap();
         assert!(r.warnings.iter().any(|w| w.contains("descartaron 1 de 4")));
+    }
+
+    /// Pieza con bajo fuerte en el primer tiempo y acordes suaves en el resto, empezando `skip` tiempos tarde.
+    fn metered(beats_per_bar: usize, bars: usize, skip: usize, bpm: f64) -> Vec<RawNote> {
+        let b = 60.0 / bpm;
+        let mut v = Vec::new();
+        for bar in 0..bars {
+            let bass = [40u8, 43, 45, 38][bar % 4];
+            for k in 0..beats_per_bar {
+                let beat = bar * beats_per_bar + k;
+                if beat < skip {
+                    continue;
+                }
+                let t0 = 1.3 + beat as f64 * b;
+                if k == 0 {
+                    v.push(RawNote { start: t0, end: t0 + b * 0.95, pitch: bass, amplitude: 0.95, onset: true });
+                    v.push(RawNote { start: t0, end: t0 + b * 0.95, pitch: bass + 24, amplitude: 0.8, onset: true });
+                } else {
+                    for p in [60u8, 64, 67] {
+                        v.push(RawNote { start: t0, end: t0 + b * 0.9, pitch: p + (bar % 3) as u8, amplitude: 0.5, onset: true });
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    fn meter_opts(bpm: f64) -> QuantizeOptions {
+        QuantizeOptions { auto_meter: true, auto_pickup: true, tempo: Some(bpm), min_relative: None, min_amplitude: 0.0, clean: false, triplets: false, ..Default::default() }
+    }
+
+    #[test]
+    fn detects_waltz_and_common_time_without_pickup() {
+        let r = notes_to_score(&metered(3, 24, 0, 96.0), &meter_opts(96.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (3, 4), "{:?}", r.warnings);
+        assert_eq!(sounds(&r.score)[0].start, 0);
+        let r = notes_to_score(&metered(4, 24, 0, 96.0), &meter_opts(96.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (4, 4), "{:?}", r.warnings);
+        assert_eq!(sounds(&r.score)[0].start, 0);
+    }
+
+    #[test]
+    fn detects_pickup_beats() {
+        // 4/4 que empieza 1 tiempo antes del compás (tiempo 4) y 3/4 que empieza 2 tiempos antes (tiempo 2)
+        let r = notes_to_score(&metered(4, 24, 3, 96.0), &meter_opts(96.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (4, 4), "{:?}", r.warnings);
+        assert_eq!(sounds(&r.score)[0].start, 3 * 480, "{:?}", r.warnings);
+        let r = notes_to_score(&metered(3, 24, 1, 96.0), &meter_opts(96.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (3, 4), "{:?}", r.warnings);
+        assert_eq!(sounds(&r.score)[0].start, 480, "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn fixed_meter_still_detects_pickup_and_flat_music_keeps_default() {
+        let o = QuantizeOptions { auto_meter: false, time: TimeSig { num: 4, den: 4 }, ..meter_opts(96.0) };
+        let r = notes_to_score(&metered(4, 24, 3, 96.0), &o).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (4, 4));
+        assert_eq!(sounds(&r.score)[0].start, 3 * 480);
+        // pulsos todos iguales: sin evidencia → 4/4 y sin anacrusa
+        let flat: Vec<RawNote> = (0..60).map(|i| RawNote { start: 1.3 + i as f64 * 0.625, end: 1.3 + i as f64 * 0.625 + 0.5, pitch: 60, amplitude: 0.8, onset: true }).collect();
+        let r = notes_to_score(&flat, &meter_opts(96.0)).unwrap();
+        assert_eq!((r.score.time.num, r.score.time.den), (4, 4));
+        assert_eq!(sounds(&r.score)[0].start, 0);
     }
 }

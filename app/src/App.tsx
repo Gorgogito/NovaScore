@@ -714,7 +714,7 @@ export default function App() {
 function AudioDialog(props: { path: string; onCancel: () => void; onImport: (path: string, o: AudioOptions) => void }) {
   const [auto, setAuto] = createSignal(true);
   const [tempo, setTempo] = createSignal(100);
-  const [time, setTime] = createSignal("4/4");
+  const [time, setTime] = createSignal("auto");
   const [amp, setAmp] = createSignal(0.5);
   const [voices, setVoices] = createSignal(1);
   const [engine, setEngine] = createSignal<"general" | "piano">("general");
@@ -744,7 +744,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();
-          const [num, den] = time().split("/").map(Number);
+          const [num, den] = time() === "auto" ? [undefined, undefined] : time().split("/").map(Number);
           props.onImport(props.path, { engine: engine(), minRelative: engine() === "piano" ? undefined : amp(), tempo: auto() ? undefined : tempo(), num, den, maxVoices: voices() });
         }}
       >
@@ -778,6 +778,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
         </Show>
         <label>Compás
           <select value={time()} onChange={(e) => setTime(e.currentTarget.value)}>
+            <option value="auto">Automático (2/4, 3/4, 4/4 y anacrusa)</option>
             <For each={["2/4", "3/4", "4/4", "5/4", "6/8", "9/8", "12/8", "2/2", "3/8"]}>{(t) => <option>{t}</option>}</For>
           </select>
         </label>

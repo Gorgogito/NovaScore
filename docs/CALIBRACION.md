@@ -31,3 +31,12 @@ Herramientas (`app/crates/nova-audio/examples/`):
 | Notas en el pipeline completo / silencios | 1291 / 159 | 1237 / 85 |
 
 La velocidad del modelo de piano no es «ruido»: una velocidad baja es una nota suave real, así que con este motor **no se aplica umbral de amplitud** (el pipeline lo desactiva). La mejora medida es modesta porque la métrica (±0,3 s, DTW con calidad 0,70) es gruesa y la partitura de referencia no es exactamente la interpretación; no refleja el 0,97 publicado en MAESTRO. Canon y Air no sirven (arreglo distinto). Visualmente (PDF) la versión de piano tiene menos silencios espurios y acordes más limpios, pero el ritmo sigue limitado por el tempo/rubato (solo el 44 % de las notas cae en la rejilla).
+
+## Detección de compás y anacrusa (`quantize::detect_meter`)
+Método: sobre el mapa de pulsos se mide la fuerza de cada pulso (intensidad² de las notas que empiezan en él, más si son graves o largas, con poco peso por acorde, más un bonus cuando cambia la nota más grave) y se busca la hipótesis «tiempo fuerte cada m pulsos, con fase φ» (m = 2, 3 o 4; en 4/4 el tercer tiempo cuenta como secundario). La fase da la anacrusa. Sesgos a favor de 4/4 y de «sin anacrusa»; confianza = margen frente a la mejor hipótesis con otra fase (2/4 y 4/4 con la misma fase no compiten). Por debajo de 0,15 se usa 4/4 sin anacrusa y se avisa. El compás de 1 a 3 tiempos de anacrusa se escribe como silencios al inicio del primer compás (el modelo no tiene compás corto).
+
+Evaluación (sin audio, con las notas exactas de 6 partituras en 4/4 y anacrusas simuladas de 0 a 3 tiempos, 24 casos): con confianza ≥ 0,15 las decisiones con anacrusa son correctas en 8 de 11 casos (fallan Canon en Re ×2 y Canon Rock ×1, todas con confianza baja); sin anacrusa, el valor por defecto acierta siempre que realmente no la hay. El compás salió 4/4 en las 6 (correcto en todas). Londonderry: 4/4 casos correctos. **Canon en Do y Canon en Re (ostinato de corcheas continuas) no tienen acentos que detectar**: confianza ≤ 0,15 → se queda con 4/4 sin anacrusa.
+
+Grabaciones reales (11, sin verdad conocida): 10 salen 4/4, Monoman 3/4 (confianza 47 %), Air con anacrusa de 1 tiempo (36 %), el resto sin anacrusa; Chopin sin detección fiable. No hay forma de verificar los resultados reales sin su partitura exacta.
+
+Límites: no se detectan compases compuestos (6/8, 9/8, 12/8: el pulso sigue siendo la negra y salen como 3/4 o 4/4 con tresillos), ni 5/4, 7/8 ni cambios de compás a mitad de pieza. Los sesgos y el umbral están calibrados con muy pocas piezas.

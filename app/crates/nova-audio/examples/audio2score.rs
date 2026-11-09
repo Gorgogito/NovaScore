@@ -18,6 +18,8 @@ fn main() {
     });
     let raw: Vec<RawNote> = notes.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
     let mut opt = QuantizeOptions::default();
+    opt.auto_meter = std::env::var("NOVA_NOMETER").is_err();
+    opt.auto_pickup = true;
     opt.tempo = a.get(3).and_then(|s| s.parse().ok());
     if piano.is_some() {
         opt.min_relative = None;
