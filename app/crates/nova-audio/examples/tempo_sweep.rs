@@ -26,7 +26,7 @@ fn main() {
         let raw = load(Path::new(&a));
         let mut line = format!("{:<44}", Path::new(&a).file_stem().unwrap().to_string_lossy().chars().take(42).collect::<String>());
         for r in rels {
-            let o = QuantizeOptions { min_relative: Some(r), robust_tempo: std::env::var("NOVA_ROBUST").is_ok(), ..Default::default() };
+            let o = QuantizeOptions { min_relative: Some(r), robust_tempo: std::env::var("NOVA_ROBUST").is_ok(), lax_tightness: std::env::var("NOVA_LAXT").ok().and_then(|s| s.parse().ok()), ..Default::default() };
             line += &match notes_to_score(&raw, &o) {
                 Ok(x) => format!("{:>8}", x.score.tempo),
                 Err(_) => format!("{:>8}", "-"),

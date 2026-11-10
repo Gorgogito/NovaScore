@@ -160,6 +160,7 @@ pub fn audio_to_score(path: &str, o: &AudioImportOptions, models_dir: &std::path
     q.auto_pickup = true;
     q.compound = true;
     q.robust_tempo = true;
+    q.lax_tightness = Some(4.0);
     if let (Some(num), Some(den)) = (o.num, o.den) {
         if (1..=32).contains(&num) && matches!(den, 1 | 2 | 4 | 8 | 16) {
             q.time = TimeSig { num, den };

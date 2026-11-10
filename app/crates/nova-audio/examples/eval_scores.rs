@@ -6,7 +6,8 @@
 //! Uso: cargo run --release --example eval_scores -- a.mscz b.mscz …
 //! Variables: NOVA_PIANO=modelo.onnx (motor de piano; si no, Basic Pitch), NOVA_BARS=32 (compases),
 //!   NOVA_SF=ruta.sf3, NOVA_TOL=60, NOVA_REL=0.5 (umbral relativo, solo Basic Pitch), NOVA_NOAUTO=1
-//!   (compás 4/4 fijo sin autodetección), NOVA_PROGRAM=0 (fuerza un instrumento GM), NOVA_VERBOSE=1.
+//!   (compás 4/4 fijo sin autodetección), NOVA_PROGRAM=0 (fuerza un instrumento GM), NOVA_VERBOSE=1,
+//!   NOVA_RUBATO=0.15 (amplitud del rubato sinusoidal; 0 = sin rubato) y NOVA_PERIOD=16 (pulsos por ciclo).
 use nova_audio::piano::{self, Device};
 use nova_core::io::sounds;
 use nova_core::mscx::import_mscz;
@@ -95,8 +96,30 @@ fn main() {
         if snd.len() < 16 {
             continue;
         }
-        let notes: Vec<(f64, f64, u8, u8, u8)> =
-            snd.iter().map(|s| (1.0 + s.start as f64 * spt, s.ticks as f64 * spt, s.channel, s.midi.clamp(0, 127) as u8, s.velocity.max(40))).collect();
+        // Rubato: bpm(b) = tempo · (1 + a · sin(2π b / periodo)); sec(ticks) = tiempo acumulado.
+        let rubato = env_f("NOVA_RUBATO", 0.0);
+        let period_beats = env_f("NOVA_PERIOD", 16.0);
+        let step = 1.0 / 96.0;
+        let max_beats = snd.iter().map(|s| (s.start + s.ticks) as f64 / 480.0).fold(0.0, f64::max) + 2.0;
+        let mut cum = vec![0.0f64];
+        let mut b = 0.0;
+        while b < max_beats + 1.0 {
+            let bpm = sc.tempo as f64 * (1.0 + rubato * (std::f64::consts::TAU * (b + step / 2.0) / period_beats).sin());
+            cum.push(cum.last().unwrap() + step * 60.0 / bpm);
+            b += step;
+        }
+        let sec = |ticks: f64| -> f64 {
+            if rubato == 0.0 {
+                return ticks * spt;
+            }
+            let x = (ticks / 480.0 / step).max(0.0);
+            let i = (x.floor() as usize).min(cum.len() - 2);
+            cum[i] + (x - i as f64) * (cum[i + 1] - cum[i])
+        };
+        let notes: Vec<(f64, f64, u8, u8, u8)> = snd
+            .iter()
+            .map(|s| (1.0 + sec(s.start as f64), sec((s.start + s.ticks) as f64) - sec(s.start as f64), s.channel, s.midi.clamp(0, 127) as u8, s.velocity.max(40)))
+            .collect();
         let mut programs: Vec<(u8, u8)> = snd.iter().map(|s| (s.channel, force_program.unwrap_or(sc.parts[s.part].program))).collect();
         programs.sort();
         programs.dedup();
@@ -149,6 +172,10 @@ fn main() {
         if let Some(v) = std::env::var("NOVA_MARGIN").ok().and_then(|s| s.parse().ok()) {
             qo.clean_params.key_min_margin = v;
         }
+        qo.lax_tightness = std::env::var("NOVA_LAX").ok().and_then(|s| s.parse().ok()).or(Some(4.0)).filter(|&v| v > 0.0);
+        if let Some(v) = std::env::var("NOVA_TIGHT").ok().and_then(|s| s.parse().ok()) {
+            qo.tightness = v;
+        }
         if std::env::var("NOVA_NOTUPLETS").is_ok() {
             qo.triplets = false;
         }
@@ -174,7 +201,9 @@ fn main() {
             }
         }
         // tempo módulo octavas
-        let ratio = r.score.tempo as f64 / sc.tempo as f64;
+        // con rubato sinusoidal el tempo medio (en pulsos) es tempo·√(1−a²)
+        let mean_tempo = sc.tempo as f64 * (1.0 - rubato * rubato).sqrt();
+        let ratio = r.score.tempo as f64 / mean_tempo;
         let k = ratio.log2().round();
         let err = ratio / 2f64.powf(k) - 1.0;
         let tempo_good = err.abs() < 0.04;

@@ -93,8 +93,16 @@ Problema: en arpegios regulares sin acentos el pulso queda ambiguo entre 3 y 4 d
 - **Solo se aplica si la rejilla es fiable** (unidad ≥ 80 ms y ≥ 35 % de los intervalos la igualan): sin esta condición, Chopin (grabación) pasaba de 100 a 87 y Londonderry de 98 a 90 porque en audio ruidoso la «unidad» sale de 60 ms. Con la condición, las 11 grabaciones dan el mismo tempo que antes (comprobado con `tempo_sweep`).
 - **Queda sin resolver**: BWV 847 (145 → 115, no es múltiplo de 3 ni potencia de 2 de la rejilla: 5,2 unidades) y las grabaciones ruidosas, donde la rejilla no se puede estimar y la ambigüedad sigue decidiéndose por el prior de ~100/min.
 
+## Rubato en el banco y seguimiento flexible
+`eval_scores` admite `NOVA_RUBATO=a` (tempo sinusoidal `bpm·(1 + a·sin(2π·pulso/periodo))`, `NOVA_PERIOD=16` pulsos) y `NOVA_TIGHT`/`NOVA_LAX`; el tempo de referencia es el medio, `tempo·√(1−a²)`.
+- **Hallazgo**: la rigidez por defecto (`tightness` 30) no sigue el rubato. Con 25 piezas y piano: rubato 0 → tempo 22/25, F1 0,833; **0,1 → 6/25, F1 0,28**; 0,2 → 0/25, F1 0,14; 0,3 → 1/25. (El `roundtrip` antiguo ya lo mostraba: F1 0,09 con rubato 0,12 y rigidez 30, 0,98 con 8 o 3.)
+- **Barrido de rigidez** (11 piezas representativas, piano): rubato 0 → 30: F1 0,891; 15: 0,891; 8: 0,832; 4: 0,840. Rubato 0,1 → 30: 0,291; 15: 0,452; 8: 0,667; **4: 0,738**. Rubato 0,2: 0,13–0,19 con cualquier valor. Una rigidez fija no sirve: con 4 mejora Tresillos (0,06 → 0,83) pero rompe La Campanella (0,98 → 0,41) y BWV 846 (0,94 → 0,12) sin rubato.
+- **Solución** (`QuantizeOptions.lax_tightness`, activa en la app, `audio2score` y `eval_scores`): se calcula el seguimiento rígido (30) y el flexible (4) y se usa el flexible solo si el **desajuste mediano de los ataques con la rejilla** (semicorcheas y tresillos de corchea, en pulsos) baja por debajo del 70 % del rígido (`LAX_GAIN`); entonces avisa: «Tempo con variaciones marcadas (rubato)…». Resultado en las 11 piezas: **rubato 0 → tempo 11/11, F1 0,967** (antes 0,891; el flexible solo se activa en Tresillos, donde arregla el tempo); **rubato 0,1 → tempo 10/11, F1 0,737** (antes 0,291); rubato 0,2 → 0/11, F1 0,19 (**límite**: ±20 % en 16 pulsos no se sigue). Fallos a 0,1: La Campanella (tempo 88 vs 97, F1 0,15), Nocturno 9-1 (tempo bien, F1 0,03) y BWV 846 (6/8 falso, F1 0,20).
+- Test unitario con tempo sintético oscilante del 20 %: rígido 75 % de notas en la rejilla, flexible 100 %; con tempo constante no se activa.
+- **Grabaciones reales**: el tempo de las 11 es idéntico con y sin seguimiento flexible (`tempo_sweep` con `NOVA_LAXT=4`), es decir, **ni mejora ni empeora**: el beneficio solo está demostrado en audio sintético con rubato sinusoidal (no con rubato real de intérprete).
+
 ## Lo que sigue sin calibrar
 - Penalizaciones de tresillos/quintillos/seisillos: el banco sintético no las discrimina (F1 igual con y sin grupos); haría falta una métrica de ritmo más estricta (tolerancia < 30 ticks) o grupos mezclados con subdivisiones binarias cercanas.
-- Rubato: el banco usa tempo constante. Se podría deformar el audio con una curva de tempo (`roundtrip` ya tiene `NOVA_RUBATO` con partituras sintéticas).
+- Rubato real: el banco usa rubato sinusoidal sintético (hasta ~10 % se sigue; 20 % no); falta rubato de intérprete real (ritardandi, fermatas) y rubato en el que solo oscila la mano derecha.
 - Compases distintos de 4/4 y anacrusas reales: el banco apenas tiene (Für Elise 3/8, Chopin 12/8).
 - Instrumentos que no son piano: solo Canon Rock (0,30 con Basic Pitch).

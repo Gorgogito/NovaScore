@@ -49,6 +49,9 @@ pub struct QuantizeOptions {
     pub follow_tempo: bool,
     /// Rigidez del seguimiento: mayor = el tempo varía menos.
     pub tightness: f64,
+    /// Si es `Some(r)`, se calcula también el seguimiento con rigidez `r` (más laxa, para rubato) y se
+    /// usa solo si los ataques caen claramente más cerca de la rejilla que con el rígido.
+    pub lax_tightness: Option<f64>,
     /// Limpiar la transcripción (unir fragmentos, quitar armónicos y notas cromáticas débiles).
     pub clean: bool,
     /// Máximo de voces por pentagrama.
@@ -80,6 +83,7 @@ impl Default for QuantizeOptions {
             legato_ticks: PPQ * 3 / 4,
             follow_tempo: true,
             tightness: 30.0,
+            lax_tightness: None,
             clean: true,
             max_voices: 1,
             triplets: true,
@@ -764,6 +768,28 @@ fn accent_weights(notes: &[RawNote]) -> Vec<(f64, f32)> {
         .collect()
 }
 
+/// El seguimiento flexible se usa solo si reduce el desajuste de los ataques con la rejilla por debajo de esta fracción.
+const LAX_GAIN: f64 = 0.7;
+
+/// Desajuste mediano (en pulsos) de los ataques respecto a la rejilla de semicorcheas y tresillos de corchea
+/// según un mapa de pulsos: cuanto menor, mejor explica el mapa el ritmo.
+fn grid_residual(map: &BeatMap, notes: &[RawNote]) -> f64 {
+    const GRID: [f64; 7] = [0.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 1.0];
+    let mut d: Vec<f64> = notes
+        .iter()
+        .map(|n| {
+            let p = map.pos(n.start);
+            let f = p - p.floor();
+            GRID.iter().map(|g| (f - g).abs()).fold(f64::MAX, f64::min)
+        })
+        .collect();
+    if d.is_empty() {
+        return 0.0;
+    }
+    d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    d[d.len() / 2]
+}
+
 pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportReport, String> {
     let mut warnings = Vec::new();
     let all = raw.len();
@@ -828,12 +854,27 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     let map = if o.follow_tempo && track_notes.len() >= 24 {
         let seed = o.tempo.map(|t| 60.0 / t.clamp(20.0, 300.0));
         let w = accent_weights(&track_notes);
-        let mut beats = find_beats(&w, seed, o.tightness);
-        if forced_compound && seed.is_none() && beats.len() > 4 {
-            // compás compuesto indicado sin tempo: el pulso es la negra con puntillo, ~1,5 veces el de la negra
-            let mut d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
-            d.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            beats = find_beats(&w, Some(1.5 * d[d.len() / 2]), o.tightness);
+        let track = |tight: f64| -> Vec<f64> {
+            let mut beats = find_beats(&w, seed, tight);
+            if forced_compound && seed.is_none() && beats.len() > 4 {
+                // compás compuesto indicado sin tempo: el pulso es la negra con puntillo, ~1,5 veces el de la negra
+                let mut d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
+                d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                beats = find_beats(&w, Some(1.5 * d[d.len() / 2]), tight);
+            }
+            beats
+        };
+        let mut beats = track(o.tightness);
+        if let Some(lax) = o.lax_tightness {
+            let lb = track(lax);
+            if beats.len() > 4 && lb.len() > 4 {
+                let rigid = grid_residual(&BeatMap::from_beats(beats.clone(), seed.unwrap_or(0.6)), &track_notes);
+                let loose = grid_residual(&BeatMap::from_beats(lb.clone(), seed.unwrap_or(0.6)), &track_notes);
+                if loose < LAX_GAIN * rigid {
+                    warnings.push(format!("Tempo con variaciones marcadas (rubato): seguimiento flexible (desajuste con la rejilla {:.3} → {:.3} pulsos).", rigid, loose));
+                    beats = lb;
+                }
+            }
         }
         BeatMap::from_beats(beats, seed.unwrap_or(0.6))
     } else {
@@ -1500,5 +1541,47 @@ mod tests {
             assert_eq!(tempo_with(rel), reference, "umbral {rel}");
         }
         assert!((reference as i32 - 96).abs() <= 2 || (reference as i32 - 192).abs() <= 4 || (reference as i32 - 48).abs() <= 2, "{reference}");
+    }
+
+    /// Negras fuertes + corcheas suaves a 100/min; con `rubato` > 0 el tempo oscila (periodo 16 pulsos).
+    fn rubato_piece(rubato: f64) -> Vec<RawNote> {
+        rubato_piece_p(rubato, 16.0)
+    }
+
+    fn rubato_piece_p(rubato: f64, period: f64) -> Vec<RawNote> {
+        let (mut t, mut v, step) = (1.3f64, Vec::new(), 1.0 / 8.0);
+        let mut beat = 0.0f64;
+        while beat < 80.0 {
+            let bpm = 100.0 * (1.0 + rubato * (std::f64::consts::TAU * beat / period).sin());
+            let k = beat as u32;
+            if (beat * 8.0).round() as u32 % 8 == 0 {
+                v.push(RawNote { start: t, end: t + 0.4, pitch: if k % 4 == 0 { 40 } else { 64 }, amplitude: 0.9, onset: true });
+            }
+            if (beat * 8.0).round() as u32 % 8 == 4 {
+                v.push(RawNote { start: t, end: t + 0.25, pitch: 67 + (k % 2) as u8, amplitude: 0.5, onset: true });
+            }
+            t += step * 60.0 / bpm;
+            beat += step;
+        }
+        v
+    }
+
+    #[test]
+    fn lax_tracking_follows_rubato_and_is_not_used_for_steady_tempo() {
+        let on_grid = |r: &ImportReport| {
+            let s = sounds(&r.score);
+            let t0 = s.iter().map(|x| x.start).min().unwrap();
+            s.iter().filter(|x| (x.start - t0) % 240 == 0).count() as f64 / s.len() as f64
+        };
+        let base = QuantizeOptions { clean: false, triplets: false, robust_tempo: true, ..Default::default() };
+        let lax = QuantizeOptions { lax_tightness: Some(4.0), ..base.clone() };
+        // tempo constante: no se activa el seguimiento flexible
+        let steady = notes_to_score(&rubato_piece(0.0), &lax).unwrap();
+        assert!(!steady.warnings.iter().any(|w| w.contains("rubato")), "{:?}", steady.warnings);
+        // rubato del 20 %: se activa y las notas caen en la rejilla (el rígido las desplaza)
+        let rig = notes_to_score(&rubato_piece(0.2), &base).unwrap();
+        let fl = notes_to_score(&rubato_piece(0.2), &lax).unwrap();
+        assert!(fl.warnings.iter().any(|w| w.contains("rubato")), "{:?} | rígido en rejilla {:.2}, flexible {:.2}", fl.warnings, on_grid(&rig), on_grid(&fl));
+        assert!(on_grid(&fl) >= 0.95 && on_grid(&fl) > on_grid(&rig), "flexible {:.2} rígido {:.2}", on_grid(&fl), on_grid(&rig));
     }
 }
