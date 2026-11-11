@@ -154,6 +154,11 @@ Prueba en la app real (exe de depuración, motor de piano, tempo y compás en au
 - Aviso de método: con la caché de BWV 847 de 16 compases hay que usar `NOVA_BARS=16` (si no, el banco compara con 32 compases y el recall se hunde).
 - Sigue sin resolverse: BWV 847 con rubato 0,1 (tempo +9,5 %, F1 0,33), y los vals rápidos 3/4 leídos a la mitad (Vals de las flores, Danse villageoise, Carol of the Bells, Gymnopédie; la penalización no los cambia, y no he comprobado por qué).
 
+## Vals rápidos en 3/4 (intento sin resultado) y prueba manual con grabación real
+- **Por qué se leen a la mitad**: en Vals de las flores el pulso real (0,328 s, 183 negras/min) queda fuera del rango de búsqueda (50–170) y el prior de tempo (centrado en 100) lo penaliza; se elige 92, y a ese nivel un compás de 3/4 son 1,5 pulsos, que ninguna hipótesis (2/4, 3/4, 4/4) puede expresar. Volcado de puntuaciones por periodo: el factor decisivo es el prior; la repetición y la densidad no intervienen (sin figura repetida, tatum 0,164 s).
+- **Intento**: calcular el compás también con el pulso dividido a la mitad (puntos medios entre pulsos) y comparar confianzas. **No sirve**: a ese nivel, que sería el correcto, el detector lee 4 (no 3) en Vals de las flores, Danse villageoise y Gymnopédie, y da confianzas altas también en piezas que ya iban bien (Danza húngara 5: 1,00; Bumblebee: 0,87). El detector de compás por acentos es el límite, no el nivel de pulso. Instrumentación revertida.
+- **Prueba manual con grabación real** (app, exe de depuración, motor de piano): Air de Bach (piano) → 891 notas, 4/4, Re M, tempo 62 con aviso de rubato; la reproducción arranca (botón «Parar», cursor por los compases; el sonido no se pudo comprobar desde la automatización); guardar `.nova` (260 KB) y reabrir tras «Nuevo» da exactamente el mismo dibujo (firma del SVG idéntica) y el mismo tempo.
+
 ## Lo que sigue sin calibrar
 - Penalizaciones de tresillos/quintillos/seisillos: el banco sintético no las discrimina (F1 igual con y sin grupos); haría falta una métrica de ritmo más estricta (tolerancia < 30 ticks) o grupos mezclados con subdivisiones binarias cercanas.
 - Rubato real: el banco usa rubato sinusoidal sintético (hasta ~10 % se sigue; 20 % no); falta rubato de intérprete real (ritardandi, fermatas) y rubato en el que solo oscila la mano derecha.
