@@ -29,6 +29,8 @@ pub struct AudioImportOptions {
     pub max_voices: Option<usize>,
     /// «general» (Basic Pitch, incluido) o «piano» (modelo de alta precisión, descargable).
     pub engine: Option<String>,
+    /// Detectar también el cifrado de acordes (borrador) y dejarlo en la partitura.
+    pub chords: Option<bool>,
 }
 
 /// Nombre del archivo del modelo de piano dentro de la carpeta de modelos.
@@ -171,6 +173,11 @@ pub fn audio_to_score(path: &str, o: &AudioImportOptions, models_dir: &std::path
         q.title = stem.to_string();
     }
     let mut r = notes_to_score(&raw, &q)?;
+    if o.chords == Some(true) {
+        r.score.detect_chord_symbols();
+        let n = r.score.chords.len();
+        r.warnings.insert(0, if n > 0 { format!("{n} acordes detectados (borrador): puedes corregirlos con clic en el símbolo o con la tecla K.") } else { "No se detectaron acordes (no hay notas suficientes).".into() });
+    }
     r.warnings.insert(0, format!("Transcripción automática ({} notas detectadas): es un borrador, revísalo.", raw.len()));
     Ok(r)
 }
@@ -330,6 +337,20 @@ mod tests {
         let n = nova_core::io::sounds(&r.score).len();
         assert!((6..=10).contains(&n), "{n} notas");
         assert!(r.warnings[0].contains("borrador"));
+        // con la opción de acordes, el cifrado llega en la partitura
+        assert!(r.score.chords.is_empty());
+        let wav2 = dir.join("acordes.wav");
+        let tri = |a: i32, b: i32, c: i32, t0: f64| vec![(t0, 3.8, a), (t0, 3.8, b), (t0, 3.8, c)];
+        let mut chord_notes = tri(48, 52, 55, 0.5);
+        chord_notes.extend(tri(53, 57, 60, 4.5));
+        chord_notes.extend(tri(55, 59, 62, 8.5));
+        chord_notes.extend(tri(48, 52, 55, 12.5));
+        write_wav(&wav2, &chord_notes, 16.5);
+        let o = AudioImportOptions { tempo: Some(60.0), num: Some(4), den: Some(4), chords: Some(true), ..Default::default() };
+        let r2 = audio_to_score(wav2.to_str().unwrap(), &o, std::path::Path::new(".")).unwrap();
+        let roots: Vec<u8> = r2.score.chords.iter().map(|c| c.root).collect();
+        assert_eq!(roots, vec![0, 5, 7, 0], "{:?}", r2.score.chords);
+        assert!(r2.warnings.iter().any(|w| w.contains("acordes detectados")), "{:?}", r2.warnings);
         // un archivo que no existe da un error legible, no un pánico
         assert!(audio_to_score(dir.join("no_existe.wav").to_str().unwrap(), &Default::default(), std::path::Path::new(".")).is_err());
     }

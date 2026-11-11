@@ -764,6 +764,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
   const [time, setTime] = createSignal("auto");
   const [amp, setAmp] = createSignal(0.5);
   const [voices, setVoices] = createSignal(1);
+  const [chords, setChords] = createSignal(false);
   const [engine, setEngine] = createSignal<"general" | "piano">("general");
   const [pianoModel, setPianoModel] = createSignal<string | null>(null);
   api.pianoModelStatus().then(setPianoModel).catch(() => setPianoModel(null));
@@ -804,7 +805,7 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
         onSubmit={(e) => {
           e.preventDefault();
           const [num, den] = time() === "auto" ? [undefined, undefined] : time().split("/").map(Number);
-          props.onImport(props.path, { engine: engine(), minRelative: engine() === "piano" ? undefined : amp(), tempo: auto() ? undefined : tempo(), num, den, maxVoices: voices() });
+          props.onImport(props.path, { engine: engine(), minRelative: engine() === "piano" ? undefined : amp(), tempo: auto() ? undefined : tempo(), num, den, maxVoices: voices(), chords: chords() });
         }}
       >
         <h2>Importar audio</h2>
@@ -864,6 +865,9 @@ function AudioDialog(props: { path: string; onCancel: () => void; onImport: (pat
             <option value="1">1 (más limpio)</option>
             <option value="2">2 (separa notas largas)</option>
           </select>
+        </label>
+        <label>
+          <input type="checkbox" checked={chords()} onChange={(e) => setChords(e.currentTarget.checked)} /> Detectar también los acordes (cifrado sobre el pentagrama; borrador)
         </label>
         <Show when={engine() === "general"}>
         <label>Sensibilidad: se descartan las notas que suenan menos de {Math.round(amp() * 100)} % de lo que suenan las fuertes
