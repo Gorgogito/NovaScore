@@ -320,6 +320,38 @@ mod tests {
     }
 
     #[test]
+    fn chords_round_trip_through_musicxml() {
+        use crate::Pitch;
+        for fifths in [0i8, -3] {
+            let mut sc = Score::new("t", crate::TimeSig { num: 4, den: 4 }, fifths, 3);
+            for m in 0..3 {
+                sc.put_note(0, 0, m, 0, PPQ * 4, vec![Pitch::from_midi(60, true)]).unwrap();
+            }
+            sc.chords = vec![
+                ChordMark { measure: 0, tick: 0, root: 0, quality: Quality::Major, bass: 0 },
+                ChordMark { measure: 0, tick: PPQ * 2, root: 9, quality: Quality::Minor7, bass: 4 }, // a mitad de una nota larga: desplazamiento
+                ChordMark { measure: 1, tick: 0, root: 3, quality: Quality::Dominant7, bass: 3 }, // Mi♭7 / Re♯7 según la tonalidad
+                ChordMark { measure: 2, tick: PPQ, root: 6, quality: Quality::Dim7, bass: 6 },
+            ];
+            let xml = crate::io::export_musicxml(&sc);
+            assert!(xml.contains("<harmony>") && xml.contains("<offset>960</offset>"));
+            let back = crate::io::import_musicxml(&xml).unwrap().score;
+            assert_eq!(back.chords, sc.chords, "tonalidad {fifths}");
+        }
+    }
+
+    #[test]
+    fn unknown_harmony_kinds_are_skipped_with_a_warning() {
+        let mut sc = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 1);
+        sc.put_note(0, 0, 0, 0, PPQ * 4, vec![crate::Pitch::from_midi(60, true)]).unwrap();
+        sc.chords = vec![ChordMark { measure: 0, tick: 0, root: 0, quality: Quality::Major, bass: 0 }];
+        let xml = crate::io::export_musicxml(&sc).replace("<kind text=\"\">major</kind>", "<kind>suspended-fourth</kind>");
+        let r = crate::io::import_musicxml(&xml).unwrap();
+        assert!(r.score.chords.is_empty());
+        assert!(r.warnings.iter().any(|w| w.contains("no se importaron")));
+    }
+
+    #[test]
     fn inversion_is_reported_as_bass() {
         let n = notes(&[(40, &[60, 67, 72])]); // do mayor con mi en el bajo
         let m = detect_in_segments(&n, &seg_grid(4));

@@ -1,5 +1,6 @@
 //! Playback flattening, MIDI export and MusicXML import/export.
 
+use crate::chords::{ChordMark, Quality};
 use crate::*;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -446,6 +447,78 @@ fn xml_marks(score: &Score, part: &Part, voice: usize, mi: usize, evs: &[Event])
     (marks, tail)
 }
 
+/// Nombre MusicXML (paso, alteración) de una clase de altura, con sostenidos o bemoles según la tonalidad.
+fn xml_step(pc: u8, fifths: i8) -> (&'static str, i8) {
+    const SHARP: [(&str, i8); 12] = [("C", 0), ("C", 1), ("D", 0), ("D", 1), ("E", 0), ("F", 0), ("F", 1), ("G", 0), ("G", 1), ("A", 0), ("A", 1), ("B", 0)];
+    const FLAT: [(&str, i8); 12] = [("C", 0), ("D", -1), ("D", 0), ("E", -1), ("E", 0), ("F", 0), ("G", -1), ("G", 0), ("A", -1), ("A", 0), ("B", -1), ("B", 0)];
+    if fifths >= 0 { SHARP[pc as usize % 12] } else { FLAT[pc as usize % 12] }
+}
+
+fn xml_kind(q: Quality) -> &'static str {
+    match q {
+        Quality::Major => "major",
+        Quality::Minor => "minor",
+        Quality::Dominant7 => "dominant",
+        Quality::Major7 => "major-seventh",
+        Quality::Minor7 => "minor-seventh",
+        Quality::Dim => "diminished",
+        Quality::Dim7 => "diminished-seventh",
+    }
+}
+
+/// Calidad NovaScore de un `<kind>` de MusicXML (las extensiones —novenas, sextas— se reducen a la base).
+fn quality_from_kind(k: &str) -> Option<Quality> {
+    Some(match k {
+        "major" | "major-sixth" => Quality::Major,
+        "minor" | "minor-sixth" => Quality::Minor,
+        "dominant" | "dominant-ninth" | "dominant-11th" | "dominant-13th" => Quality::Dominant7,
+        "major-seventh" | "major-ninth" | "major-11th" | "major-13th" => Quality::Major7,
+        "minor-seventh" | "minor-ninth" | "minor-11th" | "minor-13th" => Quality::Minor7,
+        "diminished" | "half-diminished" => Quality::Dim,
+        "diminished-seventh" => Quality::Dim7,
+        _ => return None,
+    })
+}
+
+fn xml_pc(step: &str, alter: i64) -> Option<u8> {
+    let base = match step {
+        "C" => 0,
+        "D" => 2,
+        "E" => 4,
+        "F" => 5,
+        "G" => 7,
+        "A" => 9,
+        "B" => 11,
+        _ => return None,
+    };
+    Some((base + alter).rem_euclid(12) as u8)
+}
+
+/// `<harmony>` de un acorde; `offset` son ticks tras el inicio del evento donde se escribe.
+fn xml_harmony(c: &ChordMark, fifths: i8, offset: u32) -> String {
+    let (rs, ra) = xml_step(c.root, fifths);
+    let mut h = String::from("      <harmony><root>");
+    let _ = write!(h, "<root-step>{rs}</root-step>");
+    if ra != 0 {
+        let _ = write!(h, "<root-alter>{ra}</root-alter>");
+    }
+    let _ = write!(h, "</root><kind text=\"{}\">{}</kind>", c.quality.suffix(), xml_kind(c.quality));
+    if c.bass != c.root {
+        let (bs, ba) = xml_step(c.bass, fifths);
+        let _ = write!(h, "<bass><bass-step>{bs}</bass-step>");
+        if ba != 0 {
+            let _ = write!(h, "<bass-alter>{ba}</bass-alter>");
+        }
+        h.push_str("</bass>");
+    }
+    if offset > 0 {
+        let _ = write!(h, "<offset>{offset}</offset>");
+    }
+    h.push_str("</harmony>
+");
+    h
+}
+
 pub fn export_musicxml(score: &Score) -> String {
     let mut x = String::new();
     x.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -523,6 +596,12 @@ pub fn export_musicxml(score: &Score) -> String {
             let next_first = part.measures.get(mi + 1).and_then(|n| n.voice(v)).and_then(|e| e.first());
             let (xm, xm_tail) = xml_marks(score, part, v, mi, evs);
             for (ei, e) in evs.iter().enumerate() {
+                if pi == 0 && v == 0 {
+                    // el acorde se escribe antes del evento que suena en su tick, con desplazamiento si cae a mitad
+                    for c in score.chords.iter().filter(|c| c.measure == mi && e.start <= c.tick && c.tick < e.start + e.ticks) {
+                        x.push_str(&xml_harmony(c, score.fifths, c.tick - e.start));
+                    }
+                }
                 x.push_str(&xm[ei].dir);
                 if let Some(d) = e.dynamic {
                     let _ = writeln!(x, "      <direction placement=\"below\"><direction-type><dynamics><{}/></dynamics></direction-type></direction>", d.name());
@@ -789,6 +868,10 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     // repeat signs per staff: (measure, is start, times)
     let mut repeat_by_staff: std::collections::HashMap<usize, Vec<(usize, bool, u8)>> = Default::default();
     let mut max_measures = 0usize;
+    // Cifrado (`<harmony>`) de la primera parte que lo trae: (compás, tick) → acorde.
+    let mut harmony_chords: Vec<ChordMark> = Vec::new();
+    let mut harmony_part: Option<String> = None;
+    let mut harmony_skipped = 0usize;
 
     for part in root.children().filter(|n| n.has_tag_name("part")) {
         let pid = part.attribute("id").unwrap_or("").to_string();
@@ -839,6 +922,25 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                             let no = c.attribute("number").and_then(|v| v.parse().ok()).unwrap_or(1u32);
                             let clef = if text_of(c, "sign").as_deref() == Some("F") { Clef::Bass } else { Clef::Treble };
                             clefs.insert(no, clef);
+                        }
+                    }
+                    "harmony" => {
+                        if harmony_part.as_deref().map_or(true, |p| p == pid) {
+                            let root_el = child_named(el, "root");
+                            let kind_text = text_of(el, "kind");
+                            let q = kind_text.as_deref().and_then(quality_from_kind);
+                            let rpc = root_el.and_then(|r| xml_pc(&text_of(r, "root-step")?, text_of(r, "root-alter").and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0).round() as i64));
+                            match (rpc, q) {
+                                (Some(root), Some(quality)) => {
+                                    harmony_part = Some(pid.clone());
+                                    let bass = child_named(el, "bass").and_then(|b| xml_pc(&text_of(b, "bass-step")?, text_of(b, "bass-alter").and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0).round() as i64)).unwrap_or(root);
+                                    let off = (num_of(el, "offset").unwrap_or(0) as f64 * PPQ as f64 / divisions).round() as i64;
+                                    harmony_chords.push(ChordMark { measure: mi, tick: (pos + off).max(0) as u32, root, quality, bass });
+                                }
+                                // «none» y los rótulos de texto no son acordes; el resto (sus, aug…) no se reconocen
+                                (Some(_), None) if kind_text.as_deref().map_or(false, |k| k != "none" && k != "other") => harmony_skipped += 1,
+                                _ => {}
+                            }
                         }
                     }
                     "direction" | "sound" => {
@@ -1127,6 +1229,12 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             score.time_changes.push(TimeChange { measure: mi, time: ts });
             prev = ts;
         }
+    }
+    harmony_chords.sort_by_key(|c| (c.measure, c.tick));
+    harmony_chords.dedup_by_key(|c| (c.measure, c.tick));
+    score.chords = harmony_chords;
+    if harmony_skipped > 0 {
+        warnings.push(format!("{harmony_skipped} acordes con una calidad no reconocida (suspendidos, aumentados…) no se importaron."));
     }
     let lens: Vec<u32> = (0..max_measures).map(|i| score.measure_len(i)).collect();
     for (si, (name, program, clef, perc, voices)) in staves.into_iter().enumerate() {

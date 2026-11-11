@@ -19,7 +19,7 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **Siguiente gran bloq
 ## Comandos
 ```
 cd app && npm install && npm run tauri dev          # ejecutar
-cd app/crates/nova-core && cargo test               # 99 tests del núcleo
+cd app/crates/nova-core && cargo test               # 101 tests del núcleo
 cd app/crates/nova-audio && cargo test              # 5 tests; audio→notas (Basic Pitch/ONNX). Ejemplos: audio2notes, audio2score, roundtrip (mide F1 sobre samples/)
 cd app && npx tsc --noEmit                          # tipos del frontend
 cd app && npx tauri build --debug --no-bundle       # exe de depuración (src-tauri/target/debug/novascore.exe)
