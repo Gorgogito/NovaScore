@@ -203,11 +203,73 @@ pub fn tatum(onsets: &[(f64, f32)]) -> Option<f64> {
     (t >= 0.08 && share >= 0.35).then_some(t)
 }
 
+/// Coincidencia mínima de intervalos para considerar que la textura se repite (las piezas de arpegios dan 0,33-0,35;
+/// las melodías y la música sin patrón, ≤ 0,18).
+pub const REP_MIN_STRENGTH: f64 = 0.25;
+/// Penalización máxima de un periodo de pulso incoherente con la repetición.
+pub const REP_PENALTY: f64 = 0.7;
+
+/// Repetición de la textura: la figura (secuencia de alturas) se repite cada `lag` s con fuerza `strength` (0..1).
+#[derive(Debug, Clone, Copy)]
+pub struct RepHint {
+    pub lag: f64,
+    pub strength: f64,
+}
+
+/// Mayor intervalo de repetición de la secuencia de alturas, medido en NÚMERO DE NOTAS (inmune al rubato);
+/// el lapso en segundos es la mediana de `inicio[i+k] − inicio[i]`. `notes` = (inicio, altura).
+/// `None` si no hay repetición clara (melodías, música sin patrón).
+pub fn repetition(notes: &[(f64, u8)]) -> Option<RepHint> {
+    let mut v: Vec<(f64, u8)> = notes.to_vec();
+    v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+    if v.len() < 48 {
+        return None;
+    }
+    let max_k = 48.min(v.len() / 3);
+    // intervalos entre notas consecutivas: el dibujo de un arpegio se repite aunque cambie la armonía
+    let st: Vec<i32> = v.windows(2).map(|w| w[1].1 as i32 - w[0].1 as i32).collect();
+    let m: Vec<f64> = (1..=max_k)
+        .map(|k| (0..st.len() - k).filter(|&i| st[i] == st[i + k]).count() as f64 / (st.len() - k) as f64)
+        .collect();
+    let best = m.iter().cloned().fold(0.0, f64::max);
+    if best < REP_MIN_STRENGTH {
+        return None;
+    }
+    // el menor k cuya coincidencia casi iguala a la mejor (los múltiplos del periodo también coinciden)
+    let k = m.iter().position(|&x| x >= 0.9 * best).unwrap() + 1;
+    if k < 2 {
+        return None; // nota repetida: no informa del pulso
+    }
+    let mut d: Vec<f64> = (0..v.len() - k).map(|i| v[i + k].0 - v[i].0).collect();
+    d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(RepHint { lag: d[d.len() / 2], strength: best })
+}
+
 /// Busca el pulso sin periodo de partida fiable: prueba periodos candidatos (≈ 50–170
 /// negras/min), puntúa cada camino (fuerza media de inicio por pulso × prior de tempo) y
 /// refina el mejor. Con `seed` se parte de ese periodo. Si el elegido supera las 120 negras/min
 /// y el doble puntúa casi igual, se prefiere el doble (evita notar la corchea como negra).
 pub fn find_beats(onsets: &[(f64, f32)], seed: Option<f64>, tightness: f64) -> Vec<f64> {
+    find_beats_hint(onsets, seed, tightness, None)
+}
+
+/// Factor (≤ 1) que penaliza un periodo de pulso que no divide el lapso de repetición de la textura en un número entero
+/// de pulsos (p. ej. un pulso de 3 semicorcheas con una figura de 8: 2,67 pulsos por repetición).
+pub fn repetition_coherence(hint: Option<RepHint>, period: f64) -> f64 {
+    match hint {
+        Some(h) if h.lag > 0.0 && period > 0.0 => {
+            let r = if h.lag >= period { h.lag / period } else { period / h.lag };
+            let n = r.round().max(1.0);
+            let dev = (r - n).abs() / n;
+            1.0 - REP_PENALTY * ((dev - 0.04) / 0.12).clamp(0.0, 1.0)
+        }
+        _ => 1.0,
+    }
+}
+
+/// Como [`find_beats`], con la repetición de la textura: un periodo de pulso que no divide la figura en un
+/// número entero de pulsos (p. ej. 3 semicorcheas con una figura de 8) se penaliza según la fuerza de la repetición.
+pub fn find_beats_hint(onsets: &[(f64, f32)], seed: Option<f64>, tightness: f64, hint: Option<RepHint>) -> Vec<f64> {
     let prior = |period: f64| (-0.5 * ((60.0 / period / 100.0).log2() / 0.6).powi(2)).exp();
     // En texturas uniformes (arpegios de semicorcheas) el pulso es ambiguo entre 3 y 4 divisiones
     // de la rejilla; sin evidencia de compuesto se prefiere un múltiplo binario de la rejilla.
@@ -225,7 +287,7 @@ pub fn find_beats(onsets: &[(f64, f32)], seed: Option<f64>, tightness: f64) -> V
     };
     let score = |period: f64| -> Option<f64> {
         let (b, total) = dp(onsets, period, tightness);
-        (b.len() >= 4).then(|| total / b.len() as f64 * prior(period) * ternary(period))
+        (b.len() >= 4).then(|| total / b.len() as f64 * prior(period) * ternary(period) * repetition_coherence(hint, period))
     };
     let period = match seed {
         Some(p) => p,
@@ -335,6 +397,50 @@ impl BeatMap {
 
 #[cfg(test)]
 mod tests {
+    /// Arpegio: figura de 8 semicorcheas cuya altura base cambia cada compás (la armonía), a `bpm`.
+    fn arpeggio(bars: usize, bpm: f64) -> Vec<(f64, u8)> {
+        let u = 60.0 / bpm / 4.0;
+        let fig = [0u8, 4, 7, 12, 16, 12, 7, 4];
+        let roots = [48u8, 50, 43, 48];
+        let mut v = Vec::new();
+        for b in 0..bars {
+            for i in 0..16 {
+                v.push(((b * 16 + i) as f64 * u, roots[b % 4] + fig[i % 8]));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn repetition_finds_the_figure_in_arpeggios_but_not_in_a_melody() {
+        let h = repetition(&arpeggio(16, 72.0)).expect("el arpegio se repite");
+        let u = 60.0 / 72.0 / 4.0;
+        assert!(h.strength > REP_MIN_STRENGTH);
+        assert!((h.lag / u - 8.0).abs() < 0.5, "lapso {} (8 semicorcheas = {})", h.lag, 8.0 * u);
+        // melodía sin patrón: pseudoaleatoria
+        let mut seed = 7u32;
+        let melody: Vec<(f64, u8)> = (0..200)
+            .map(|i| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (i as f64 * 0.3, 55 + (seed >> 24) as u8 % 20)
+            })
+            .collect();
+        assert!(repetition(&melody).map_or(true, |h| h.strength < REP_MIN_STRENGTH));
+    }
+
+    #[test]
+    fn coherence_penalizes_periods_that_do_not_divide_the_repetition() {
+        let h = Some(RepHint { lag: 1.6, strength: 0.33 });
+        assert_eq!(repetition_coherence(h, 0.8), 1.0); // 2 pulsos
+        assert_eq!(repetition_coherence(h, 0.4), 1.0); // 4 pulsos
+        assert_eq!(repetition_coherence(h, 1.6), 1.0); // 1 pulso
+        let c = repetition_coherence(h, 0.6); // 2,67 pulsos por repetición
+        assert!(c < 0.7 && c > 1.0 - REP_PENALTY, "{c}");
+        assert!(repetition_coherence(h, 0.5) > c); // 3,2 pulsos: menos incoherente
+        assert!((repetition_coherence(h, 1.1) - (1.0 - REP_PENALTY)).abs() < 1e-9); // 1,45 pulsos: la mayor desviación
+        assert_eq!(repetition_coherence(None, 0.6), 1.0);
+    }
+
     #[test]
     fn tatum_of_uniform_sixteenths_and_noise() {
         let uniform: Vec<(f64, f32)> = (0..80).map(|i| (1.0 + i as f64 * 0.21, 1.0)).collect();

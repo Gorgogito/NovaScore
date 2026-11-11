@@ -854,8 +854,9 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     let map = if o.follow_tempo && track_notes.len() >= 24 {
         let seed = o.tempo.map(|t| 60.0 / t.clamp(20.0, 300.0));
         let w = accent_weights(&track_notes);
+        let rep = crate::beats::repetition(&track_notes.iter().map(|n| (n.start, n.pitch)).collect::<Vec<_>>());
         let track = |tight: f64| -> Vec<f64> {
-            let mut beats = find_beats(&w, seed, tight);
+            let mut beats = crate::beats::find_beats_hint(&w, seed, tight, rep);
             if forced_compound && seed.is_none() && beats.len() > 4 {
                 // compás compuesto indicado sin tempo: el pulso es la negra con puntillo, ~1,5 veces el de la negra
                 let mut d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
