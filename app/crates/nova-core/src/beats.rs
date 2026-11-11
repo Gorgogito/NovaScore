@@ -157,6 +157,10 @@ pub const TATUM_TERNARY_PENALTY: f64 = 0.3;
 /// Tolerancia relativa (|n−k| < ventana·k) para considerar el periodo múltiplo de 3 del tatum; con rubato el
 /// tatum medido sale algo corto, por lo que la ventana no puede ser estrecha.
 pub const TATUM_TERNARY_WINDOW: f64 = 0.12;
+/// Un periodo de pulso con más de este número de unidades de rejilla (tatum) se penaliza: ocho semicorcheas por pulso no
+/// caben en la rejilla de semicorcheas (BWV 847, Danza húngara 5 y Vuelo del moscardón se leían a la mitad).
+pub const DENSE_MAX_UNITS: f64 = 5.5;
+pub const DENSE_PENALTY: f64 = 0.3;
 
 /// Unidad mínima de la rejilla rítmica (s): el intervalo entre inicios más corto con peso
 /// significativo (≥ 25 % del más frecuente). `None` con muy pocos inicios.
@@ -285,9 +289,16 @@ pub fn find_beats_hint(onsets: &[(f64, f32)], seed: Option<f64>, tightness: f64,
             None => 1.0,
         }
     };
+    // Un pulso con más de ~4 unidades de rejilla no puede escribirse en semicorcheas: se prefiere el nivel más rápido.
+    let dense = |period: f64| -> f64 {
+        match tat {
+            Some(t) if period / t > DENSE_MAX_UNITS => 1.0 - DENSE_PENALTY,
+            _ => 1.0,
+        }
+    };
     let score = |period: f64| -> Option<f64> {
         let (b, total) = dp(onsets, period, tightness);
-        (b.len() >= 4).then(|| total / b.len() as f64 * prior(period) * ternary(period) * repetition_coherence(hint, period))
+        (b.len() >= 4).then(|| total / b.len() as f64 * prior(period) * ternary(period) * repetition_coherence(hint, period) * dense(period))
     };
     let period = match seed {
         Some(p) => p,
@@ -409,6 +420,18 @@ mod tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn dense_texture_is_tracked_at_the_quarter_not_at_the_half() {
+        // semicorcheas ininterrumpidas a 145 negras/min: el pulso es la negra (0,41 s), no la blanca
+        let notes = arpeggio(16, 145.0);
+        let on: Vec<(f64, f32)> = notes.iter().map(|n| (n.0, 1.0)).collect();
+        let b = find_beats_hint(&on, None, 30.0, repetition(&notes));
+        let mut d: Vec<f64> = b.windows(2).map(|x| x[1] - x[0]).collect();
+        d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = d[d.len() / 2];
+        assert!((med - 60.0 / 145.0).abs() < 0.02, "periodo mediano {med}");
     }
 
     #[test]

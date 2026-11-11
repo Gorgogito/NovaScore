@@ -771,6 +771,20 @@ fn accent_weights(notes: &[RawNote]) -> Vec<(f64, f32)> {
 /// El seguimiento flexible se usa solo si reduce el desajuste de los ataques con la rejilla por debajo de esta fracción.
 const LAX_GAIN: f64 = 0.7;
 
+/// El seguimiento flexible se descarta si más de esta fracción de sus intervalos salta más de un 12 % respecto al
+/// anterior: un rubato real cambia el tempo de forma continua; unos pulsos que saltan (4 y 5 semicorcheas
+/// alternas en BWV 847) solo se ajustan mejor porque siguen los ataques y producen quintillos falsos.
+const LAX_MAX_JITTER: f64 = 0.2;
+
+/// Fracción de intervalos entre pulsos consecutivos que cambian más de un 12 % respecto al anterior.
+fn beat_jitter(beats: &[f64]) -> f64 {
+    let d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
+    if d.len() < 3 {
+        return 0.0;
+    }
+    d.windows(2).filter(|x| (x[1] / x[0] - 1.0).abs() > 0.12).count() as f64 / (d.len() - 1) as f64
+}
+
 /// Desajuste mediano (en pulsos) de los ataques respecto a la rejilla de semicorcheas y tresillos de corchea
 /// según un mapa de pulsos: cuanto menor, mejor explica el mapa el ritmo.
 fn grid_residual(map: &BeatMap, notes: &[RawNote]) -> f64 {
@@ -871,7 +885,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
             if beats.len() > 4 && lb.len() > 4 {
                 let rigid = grid_residual(&BeatMap::from_beats(beats.clone(), seed.unwrap_or(0.6)), &track_notes);
                 let loose = grid_residual(&BeatMap::from_beats(lb.clone(), seed.unwrap_or(0.6)), &track_notes);
-                if loose < LAX_GAIN * rigid {
+                if loose < LAX_GAIN * rigid && beat_jitter(&lb) <= LAX_MAX_JITTER {
                     warnings.push(format!("Tempo con variaciones marcadas (rubato): seguimiento flexible (desajuste con la rejilla {:.3} → {:.3} pulsos).", rigid, loose));
                     beats = lb;
                 }
@@ -1106,6 +1120,18 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn beat_jitter_separates_rubato_from_jumping_beats() {
+        // rubato suave: intervalos que cambian poco
+        let mut t = 0.0;
+        let smooth: Vec<f64> = (0..40).map(|i| { t += 0.5 + 0.04 * (i as f64 * 0.3).sin(); t }).collect();
+        assert!(beat_jitter(&smooth) < 0.05);
+        // pulsos que alternan 4 y 5 semicorcheas (0,42 / 0,52 s)
+        let mut t = 0.0;
+        let jumpy: Vec<f64> = (0..40).map(|i| { t += if i % 2 == 0 { 0.42 } else { 0.52 }; t }).collect();
+        assert!(beat_jitter(&jumpy) > LAX_MAX_JITTER);
+    }
+
     use super::*;
     use crate::io::sounds;
 
