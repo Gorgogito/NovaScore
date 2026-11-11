@@ -142,6 +142,28 @@ fn main() {
             programs.sort();
             programs.dedup();
             let audio = render(&notes, &programs, Path::new(&sf));
+            if let Ok(wd) = std::env::var("NOVA_WAV") {
+                // guarda el audio sintético (PCM 16 bits mono) para probarlo a mano en la app
+                let mut b: Vec<u8> = Vec::with_capacity(44 + audio.len() * 2);
+                let data = (audio.len() * 2) as u32;
+                b.extend_from_slice(b"RIFF");
+                b.extend_from_slice(&(36 + data).to_le_bytes());
+                b.extend_from_slice(b"WAVEfmt ");
+                b.extend_from_slice(&16u32.to_le_bytes());
+                b.extend_from_slice(&1u16.to_le_bytes());
+                b.extend_from_slice(&1u16.to_le_bytes());
+                b.extend_from_slice(&(SR as u32).to_le_bytes());
+                b.extend_from_slice(&(SR as u32 * 2).to_le_bytes());
+                b.extend_from_slice(&2u16.to_le_bytes());
+                b.extend_from_slice(&16u16.to_le_bytes());
+                b.extend_from_slice(b"data");
+                b.extend_from_slice(&data.to_le_bytes());
+                for v in &audio {
+                    b.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+                }
+                let _ = std::fs::create_dir_all(&wd);
+                let _ = std::fs::write(format!("{wd}/{stem}-r{rubato}.wav"), b);
+            }
 
             let found = match &piano_model {
                 Some(m) => {
