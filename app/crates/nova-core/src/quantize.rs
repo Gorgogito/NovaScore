@@ -951,7 +951,12 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
                 if compound {
                     time = TimeSig { num: 6, den: 8 };
                 }
-                warnings.push(format!("No se pudo detectar el compás con fiabilidad (confianza {:.0} %): se supone {}/{}. Cámbialo si no es el correcto.", g.confidence * 100.0, time.num, time.den));
+                let hint = if !compound && bpm >= 60.0 && bpm * 2.0 <= 260.0 {
+                    format!(" Si es un vals o una pieza rápida en 3/4, el pulso puede estar a la mitad: indica el compás 3/4 y un tempo de {:.0} (el doble del estimado).", bpm * 2.0)
+                } else {
+                    String::new()
+                };
+                warnings.push(format!("No se pudo detectar el compás con fiabilidad (confianza {:.0} %): se supone {}/{}. Cámbialo si no es el correcto.{hint}", g.confidence * 100.0, time.num, time.den));
             }
         } else if compound {
             time = o.time;

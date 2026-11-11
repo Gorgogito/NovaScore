@@ -202,6 +202,14 @@ fn main() {
             qo.auto_meter = false;
             qo.auto_pickup = false;
         }
+        // pistas del usuario: NOVA_HINT_TEMPO=183 y NOVA_HINT_METER=3/4 se aplican a todas las piezas
+        if let Some(v) = std::env::var("NOVA_HINT_TEMPO").ok().and_then(|s| s.parse::<f64>().ok()) {
+            qo.tempo = Some(v);
+        }
+        if let Some((n, d)) = std::env::var("NOVA_HINT_METER").ok().and_then(|s| s.split_once('/').map(|(a, b)| (a.parse::<u32>().ok(), b.parse::<u32>().ok()))).and_then(|(a, b)| Some((a?, b?))) {
+            qo.time = nova_core::TimeSig { num: n, den: d };
+            qo.auto_meter = false;
+        }
         if let Some(v) = std::env::var("NOVA_HARM").ok().and_then(|s| s.parse().ok()) {
             qo.clean_params.harmonic_ratio = v;
         }
