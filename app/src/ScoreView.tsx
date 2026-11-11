@@ -1,7 +1,7 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
 import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, SP, staffIdx, STAFF_H } from "./layout";
-import { chordName, Cursor, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
+import { chordName, ChordMark, Cursor, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
 const g2 = g;
@@ -108,6 +108,8 @@ interface Props {
   /** `extend` is true when Shift was held (extend the selection). */
   onPick: (part: number, voice: number, m: number, start: number, pos: number | null, extend: boolean) => void;
   selection?: Selection | null;
+  /** Click on a chord symbol (screen position for the editor). */
+  onChordClick?: (c: ChordMark, x: number, y: number) => void;
   /** Static rendering for export: fixed size, no hit areas. */
   printMode?: boolean;
   /** Draw the title and composer (first page only when printing). */
@@ -697,7 +699,7 @@ export function ScoreView(props: Props) {
                   const idxTop = Math.max(-1e9, ...m.lanes.filter((l) => l.part === 0).flatMap((l) => l.events).map((le) => (le.ev.kind === "note" ? Math.max(...le.ev.pitches.map((q) => staffIdx(props.score.parts[0].percussion, q))) + 7 : -1e9)));
                   const lift = Math.min(30, Math.max(0, idxTop - (bottomLineIndex(clef()) + 8) + 1) * (SP / 2));
                   return (
-                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui">{chordName(c, props.score.fifths)}</text>
+                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui" style={props.onChordClick ? { cursor: "pointer" } : undefined} onClick={(e) => props.onChordClick?.(c, e.clientX, e.clientY)}>{chordName(c, props.score.fifths)}</text>
                   );
                 }}
               </For>

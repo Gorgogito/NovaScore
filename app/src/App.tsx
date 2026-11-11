@@ -8,7 +8,7 @@ import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
 import { ScoreView } from "./ScoreView";
-import { ArticKind, Cursor, displayScore, DYNAMICS, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, SpannerKind, timeAt, voiceEvents } from "./types";
+import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, SpannerKind, timeAt, voiceEvents } from "./types";
 import "./styles.css";
 
 const BASE: Record<number, number> = { 3: 120, 4: 240, 5: 480, 6: 960, 7: 1920 };
@@ -55,6 +55,21 @@ export default function App() {
     const evs = voiceEvents(s.parts[part].measures[m], c.voice);
     const ev = evs ? (evs.find((e) => e.start <= c.start && c.start < e.start + e.ticks) ?? evs[0]) : null;
     setCursor({ part, voice: c.voice, m, start: ev ? ev.start : 0 });
+  };
+
+  /** Editor del símbolo de acorde (clic en un acorde, o K en la posición del cursor). */
+  const [chordEdit, setChordEdit] = createSignal<{ measure: number; tick: number; text: string; x: number; y: number } | null>(null);
+  const openChordEditor = (measure: number, tick: number, x = 260, y = 230) => {
+    const cur = score()?.chords?.find((c) => c.measure === measure && c.tick === tick);
+    setChordEdit({ measure, tick, text: cur ? chordName(cur, score()!.fifths) : "", x, y });
+  };
+  const commitChord = async (text: string) => {
+    const ed = chordEdit();
+    if (!ed) return;
+    if (await run(api.setChord(ed.measure, ed.tick, text))) {
+      setChordEdit(null);
+      setStatus(text.trim() ? `Acorde fijado en el compás ${ed.measure + 1}.` : `Acorde del compás ${ed.measure + 1} borrado.`);
+    }
   };
 
   const toggleChords = async () => {
@@ -508,6 +523,7 @@ export default function App() {
     else if (k === ">") await addSpanner("decrescendo");
     else if (k === "arrowup") await transpose(1);
     else if (k === "arrowdown") await transpose(-1);
+    else if (k === "k") openChordEditor(cursor().m, cursor().start);
     else if (k === "delete") await run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start));
     else if (k === "backspace") {
       await run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start));
@@ -654,7 +670,7 @@ export default function App() {
         <main class="canvas">
           <Show when={score() && layout()} fallback={<p class="loading">Cargando…</p>}>
             <div class="page" style={{ width: `${zoom()}%` }}>
-              <ScoreView score={shown()!} layout={layout()!} cursor={cursor()} selection={selection()} playing={playing()} inputMode={inputMode()} onPick={onPick} />
+              <ScoreView score={shown()!} layout={layout()!} cursor={cursor()} selection={selection()} playing={playing()} inputMode={inputMode()} onPick={onPick} onChordClick={(c, x, y) => openChordEditor(c.measure, c.tick, x, y)} />
             </div>
           </Show>
         </main>
@@ -700,6 +716,26 @@ export default function App() {
         <span>Duración: {ticks()} ticks</span>
         <span class="grow">{status()}</span>
       </footer>
+
+      <Show when={chordEdit()}>
+        {(ed) => (
+          <div class="chord-editor" style={{ position: "fixed", left: `${Math.max(8, Math.min(ed().x - 20, window.innerWidth - 300))}px`, top: `${Math.max(8, ed().y + 14)}px`, "z-index": 50, background: "var(--panel, #fff)", border: "1px solid var(--ink-dim, #888)", "border-radius": "6px", padding: "8px", "box-shadow": "0 2px 10px rgba(0,0,0,.3)", display: "flex", gap: "6px", "align-items": "center" }}>
+            <span>Compás {ed().measure + 1}, tiempo {ed().tick / 480 + 1}:</span>
+            <input
+              ref={(el) => setTimeout(() => { el.focus(); el.select(); })}
+              value={ed().text}
+              size={9}
+              placeholder="Am7, F/A…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); void commitChord(e.currentTarget.value); }
+                else if (e.key === "Escape") { e.preventDefault(); setChordEdit(null); }
+              }}
+            />
+            <button onClick={() => void commitChord("")} title="Borrar este acorde">Borrar</button>
+            <button onClick={() => setChordEdit(null)}>Cancelar</button>
+          </div>
+        )}
+      </Show>
 
       <Show when={showNew()}>
         <NewDialog

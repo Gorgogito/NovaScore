@@ -133,7 +133,79 @@ fn beat_ticks(num: u32, den: u32) -> u32 {
     }
 }
 
+impl ChordMark {
+    /// Lee un nombre de acorde escrito a mano ("Am7", "F♯dim", "Bb/D", "CM7", "Dm", "G7"…).
+    /// Devuelve (fundamental, calidad, bajo) o `None` si no se entiende.
+    pub fn parse(text: &str) -> Option<(u8, Quality, u8)> {
+        fn note(s: &str) -> Option<(u8, &str)> {
+            let mut ch = s.chars();
+            let base = match ch.next()?.to_ascii_uppercase() {
+                'C' => 0,
+                'D' => 2,
+                'E' => 4,
+                'F' => 5,
+                'G' => 7,
+                'A' => 9,
+                'B' => 11,
+                _ => return None,
+            };
+            let rest = ch.as_str();
+            let (alt, rest) = match rest.chars().next() {
+                Some('#') | Some('♯') => (1, &rest[rest.chars().next()?.len_utf8()..]),
+                Some('b') | Some('♭') => (-1, &rest[rest.chars().next()?.len_utf8()..]),
+                _ => (0, rest),
+            };
+            Some((((base + alt + 12) % 12) as u8, rest))
+        }
+        let text = text.trim();
+        let (body, bass_txt) = match text.split_once('/') {
+            Some((a, b)) => (a, Some(b)),
+            None => (text, None),
+        };
+        let (root, suffix) = note(body)?;
+        let quality = match suffix.trim() {
+            "" | "maj" | "M" | "major" => Quality::Major,
+            "m" | "min" | "mi" | "-" | "minor" => Quality::Minor,
+            "7" | "dom7" => Quality::Dominant7,
+            "maj7" | "Maj7" | "M7" | "Δ" | "Δ7" | "△" | "△7" => Quality::Major7,
+            "m7" | "min7" | "mi7" | "-7" => Quality::Minor7,
+            "dim" | "°" | "o" => Quality::Dim,
+            "dim7" | "°7" | "o7" => Quality::Dim7,
+            _ => return None,
+        };
+        let bass = match bass_txt {
+            Some(b) => {
+                let (n, rest) = note(b.trim())?;
+                if !rest.is_empty() {
+                    return None;
+                }
+                n
+            }
+            None => root,
+        };
+        Some((root, quality, bass))
+    }
+}
+
 impl Score {
+    /// Fija el acorde que empieza en `(measure, tick)`: lo sustituye si ya hay uno, lo inserta si no,
+    /// y con texto vacío lo borra. Devuelve error si el nombre no se entiende o el compás no existe.
+    pub fn set_chord(&mut self, measure: usize, tick: u32, text: &str) -> Result<(), String> {
+        let nmeasures = self.parts.first().map_or(0, |p| p.measures.len());
+        if measure >= nmeasures {
+            return Err("ese compás no existe".into());
+        }
+        if text.trim().is_empty() {
+            self.chords.retain(|c| (c.measure, c.tick) != (measure, tick));
+            return Ok(());
+        }
+        let (root, quality, bass) = ChordMark::parse(text).ok_or_else(|| format!("no entiendo el acorde «{}» (ejemplos: C, Am, G7, Fmaj7, Dm7, B°, C/E)", text.trim()))?;
+        self.chords.retain(|c| (c.measure, c.tick) != (measure, tick));
+        self.chords.push(ChordMark { measure, tick, root, quality, bass });
+        self.chords.sort_by_key(|c| (c.measure, c.tick));
+        Ok(())
+    }
+
     /// Sustituye el cifrado de la partitura por el detectado en sus notas.
     pub fn detect_chord_symbols(&mut self) {
         self.chords = detect_chords(self);
@@ -267,6 +339,34 @@ fn detect_in_segments(notes: &[CNote], segs: &[(usize, u32, u32, u32)]) -> Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_hand_written_chord_names() {
+        assert_eq!(ChordMark::parse("C"), Some((0, Quality::Major, 0)));
+        assert_eq!(ChordMark::parse("Am"), Some((9, Quality::Minor, 9)));
+        assert_eq!(ChordMark::parse("F♯dim7"), Some((6, Quality::Dim7, 6)));
+        assert_eq!(ChordMark::parse("Bb/D"), Some((10, Quality::Major, 2)));
+        assert_eq!(ChordMark::parse("Bdim"), Some((11, Quality::Dim, 11)));
+        assert_eq!(ChordMark::parse("EbM7"), Some((3, Quality::Major7, 3)));
+        assert_eq!(ChordMark::parse(" g7 "), Some((7, Quality::Dominant7, 7)));
+        assert_eq!(ChordMark::parse("Dm7/C"), Some((2, Quality::Minor7, 0)));
+        assert_eq!(ChordMark::parse("Csus4"), None);
+        assert_eq!(ChordMark::parse("H"), None);
+        assert_eq!(ChordMark::parse("C/"), None);
+    }
+
+    #[test]
+    fn set_chord_replaces_inserts_and_deletes() {
+        let mut s = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 2);
+        s.set_chord(1, 0, "G7").unwrap();
+        s.set_chord(0, 0, "C").unwrap();
+        s.set_chord(1, 0, "Am").unwrap();
+        assert_eq!(s.chords.iter().map(|c| c.name(0)).collect::<Vec<_>>(), vec!["C", "Am"]);
+        assert!(s.set_chord(0, 0, "Xyz").is_err());
+        assert!(s.set_chord(9, 0, "C").is_err());
+        s.set_chord(1, 0, "").unwrap();
+        assert_eq!(s.chords.len(), 1);
+    }
 
     fn seg_grid(beats: u32) -> Vec<(usize, u32, u32, u32)> {
         (0..beats).map(|b| ((b / 4) as usize, (b % 4) * PPQ, b * PPQ, (b + 1) * PPQ)).collect()
