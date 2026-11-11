@@ -501,6 +501,25 @@ pub fn export_mscx(score: &Score) -> String {
             }
             for v in 0..m.voice_count() {
                 let Some(evs) = m.voice(v) else { continue };
+                // Cifrado: un <Harmony> antes del evento que suena en el tick del acorde (el primer pentagrama, primera voz).
+                let with_chords: Vec<Event>;
+                let evs: &[Event] = if pi == 0 && v == 0 && score.chords.iter().any(|c| c.measure == mi) {
+                    let mut owned = evs.to_vec();
+                    // MuseScore ancla el cifrado a una nota: un acorde a mitad de nota larga se adelanta al inicio de la
+                    // nota y, si caen varios en la misma, se queda el primero.
+                    for c in score.chords.iter().filter(|c| c.measure == mi) {
+                        if let Some(e) = owned.iter_mut().find(|e| e.start <= c.tick && c.tick < e.start + e.ticks) {
+                            if e.extras.iter().any(|x| x.xml.starts_with("<Harmony>") && x.place == ExtraPlace::Before) {
+                                continue;
+                            }
+                            e.extras.insert(0, Extra { place: ExtraPlace::Before, xml: c.mscx_harmony(score.fifths) });
+                        }
+                    }
+                    with_chords = owned;
+                    &with_chords
+                } else {
+                    evs
+                };
                 x.push_str("        <voice>\n");
                 if v == 0 {
                     if mi == 0 || starts_of(mi).is_some() {
@@ -620,6 +639,38 @@ mod tests {
         for (pa, pb) in s.parts.iter().zip(&b.parts) {
             assert_eq!(pa.measures, pb.measures);
         }
+    }
+
+    #[test]
+    fn chord_symbols_round_trip_through_musescore() {
+        for fifths in [-2i8, 0, 3] {
+            let mut s = Score::new("Cifrado", TimeSig { num: 4, den: 4 }, fifths, 2);
+            for m in 0..2 {
+                for k in 0..4 {
+                    s.put_note(0, 0, m, k * 480, 480, vec![p(0, 5)]).unwrap();
+                }
+            }
+            s.set_chord(0, 0, "C").unwrap();
+            s.set_chord(0, 960, "Bb/D").unwrap();
+            s.set_chord(1, 0, "F#m7").unwrap();
+            s.set_chord(1, 1440, "Edim7").unwrap();
+            let xml = export_mscx(&s);
+            assert_eq!(xml.matches("<Harmony>").count(), 4);
+            let r = import_mscx(&xml).unwrap();
+            assert_eq!(r.score.chords, s.chords, "tonalidad {fifths}");
+            assert!(!r.warnings.iter().any(|w| w.contains("cifrado")), "{:?}", r.warnings);
+        }
+    }
+
+    #[test]
+    fn unsupported_harmony_is_kept_literally_not_imported() {
+        let mut s = Score::new("x", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.put_note(0, 0, 0, 0, 1920, vec![p(0, 5)]).unwrap();
+        s.set_chord(0, 0, "G7").unwrap();
+        let xml = export_mscx(&s).replace("<extension>64</extension>", "<extension>128</extension>");
+        let r = import_mscx(&xml).unwrap();
+        assert!(r.score.chords.is_empty());
+        assert!(r.warnings.iter().any(|w| w.contains("cifrado")));
     }
 
     #[test]

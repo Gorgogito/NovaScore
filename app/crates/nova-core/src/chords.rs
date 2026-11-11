@@ -68,7 +68,69 @@ pub struct ChordMark {
     pub bass: u8,
 }
 
+/// Clase de altura → "tonal pitch class" de MuseScore (C = 14, G = 15, F = 13…, cada quinta suma 1),
+/// con sostenidos o bemoles según la tonalidad.
+pub fn pc_to_tpc(pc: u8, fifths: i8) -> i32 {
+    const SHARP: [i32; 12] = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19];
+    const FLAT: [i32; 12] = [14, 9, 16, 11, 18, 13, 8, 15, 10, 17, 12, 19];
+    if fifths >= 0 { SHARP[pc as usize % 12] } else { FLAT[pc as usize % 12] }
+}
+
+/// Identificador de `<extension>` en la lista de acordes estándar de MuseScore 2/3/4 (`share/styles/stdchords.xml`).
+pub fn mscx_chord_id(q: Quality) -> Option<u32> {
+    Some(match q {
+        Quality::Major => 1,
+        Quality::Major7 => 6,
+        Quality::Minor => 16,
+        Quality::Minor7 => 19,
+        Quality::Dim => 33,
+        Quality::Dominant7 => 64,
+        Quality::Dim7 => return None,
+    })
+}
+
+/// Calidad que corresponde a un identificador de la lista estándar de MuseScore; las variantes extendidas
+/// (novenas, oncenas, trecenas, sextas) se reducen a su base y lo que no es de nuestro modelo (suspendidos,
+/// aumentados, alterados…) da `None`.
+pub fn quality_of_mscx_chord_id(id: i64) -> Option<Quality> {
+    Some(match id {
+        1 | 2 | 5 => Quality::Major,
+        6 | 7 | 10 => Quality::Major7,
+        16 | 23 => Quality::Minor,
+        19 | 20 | 21 | 22 => Quality::Minor7,
+        33 => Quality::Dim,
+        64 | 65 | 70 => Quality::Dominant7,
+        _ => return None,
+    })
+}
+
+/// Inversa de [`pc_to_tpc`]: cada paso de tpc es una quinta (7 semitonos) desde C = 14.
+pub fn tpc_to_pc(tpc: i32) -> u8 {
+    ((tpc - 14) * 7).rem_euclid(12) as u8
+}
+
 impl ChordMark {
+    /// El elemento `<Harmony>` de MuseScore para este acorde.
+    pub fn mscx_harmony(&self, fifths: i8) -> String {
+        let mut x = format!("<Harmony>
+  <root>{}</root>
+", pc_to_tpc(self.root, fifths));
+        // Identificador de la lista de acordes estándar de MuseScore (stdchords.xml); el disminuido de séptima
+        // no tiene uno conocido y va por nombre.
+        match mscx_chord_id(self.quality) {
+            Some(id) => x.push_str(&format!("  <extension>{id}</extension>
+")),
+            None => x.push_str(&format!("  <name>{}</name>
+", self.quality.suffix())),
+        }
+        if self.bass != self.root {
+            x.push_str(&format!("  <base>{}</base>
+", pc_to_tpc(self.bass, fifths)));
+        }
+        x.push_str("</Harmony>");
+        x
+    }
+
     /// Cifrado, con sostenidos o bemoles según la tonalidad (`fifths`).
     pub fn name(&self, fifths: i8) -> String {
         const SHARP: [&str; 12] = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
@@ -366,6 +428,18 @@ mod tests {
         assert!(s.set_chord(9, 0, "C").is_err());
         s.set_chord(1, 0, "").unwrap();
         assert_eq!(s.chords.len(), 1);
+    }
+
+    #[test]
+    fn tpc_round_trips_for_every_pitch_class() {
+        for fifths in [-3, 0, 3] {
+            for pc in 0..12u8 {
+                assert_eq!(tpc_to_pc(pc_to_tpc(pc, fifths)), pc);
+            }
+        }
+        assert_eq!(pc_to_tpc(0, 0), 14);
+        assert_eq!(pc_to_tpc(10, -1), 12);
+        assert_eq!(pc_to_tpc(6, 2), 20);
     }
 
     fn seg_grid(beats: u32) -> Vec<(usize, u32, u32, u32)> {

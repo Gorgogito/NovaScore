@@ -15,7 +15,7 @@ Decisiones acordadas con el usuario: licencia GPL-3 (se puede reutilizar código
 | Sonido | SpessaSynth (Apache-2.0) + SoundFont MuseScore_General (MIT); velocidad por dinámicas/hairpins/articulaciones, pedal (CC64), trinos, repeticiones desplegadas; mezclador (volumen, mute, solo), 25 instrumentos GM |
 | Formatos | `.nova` (JSON propio) · MusicXML in/out · MIDI in/out (import cuantizado a semicorcheas) · PDF vectorial multipágina (svg2pdf) · **MuseScore `.mscz/.mscx` lectura v2–v4 y escritura v4.60** |
 
-Pendiente conocido (backlog sin IA): saltos D.C./D.S./segno/coda (se pierden al guardar), mordentes/grupetos, MIDI import sin tresillos ni varias voces, 7:4 y otros tuplets, vista/edición de letra y texto, exportación del cifrado a MuseScore (`Harmony`; la detección, el dibujo, la edición manual —clic o tecla K— y la lectura/escritura de `<harmony>` de MusicXML ya existen: botón «Detectar acordes», `Score.chords`), partes/extractos, transposición de instrumentos (se muestran en altura real), ligadura entre >2 sistemas, tablatura, plugins.
+Pendiente conocido (backlog sin IA): saltos D.C./D.S./segno/coda (se pierden al guardar), mordentes/grupetos, MIDI import sin tresillos ni varias voces, 7:4 y otros tuplets, vista/edición de letra y texto, detección de acordes al importar audio (la detección, el dibujo, la edición manual —clic o tecla K—, `<harmony>` de MusicXML y `Harmony` de MuseScore ya existen: botón «Detectar acordes», `Score.chords`), partes/extractos, transposición de instrumentos (se muestran en altura real), ligadura entre >2 sistemas, tablatura, plugins.
 
 ## 3. Arquitectura
 ```

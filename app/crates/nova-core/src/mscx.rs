@@ -204,10 +204,13 @@ struct StaffInfo {
 /// Elements that are read but not represented yet, with the label used in the warning.
 /// Returns (kept, lost): features that are not shown by NovaScore but are copied back when the
 /// score is saved as MuseScore, and features that would be dropped on saving.
-fn ignored_features(score: Node, preserve: bool) -> (Vec<&'static str>, Vec<&'static str>) {
+fn ignored_features(score: Node, preserve: bool, first_staff: &str) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut kept: BTreeSet<&'static str> = BTreeSet::new();
     let mut lost: BTreeSet<&'static str> = BTreeSet::new();
     for n in score.descendants().filter(|n| n.is_element()) {
+        if n.has_tag_name("Harmony") && is_native_harmony(n, first_staff) {
+            continue;
+        }
         // Dynamics and articulations NovaScore understands are imported, not ignored; the
         // <Articulation> entries of instrument definitions have no subtype.
         if (n.has_tag_name("Dynamic") && dynamic_of(n).is_some()) || (n.has_tag_name("Articulation") && (text_of(n, "subtype").is_none() || artic_of(n).is_some())) {
@@ -248,6 +251,33 @@ pub fn import_mscx(text: &str) -> Result<ImportReport, String> {
 }
 
 /// Elements that stay local to a place in the score and can be copied back verbatim.
+/// El acorde de un `<Harmony>` de MuseScore: (fundamental, calidad, bajo). `None` si no es un cifrado
+/// que NovaScore entienda (sin raíz, o con una calidad fuera de su modelo).
+fn harmony_of(el: Node) -> Option<(u8, crate::chords::Quality, u8)> {
+    let root = int_of(el, "root")? as i32;
+    // MuseScore guarda la calidad como identificador de su lista estándar (`<extension>`, lo habitual en
+    // los archivos reales) o como texto (`<name>`); sin ninguno, el acorde es mayor.
+    let quality = match (text_of(el, "name"), int_of(el, "extension")) {
+        (Some(name), _) => crate::chords::ChordMark::parse(&format!("C{name}"))?.1,
+        (None, Some(id)) => crate::chords::quality_of_mscx_chord_id(id)?,
+        (None, None) => crate::chords::Quality::Major,
+    };
+    let pc = crate::chords::tpc_to_pc(root);
+    let bass = int_of(el, "base").map_or(pc, |b| crate::chords::tpc_to_pc(b as i32));
+    Some((pc, quality, bass))
+}
+
+/// ¿Es un cifrado que NovaScore importa de forma nativa? Solo el de la primera voz del primer pentagrama.
+fn is_native_harmony(n: Node, first_staff: &str) -> bool {
+    if harmony_of(n).is_none() {
+        return false;
+    }
+    let Some(parent) = n.parent_element() else { return false };
+    let Some(measure) = (if parent.has_tag_name("voice") { parent.parent_element() } else { Some(parent) }) else { return false };
+    let first_voice = !parent.has_tag_name("voice") || measure.children().find(|c| c.has_tag_name("voice")) == Some(parent);
+    first_voice && measure.parent_element().and_then(|s| s.attribute("id")) == Some(first_staff)
+}
+
 const VOICE_SKIP: [&str; 10] = ["Chord", "Rest", "Tuplet", "endTuplet", "location", "TimeSig", "KeySig", "Clef", "Tempo", "Spanner"];
 const CHORD_SKIP: [&str; 6] = ["durationType", "dots", "Note", "Tuplet", "Spanner", "duration"];
 const NOTE_SKIP: [&str; 6] = ["pitch", "tpc", "tpc2", "Tie", "Spanner", "play"];
@@ -355,6 +385,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     let mut got_tempo = false;
     let (mut key_changes, mut clef_changes, mut irregular, mut dropped_voices) = (0usize, 0usize, 0usize, 0usize);
     let mut max_measures = 0usize;
+    let mut harmony_chords: Vec<crate::chords::ChordMark> = Vec::new();
     let mut raw_staves: Vec<Vec<Vec<Vec<Raw>>>> = (0..staves.len()).map(|_| Vec::new()).collect(); // staff -> voice -> measure -> events
     let mut measure_extras: Vec<Vec<Vec<String>>> = (0..staves.len()).map(|_| Vec::new()).collect(); // staff -> measure -> fragments
     let mut measure_repeats: Vec<Vec<(bool, u8)>> = (0..staves.len()).map(|_| Vec::new()).collect();
@@ -481,10 +512,17 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
 
                 for el in container.children().filter(|c| c.is_element()) {
                     let native_dyn = el.has_tag_name("Dynamic") && dynamic_of(el).is_some();
+                    let native_harmony = si == 0 && vi == 0 && el.has_tag_name("Harmony") && harmony_of(el).is_some();
+                    if native_harmony {
+                        if let Some((root, quality, bass)) = harmony_of(el) {
+                            let shift = if mi == 0 && measure_len < cur_len { cur_len - measure_len } else { 0 };
+                            harmony_chords.push(crate::chords::ChordMark { measure: mi, tick: (pos + shift).max(0) as u32, root, quality, bass });
+                        }
+                    }
                     if native_dyn {
                         pending_dyn = dynamic_of(el);
                     }
-                    if preserve && !native_dyn && !VOICE_SKIP.contains(&el.tag_name().name()) && !el.has_tag_name("voice") {
+                    if preserve && !native_dyn && !native_harmony && !VOICE_SKIP.contains(&el.tag_name().name()) && !el.has_tag_name("voice") {
                         pending.push(Extra { place: ExtraPlace::Before, xml: src(el) });
                     }
                     match el.tag_name().name() {
@@ -782,7 +820,10 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     if transposing {
         warnings.push("Hay instrumentos transpositores: las notas se muestran en altura real (de concierto).".into());
     }
-    let (kept, lost) = ignored_features(score_el, preserve);
+    harmony_chords.sort_by_key(|c| (c.measure, c.tick));
+    harmony_chords.dedup_by_key(|c| (c.measure, c.tick));
+    score.chords = harmony_chords;
+    let (kept, lost) = ignored_features(score_el, preserve, &staves[0].id);
     if !kept.is_empty() {
         warnings.push(format!("Se conservan al guardar como MuseScore, aunque no se muestran aquí: {}.", kept.join(", ")));
     }
