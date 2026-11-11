@@ -32,7 +32,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/*.dll": "./"
+      "resources/*.dll": "./",
+      "licenses/*": "licenses/"
     }
   }
 }

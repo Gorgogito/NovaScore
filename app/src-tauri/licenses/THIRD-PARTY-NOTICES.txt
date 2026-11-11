@@ -1,0 +1,40 @@
+NovaScore - avisos de componentes de terceros
+==============================================
+
+NovaScore es software libre (GPL-3.0-or-later). Este programa incluye o usa los componentes
+siguientes, que mantienen sus propias licencias.
+
+1. DirectML (Microsoft) - DirectML.dll, junto al ejecutable
+   "DirectML Redistributable Library" 1.15.4 (paquete NuGet Microsoft.AI.DirectML), copia sin
+   modificar del archivo firmado por Microsoft (SHA-256 9C9E6D82...E92DA1).
+   Licencia: MICROSOFT SOFTWARE LICENSE TERMS - MICROSOFT DIRECTX MACHINE LEARNING (DIRECTML);
+   texto completo en licenses\DirectML-LICENSE.txt y avisos de terceros del paquete en
+   licenses\DirectML-ThirdPartyNotices.txt. NO es una licencia libre: su uso y distribucion
+   se rigen por esos terminos (en particular, solo para Windows y Xbox, y distribuida junto a una
+   aplicacion que usa herramientas de aprendizaje automatico). Es opcional: sin la DLL, el motor
+   de piano usa la CPU. (c) Microsoft Corporation. All rights reserved.
+
+2. ONNX Runtime (Microsoft), enlazado en el ejecutable mediante el crate "ort"
+   Licencia MIT (ort: MIT o Apache-2.0).
+
+3. Basic Pitch (Spotify) - modelo ONNX incluido en el ejecutable (225 KB)
+   Licencia Apache-2.0.
+
+4. Modelo de piano de alta precision (Kong et al., ByteDance, "High-resolution piano
+   transcription with pedals") - NO se incluye: se descarga a peticion del usuario.
+   Pesos con licencia CC-BY-4.0.
+
+5. SoundFont MuseScore_General - sonido de reproduccion
+   Licencia MIT (ver licenses\MuseScore_General-LICENSE.md).
+
+6. Bravura (Steinberg) - fuente de notacion musical (SMuFL)
+   Licencia SIL Open Font License 1.1.
+
+7. SpessaSynth (spessasynth_core, spessasynth_lib) - sintetizador SoundFont
+   Licencia Apache-2.0.
+
+8. Tauri y sus complementos (MIT o Apache-2.0), SolidJS (MIT) y otras bibliotecas de Rust y npm
+   de las que depende el programa, bajo licencias permisivas (MIT, Apache-2.0 y similares).
+
+Las licencias de los puntos 2, 3, 4, 6 y 8 se indican segun la documentacion de cada proyecto
+(docs\MODELOS.md y docs\HANDOFF.md del repositorio); sus textos no se copian aqui.
