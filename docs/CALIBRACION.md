@@ -107,6 +107,15 @@ Problema: en arpegios regulares sin acentos el pulso queda ambiguo entre 3 y 4 d
 - **La Campanella** (6/8 → 4/4, tempo 88 frente a 97): sin diagnosticar.
 - Conjunto de este barrido (10 partituras reales de musetrainer + Tresillos): rubato 0,1 → tempo 5/11, compás 4/11, F1 medio 0,386; rubato 0 → tempo 9/11, F1 medio 0,829. **No es el mismo conjunto** que el de 11 piezas de la tabla anterior, así que las cifras no se pueden comparar con aquella.
 
+### Pulso en texturas uniformes: intentos sin resultado robusto
+`eval_scores` guarda ahora las notas transcritas por pieza y rubato (`target/evalset/<motor>/<pieza>-r<rubato>.tsv`) y con `NOVA_CACHED=1` las reutiliza sin renderizar ni transcribir: un barrido del seguimiento sobre 17 piezas (10 reales de musetrainer, Tresillos y las 6 sintéticas de tuplets) tarda segundos en lugar de ~13 min. Línea base: rubato 0 → tempo 15/17, F1 medio 0,875; rubato 0,1 → tempo 11/17, F1 0,588 (el seguimiento flexible se activa en casi todas).
+Se probó, sobre esas cachés, y **se descartó**:
+- **Acento de «bajo local»** (la nota más grave entre sus 2-6 vecinas por lado pesa ×1,25-3 en el seguimiento): arregla BWV 847 solo en 2 de 9 combinaciones y rompe Tresillos (120 → 90, la melodía de violín no tiene bajo); F1 medio 0,83-0,85 frente a 0,875.
+- **Ancho del prior de tempo** (σ = 0,6 por defecto; 0,8 / 1,0 / 1,5 / 3,0): no monótono; σ = 1,0 arregla BWV 846 a rubato 0,1 pero con otra pieza empeora; σ = 1,5 da 16/17 sin rubato y nada con rubato 0,1; σ = 3,0 empeora.
+- **Periodo de partida por autocorrelación** (`estimate_period`, que puntúa 2× y 4×) en vez de la búsqueda de DP: peor (13/17 sin rubato, F1 0,827).
+- Antes: penalización ternaria 0,3 / 0,5 / 0,7 y ventana 0,12 / 0,2: sin efecto.
+Conclusión: en BWV 846/847 con rubato la puntuación bruta del DP apenas distingue el periodo correcto de uno de 3 semicorcheas (diferencias del 10 %), y cualquier prior o acento ajustado a unas piezas rompe otras. Habría que cambiar el método (p. ej. inferir pulso y compás a la vez con hipótesis de compás, o detección de cambios de armonía en lugar de un acento de bajo), no un parámetro.
+
 ## Lo que sigue sin calibrar
 - Penalizaciones de tresillos/quintillos/seisillos: el banco sintético no las discrimina (F1 igual con y sin grupos); haría falta una métrica de ritmo más estricta (tolerancia < 30 ticks) o grupos mezclados con subdivisiones binarias cercanas.
 - Rubato real: el banco usa rubato sinusoidal sintético (hasta ~10 % se sigue; 20 % no); falta rubato de intérprete real (ritardandi, fermatas) y rubato en el que solo oscila la mano derecha.

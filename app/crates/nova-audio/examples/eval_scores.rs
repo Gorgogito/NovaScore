@@ -120,44 +120,61 @@ fn main() {
             .iter()
             .map(|s| (1.0 + sec(s.start as f64), sec((s.start + s.ticks) as f64) - sec(s.start as f64), s.channel, s.midi.clamp(0, 127) as u8, s.velocity.max(40)))
             .collect();
-        let mut programs: Vec<(u8, u8)> = snd.iter().map(|s| (s.channel, force_program.unwrap_or(sc.parts[s.part].program))).collect();
-        programs.sort();
-        programs.dedup();
-        let audio = render(&notes, &programs, Path::new(&sf));
-
-        let found = match &piano_model {
-            Some(m) => {
-                let x = {
-                    // 22,05 kHz → 16 kHz por interpolación lineal (basta para esta prueba)
-                    let ratio = 16000.0 / SR as f64;
-                    (0..(audio.len() as f64 * ratio) as usize)
-                        .map(|i| {
-                            let p = i as f64 / ratio;
-                            let a = p.floor() as usize;
-                            let f = (p - a as f64) as f32;
-                            audio[a] * (1.0 - f) + audio[(a + 1).min(audio.len() - 1)] * f
-                        })
-                        .collect::<Vec<f32>>()
-                };
-                piano::transcribe_samples(Path::new(m), Device::Auto, &x, &Default::default()).unwrap()
-            }
-            None => nova_audio::transcribe_samples(&audio, &nova_audio::Params::default()).unwrap(),
+        let stem = Path::new(&path).file_stem().unwrap().to_string_lossy().into_owned();
+        let dir = format!("target/evalset/{}", if piano_model.is_some() { "piano" } else { "bp" });
+        let cpath = format!("{dir}/{stem}-r{rubato}.tsv");
+        let cached: Option<Vec<RawNote>> = if std::env::var("NOVA_CACHED").is_ok() {
+            std::fs::read_to_string(&cpath).ok().map(|t| {
+                t.lines()
+                    .filter_map(|l| {
+                        let v: Vec<&str> = l.split('\t').collect();
+                        Some(RawNote { start: v.first()?.parse().ok()?, end: v.get(1)?.parse().ok()?, pitch: v.get(2)?.parse().ok()?, amplitude: v.get(3)?.parse().ok()?, onset: *v.get(4)? == "1" })
+                    })
+                    .collect()
+            })
+        } else {
+            None
         };
-        let raw: Vec<RawNote> = found.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
-        // caché de las notas transcritas + tonalidad real, para experimentos posteriores sin repetir el audio
-        {
-            let dir = format!("target/evalset/{}", if piano_model.is_some() { "piano" } else { "bp" });
-            std::fs::create_dir_all(&dir).unwrap();
-            let stem = Path::new(&path).file_stem().unwrap().to_string_lossy().into_owned();
-            let mut s = format!("# fifths {}
+        let raw: Vec<RawNote> = match cached {
+            Some(r) => r,
+            None => {
+            let mut programs: Vec<(u8, u8)> = snd.iter().map(|s| (s.channel, force_program.unwrap_or(sc.parts[s.part].program))).collect();
+            programs.sort();
+            programs.dedup();
+            let audio = render(&notes, &programs, Path::new(&sf));
+
+            let found = match &piano_model {
+                Some(m) => {
+                    let x = {
+                        // 22,05 kHz → 16 kHz por interpolación lineal (basta para esta prueba)
+                        let ratio = 16000.0 / SR as f64;
+                        (0..(audio.len() as f64 * ratio) as usize)
+                            .map(|i| {
+                                let p = i as f64 / ratio;
+                                let a = p.floor() as usize;
+                                let f = (p - a as f64) as f32;
+                                audio[a] * (1.0 - f) + audio[(a + 1).min(audio.len() - 1)] * f
+                            })
+                            .collect::<Vec<f32>>()
+                    };
+                    piano::transcribe_samples(Path::new(m), Device::Auto, &x, &Default::default()).unwrap()
+                }
+                None => nova_audio::transcribe_samples(&audio, &nova_audio::Params::default()).unwrap(),
+            };
+            let raw: Vec<RawNote> = found.iter().map(|n| RawNote { start: n.start, end: n.end, pitch: n.pitch, amplitude: n.amplitude, onset: n.onset }).collect();
+                // caché de las notas transcritas (por rubato), para experimentos sin repetir el audio (NOVA_CACHED=1)
+                std::fs::create_dir_all(&dir).unwrap();
+                let mut t = format!("# fifths {}
 # bars {}
 ", sc.fifths, bars);
-            for n in &raw {
-                s += &format!("{}	{}	{}	{}	{}
+                for n in &raw {
+                    t += &format!("{}	{}	{}	{}	{}
 ", n.start, n.end, n.pitch, n.amplitude, n.onset as u8);
+                }
+                std::fs::write(&cpath, t).unwrap();
+                raw
             }
-            std::fs::write(format!("{dir}/{stem}.tsv"), s).unwrap();
-        }
+        };
         let mut qo = QuantizeOptions { auto_meter: true, auto_pickup: true, compound: true, robust_tempo: true, ..Default::default() };
         if std::env::var("NOVA_NOAUTO").is_ok() {
             qo.auto_meter = false;
