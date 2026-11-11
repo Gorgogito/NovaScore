@@ -79,6 +79,8 @@ export const api = {
   setTime: (measure: number, num: number, den: number) => invoke<Score>("set_time", { measure, num, den }),
   setFifths: (fifths: number) => invoke<Score>("set_fifths", { fifths }),
   setTempo: (tempo: number) => invoke<Score>("set_tempo", { tempo }),
+  detectChords: () => invoke<Score>("detect_chords"),
+  clearChords: () => invoke<Score>("clear_chords"),
   undo: () => invoke<Score>("undo"),
   redo: () => invoke<Score>("redo"),
 

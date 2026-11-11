@@ -8,6 +8,8 @@ const MARGIN_X = 30;
 const TOP = 110;
 const PART_GAP = 56;
 const SYSTEM_GAP = 70;
+/** Extra space between systems when chord symbols are drawn above the first staff. */
+const CHORD_GAP = 30;
 
 export interface LAccidental {
   pitchIndex: number; // index in ev.pitches
@@ -269,8 +271,9 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const nParts = score.parts.length;
   const systemH = nParts * STAFF_H + (nParts - 1) * PART_GAP;
   const systems: LSystem[] = [];
+  const sysGap = SYSTEM_GAP + (score.chords?.length ? CHORD_GAP : 0);
   lines.forEach((line, li) => {
-    const top = TOP + li * (systemH + SYSTEM_GAP);
+    const top = TOP + li * (systemH + sysGap);
     const headers = line.map((p, i) => headerFor(i === 0, p.index));
     const fixed = headers.reduce((a, b) => a + b, 0) + 22 * line.length + line.reduce((a, p) => a + extraL(p.index), 0);
     const flex = line.reduce((a, p) => a + p.contentW, 0);
@@ -311,7 +314,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
     systems.push({ top, measures });
   });
 
-  const height = TOP + lines.length * (systemH + SYSTEM_GAP);
+  const height = TOP + lines.length * (systemH + sysGap);
   return {
     width: pageWidth,
     height,

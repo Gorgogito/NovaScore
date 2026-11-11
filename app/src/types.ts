@@ -105,7 +105,29 @@ export interface Score {
   fifths: number;
   tempo: number;
   parts: Part[];
+  /** Chord symbols above the first staff; each lasts until the next one. */
+  chords?: ChordMark[];
 }
+
+export interface ChordMark {
+  measure: number;
+  tick: number;
+  /** Pitch class of the root (0 = C). */
+  root: number;
+  quality: "major" | "minor" | "dominant7" | "major7" | "minor7" | "dim" | "dim7";
+  /** Pitch class of the bass (equal to `root` without inversion). */
+  bass: number;
+}
+
+const CHORD_SUFFIX: Record<ChordMark["quality"], string> = { major: "", minor: "m", dominant7: "7", major7: "maj7", minor7: "m7", dim: "dim", dim7: "dim7" };
+const SHARP_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+const FLAT_NAMES = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
+
+/** Chord symbol text (sharps or flats according to the key signature). */
+export const chordName = (c: ChordMark, fifths: number): string => {
+  const names = fifths >= 0 ? SHARP_NAMES : FLAT_NAMES;
+  return names[c.root % 12] + CHORD_SUFFIX[c.quality] + (c.bass !== c.root ? "/" + names[c.bass % 12] : "");
+};
 
 export interface Cursor {
   part: number;

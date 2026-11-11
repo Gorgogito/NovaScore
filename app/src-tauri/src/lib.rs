@@ -394,6 +394,29 @@ fn set_tempo(state: State<AppState>, tempo: u32) -> Res {
     Ok(doc.score.clone())
 }
 
+/// Detect the chord symbols of the score from its notes (replaces the current ones).
+#[tauri::command]
+fn detect_chords(state: State<AppState>) -> Res {
+    let mut doc = lock(&state);
+    doc.edit(|s| {
+        s.detect_chord_symbols();
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(doc.score.clone())
+}
+
+#[tauri::command]
+fn clear_chords(state: State<AppState>) -> Res {
+    let mut doc = lock(&state);
+    doc.edit(|s| {
+        s.chords.clear();
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(doc.score.clone())
+}
+
 #[tauri::command]
 fn undo(state: State<AppState>) -> Score {
     let mut doc = lock(&state);
@@ -459,7 +482,7 @@ pub fn run() {
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
             get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
-            set_time, set_fifths, set_tempo, undo, redo, save_score, load_score
+            set_time, set_fifths, set_tempo, detect_chords, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

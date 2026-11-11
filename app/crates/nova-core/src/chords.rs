@@ -2,9 +2,11 @@
 //! pulso, comparación con plantillas (tríadas y séptimas) con peso extra del bajo y suavizado de
 //! Viterbi (un acorde cambia solo si la ganancia supera `CHANGE_PENALTY`).
 use crate::{Content, Score, PPQ};
+use serde::{Deserialize, Serialize};
 
 /// Calidad del acorde (el sufijo del cifrado).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Quality {
     Major,
     Minor,
@@ -55,7 +57,7 @@ impl Quality {
 }
 
 /// Un acorde que empieza en `(measure, tick)` y dura hasta el siguiente.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChordMark {
     pub measure: usize,
     pub tick: u32,
@@ -128,6 +130,13 @@ fn beat_ticks(num: u32, den: u32) -> u32 {
         PPQ * 3 / 2
     } else {
         (PPQ * 4 / den).max(1)
+    }
+}
+
+impl Score {
+    /// Sustituye el cifrado de la partitura por el detectado en sus notas.
+    pub fn detect_chord_symbols(&mut self) {
+        self.chords = detect_chords(self);
     }
 }
 
@@ -293,6 +302,21 @@ mod tests {
         let m = detect_in_segments(&n, &seg_grid(4));
         assert_eq!(m.len(), 1);
         assert_eq!((m[0].root, m[0].quality), (0, Quality::Major));
+    }
+
+    #[test]
+    fn chords_survive_json_and_old_files_without_them_open() {
+        let mut sc = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 2);
+        sc.chords = vec![ChordMark { measure: 1, tick: 480, root: 9, quality: Quality::Minor7, bass: 4 }];
+        let json = serde_json::to_string(&sc).unwrap();
+        assert!(json.contains("\"minor7\""));
+        let back: Score = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.chords, sc.chords);
+        // un .nova antiguo no tiene el campo
+        sc.chords.clear();
+        let old = serde_json::to_string(&sc).unwrap();
+        assert!(!old.contains("chords"));
+        assert!(serde_json::from_str::<Score>(&old).unwrap().chords.is_empty());
     }
 
     #[test]

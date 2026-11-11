@@ -57,6 +57,14 @@ export default function App() {
     setCursor({ part, voice: c.voice, m, start: ev ? ev.start : 0 });
   };
 
+  const toggleChords = async () => {
+    const has = !!score()?.chords?.length;
+    if (await run(has ? api.clearChords() : api.detectChords())) {
+      const n = score()?.chords?.length ?? 0;
+      setStatus(has ? "Cifrado de acordes quitado." : n ? `${n} acordes detectados (borrador): revísalos; se dibujan sobre el primer pentagrama.` : "No se detectaron acordes (no hay notas suficientes).");
+    }
+  };
+
   const run = async (p: Promise<Score>, markDirty = true) => {
     try {
       apply(await p, markDirty);
@@ -539,6 +547,9 @@ export default function App() {
         <span class="sep" />
         <button onClick={() => run(api.undo())} title="Deshacer (Ctrl+Z)">↶</button>
         <button onClick={() => run(api.redo())} title="Rehacer (Ctrl+Y)">↷</button>
+        <Show when={score()}>
+          <button onClick={toggleChords} title="Detectar el cifrado de acordes a partir de las notas (borrador); si ya hay, lo quita">{score()!.chords?.length ? "Quitar acordes" : "Detectar acordes"}</button>
+        </Show>
         <span class="sep" />
         <button class="play" classList={{ on: isPlaying() }} onClick={togglePlay} title="Reproducir (Espacio)">
           {isPlaying() ? "■ Parar" : "▶ Reproducir"}

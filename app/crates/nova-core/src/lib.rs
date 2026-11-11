@@ -437,6 +437,9 @@ pub struct Score {
     /// Style settings (`score_style.mss`) of the MuseScore file this score came from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms_style: Option<String>,
+    /// Chord symbols shown above the first staff (each lasts until the next one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chords: Vec<chords::ChordMark>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -586,6 +589,7 @@ impl Score {
             fifths,
             tempo: 100,
             ms_style: None,
+            chords: Vec::new(),
             parts: vec![Part::new("Piano", Clef::Treble, 0, (0..measures).map(|_| Measure::empty(len)).collect())],
         }
     }

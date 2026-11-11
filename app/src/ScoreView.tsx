@@ -1,7 +1,7 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
 import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, SP, staffIdx, STAFF_H } from "./layout";
-import { Cursor, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
+import { chordName, Cursor, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
 const g2 = g;
@@ -687,6 +687,20 @@ export function ScoreView(props: Props) {
               <Show when={props.score.parts.length > 1}>
                 <line x1={first.x} x2={first.x} y1={tops[0]} y2={tops[tops.length - 1] + STAFF_H} stroke="var(--ink)" stroke-width={1.4} />
               </Show>
+              <For each={(props.score.chords ?? []).filter((c) => sys.measures.some((m) => m.index === c.measure))}>
+                {(c) => {
+                  const m = sys.measures.find((x) => x.index === c.measure)!;
+                  // x del primer evento del primer pentagrama que empieza en el tick del acorde o después
+                  const evs = m.lanes.filter((l) => l.part === 0).flatMap((l) => l.events).filter((le) => le.ev.start >= c.tick).sort((a, b) => a.ev.start - b.ev.start);
+                  const x = evs.length ? evs[0].x : m.x + m.headerW + 6;
+                  // sube la etiqueta si hay notas (o sus plicas, ~7 medios espacios) por encima del pentagrama en este compás
+                  const idxTop = Math.max(-1e9, ...m.lanes.filter((l) => l.part === 0).flatMap((l) => l.events).map((le) => (le.ev.kind === "note" ? Math.max(...le.ev.pitches.map((q) => staffIdx(props.score.parts[0].percussion, q))) + 7 : -1e9)));
+                  const lift = Math.min(30, Math.max(0, idxTop - (bottomLineIndex(clef()) + 8) + 1) * (SP / 2));
+                  return (
+                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui">{chordName(c, props.score.fifths)}</text>
+                  );
+                }}
+              </For>
               <For each={sys.measures}>
                 {(m) => (
                   <text x={m.x + m.headerW + 4} y={tops[0] - 22} font-size="10" fill="var(--ink-dim)" font-family="system-ui">{m.index + 1}</text>
