@@ -221,12 +221,35 @@ fn main() {
     got {} notas {:?} (detectadas {})", reference.len(), reference.iter().take(10).collect::<Vec<_>>(), out.len(), g, raw.len());
         }
         let mut best = (0.0, 0.0, 0.0);
+        let mut best_shift = 0i64;
+        let ref_v: Vec<(i32, i64)> = reference.iter().cloned().collect();
         for scale in [1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 1.5, 2.0, 3.0] {
-            let got: BTreeSet<(i32, i64)> = out.iter().map(|s| (s.midi, ((s.start as i64 - o0) as f64 * scale).round() as i64)).collect();
-            let x = f1(&reference, &got, tol);
-            if x.2 > best.2 {
-                best = x;
+            let got_v: Vec<(i32, i64)> = out.iter().map(|s| (s.midi, ((s.start as i64 - o0) as f64 * scale).round() as i64)).collect();
+            // la primera nota puede ser espuria o faltar: se prueba también el desplazamiento global más votado
+            // por las diferencias de tiempo entre notas de igual altura
+            let mut votes: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
+            for &(m, t) in ref_v.iter().filter(|x| x.1 < 9600).take(200) {
+                for &(gm, gt) in got_v.iter().filter(|x| x.1 < 14400) {
+                    if gm == m && (gt - t).abs() <= 4800 {
+                        *votes.entry((gt - t) / 20 * 20).or_default() += 1;
+                    }
+                }
             }
+            let mut cands: Vec<(i64, usize)> = votes.into_iter().collect();
+            cands.sort_by_key(|c| std::cmp::Reverse(c.1));
+            let mut shifts: Vec<i64> = vec![0];
+            shifts.extend(cands.iter().take(5).map(|c| c.0));
+            for sh in shifts {
+                let got: BTreeSet<(i32, i64)> = got_v.iter().map(|&(m, t)| (m, t - sh)).collect();
+                let x = f1(&reference, &got, tol);
+                if x.2 > best.2 {
+                    best = x;
+                    best_shift = sh;
+                }
+            }
+        }
+        if std::env::var("NOVA_VERBOSE").is_ok() && best_shift != 0 {
+            println!("    desplazamiento global de las notas: {best_shift} ticks (la primera nota no coincide)");
         }
         println!(
             "{:<34} {:>3} → {:>3} (×{}, {:+.1} %) {:>3} {:>6}→{:<6} {:>4}→{:<4} {:.2} / {:.2} / {:.2}",

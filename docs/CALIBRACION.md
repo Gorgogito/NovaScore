@@ -101,6 +101,12 @@ Problema: en arpegios regulares sin acentos el pulso queda ambiguo entre 3 y 4 d
 - Test unitario con tempo sintético oscilante del 20 %: rígido 75 % de notas en la rejilla, flexible 100 %; con tempo constante no se activa.
 - **Grabaciones reales**: el tempo de las 11 es idéntico con y sin seguimiento flexible (`tempo_sweep` con `NOVA_LAXT=4`), es decir, **ni mejora ni empeora**: el beneficio solo está demostrado en audio sintético con rubato sinusoidal (no con rubato real de intérprete).
 
+### Fallos a rubato 0,1: diagnóstico
+- **Nocturno 9-1 era un artefacto de la métrica**: el banco ancla el tiempo cero en la primera nota; si el modelo detecta una nota espuria o se salta la primera, todo sale desplazado (aquí 240 ticks) y el F1 cae a 0,03 con el ritmo bien. `eval_scores` prueba ahora también el desplazamiento global más votado por las diferencias entre notas de igual altura (lo muestra con `NOVA_VERBOSE`): Nocturno 0,03 → **0,96**. Con rubato 0 las cifras de las demás piezas no cambian.
+- **BWV 846 (6/8 falso)**: el tatum se detecta bien (0,193 s, 90 % de los intervalos), pero con rubato sale ~7 % corto y el mejor periodo (0,651 s = 3,38 tatums) queda fuera de la ventana de la penalización ternaria (±0,12·k). **Probado sin efecto**: penalización 0,3 / 0,5 / 0,7 y ventana 0,2 dan resultados idénticos a la línea base en las 11 piezas (con y sin rubato); el seguimiento, partiendo del mejor candidato, vuelve a derivar a un periodo de 3 semicorcheas. La palanca no está en esa penalización. Sin resolver.
+- **La Campanella** (6/8 → 4/4, tempo 88 frente a 97): sin diagnosticar.
+- Conjunto de este barrido (10 partituras reales de musetrainer + Tresillos): rubato 0,1 → tempo 5/11, compás 4/11, F1 medio 0,386; rubato 0 → tempo 9/11, F1 medio 0,829. **No es el mismo conjunto** que el de 11 piezas de la tabla anterior, así que las cifras no se pueden comparar con aquella.
+
 ## Lo que sigue sin calibrar
 - Penalizaciones de tresillos/quintillos/seisillos: el banco sintético no las discrimina (F1 igual con y sin grupos); haría falta una métrica de ritmo más estricta (tolerancia < 30 ticks) o grupos mezclados con subdivisiones binarias cercanas.
 - Rubato real: el banco usa rubato sinusoidal sintético (hasta ~10 % se sigue; 20 % no); falta rubato de intérprete real (ritardandi, fermatas) y rubato en el que solo oscila la mano derecha.

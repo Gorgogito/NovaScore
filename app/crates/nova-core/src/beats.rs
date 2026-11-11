@@ -154,6 +154,9 @@ pub fn period_scores(onsets: &[(f64, f32)], tightness: f64) -> Vec<(f64, f64, us
 
 /// Penalización del periodo de pulso que equivale a un múltiplo de 3 de la rejilla (tatum).
 pub const TATUM_TERNARY_PENALTY: f64 = 0.3;
+/// Tolerancia relativa (|n−k| < ventana·k) para considerar el periodo múltiplo de 3 del tatum; con rubato el
+/// tatum medido sale algo corto, por lo que la ventana no puede ser estrecha.
+pub const TATUM_TERNARY_WINDOW: f64 = 0.12;
 
 /// Unidad mínima de la rejilla rítmica (s): el intervalo entre inicios más corto con peso
 /// significativo (≥ 25 % del más frecuente). `None` con muy pocos inicios.
@@ -215,7 +218,7 @@ pub fn find_beats(onsets: &[(f64, f32)], seed: Option<f64>, tightness: f64) -> V
             Some(t) => {
                 let n = period / t;
                 let k = n.round();
-                if k >= 3.0 && (n - k).abs() < 0.12 * k && (k as u32) % 3 == 0 { 1.0 - lambda } else { 1.0 }
+                if k >= 3.0 && (n - k).abs() < TATUM_TERNARY_WINDOW * k && (k as u32) % 3 == 0 { 1.0 - lambda } else { 1.0 }
             }
             None => 1.0,
         }
