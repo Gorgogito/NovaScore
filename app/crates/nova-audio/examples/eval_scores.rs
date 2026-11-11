@@ -306,6 +306,59 @@ fn main() {
             best.1,
             best.2
         );
+        // acordes: verdad de `artefactos/acordes/<stem>.json` (si existe) frente a los detectados en la partitura transcrita
+        let truth_path = format!("../../../artefactos/acordes/{stem}.json");
+        if let Ok(txt) = std::fs::read_to_string(&truth_path) {
+            let truth: Vec<serde_json::Value> = serde_json::from_str(&txt).unwrap_or_default();
+            let est_marks = nova_core::chords::detect_chords(&r.score);
+            let n_o = sc.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+            let _ = n_o;
+            let first_repeat_end = sc.parts[0].measures.iter().position(|m| m.end_repeat > 0).unwrap_or(usize::MAX);
+            // tiempo de reproducción (con repeticiones desplegadas) de la primera vez que suena cada compás
+            let order = sc.playback_order();
+            let play_start = |m: usize| -> Option<u32> {
+                let mut pos = 0;
+                for &x in &order {
+                    if x == m {
+                        return Some(pos);
+                    }
+                    pos += sc.measure_len(x);
+                }
+                None
+            };
+            let n_e = r.score.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+            let estarts = r.score.measure_starts(n_e);
+            let est_spt = 60.0 / r.score.tempo as f64 / 480.0;
+            // acorde detectado vigente en el instante t (s desde la primera nota)
+            let cshift = env_f("NOVA_CSHIFT", 0.0);
+            let est_at = |t: f64| est_marks.iter().filter(|c| (estarts[c.measure] + c.tick).saturating_sub(o0 as u32) as f64 * est_spt <= t + 0.05 + cshift).last();
+            let (mut cn, mut cr, mut ct) = (0, 0, 0);
+            for t in &truth {
+                let kind = t["kind"].as_str().unwrap_or("");
+                let tri = match kind { "major" | "dominant" | "major-seventh" => 0, "minor" | "minor-seventh" => 1, "diminished" | "diminished-seventh" => 2, _ => continue };
+                let (m, tick, root) = (t["measure"].as_u64().unwrap() as usize, t["tick"].as_u64().unwrap() as u32, t["root"].as_u64().unwrap() as u8);
+                if m > first_repeat_end {
+                    continue; // tras el primer final de repetición el tiempo de reproducción ya no coincide con el escrito
+                }
+                let Some(ps) = play_start(m) else { continue };
+                let abs = ps + tick;
+                if abs >= limit || (abs as i64) < t0 {
+                    continue;
+                }
+                cn += 1;
+                if std::env::var("NOVA_VERBOSE").is_ok() {
+                    let g = est_at((abs as i64 - t0) as f64 * spt);
+                    println!("      comp {} +{} t={:.1}s verdad {}{} → {}", m + 1, tick, (abs as i64 - t0) as f64 * spt, root, kind, g.map_or("-".into(), |c| c.name(0)));
+                }
+                if let Some(c) = est_at((abs as i64 - t0) as f64 * spt) {
+                    cr += (c.root == root) as i32;
+                    ct += (c.root == root && c.quality.triad() == tri) as i32;
+                }
+            }
+            if cn > 0 {
+                println!("    acordes: {cn} de la verdad, fundamental {:.0} %, tríada {:.0} %", 100.0 * cr as f64 / cn as f64, 100.0 * ct as f64 / cn as f64);
+            }
+        }
         n += 1;
         sf1 += best.2;
         tempo_ok += tempo_good as i32;

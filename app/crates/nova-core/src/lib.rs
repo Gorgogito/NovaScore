@@ -2,6 +2,7 @@
 //! Licensed under GPL-3.0-or-later.
 
 pub mod beats;
+pub mod chords;
 pub mod io;
 pub mod mscx;
 pub mod mscx_write;

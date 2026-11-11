@@ -384,6 +384,7 @@ dependencies = [
  "nova-core",
  "ort",
  "oxisynth",
+ "serde_json",
  "symphonia",
 ]
 
