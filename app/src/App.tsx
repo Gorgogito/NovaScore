@@ -8,7 +8,7 @@ import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
 import { ScoreView } from "./ScoreView";
-import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, SpannerKind, timeAt, voiceEvents } from "./types";
+import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, SpannerKind, timeAt, voiceEvents } from "./types";
 import "./styles.css";
 
 const BASE: Record<number, number> = { 3: 120, 4: 240, 5: 480, 6: 960, 7: 1920 };
@@ -232,6 +232,12 @@ export default function App() {
   };
   const toggleRepeat = async (start: boolean) => {
     await run(api.toggleRepeat(cursor().m, start));
+  };
+  const toggleMarker = async (marker: Marker) => {
+    await run(api.toggleMarker(cursor().m, marker));
+  };
+  const setJump = async (jump: Jump) => {
+    await run(api.setJump(cursor().m, jump));
   };
   const removeSpanners = async () => {
     const r = currentRange();
@@ -674,6 +680,16 @@ export default function App() {
         <button title="Signo de repetición al final del compás seleccionado" onClick={() => toggleRepeat(false)}>:|</button>
         <button title="Primera casilla sobre los compases seleccionados" onClick={() => addVolta(1)}>1.</button>
         <button title="Segunda casilla sobre los compases seleccionados" onClick={() => addVolta(2)}>2.</button>
+        <span class="sep" />
+        <span class="label">Saltos</span>
+        <button title="Segno al inicio del compás seleccionado (destino de D.S.)" onClick={() => toggleMarker("Segno")}>𝄋</button>
+        <button title="Coda al inicio del compás seleccionado (destino de «al Coda»)" onClick={() => toggleMarker("Coda")}>𝄌</button>
+        <button title="«To Coda» al final del compás seleccionado" onClick={() => toggleMarker("ToCoda")}>To Coda</button>
+        <button title="Fine al final del compás seleccionado" onClick={() => toggleMarker("Fine")}>Fine</button>
+        <select class="tuplet-select" value="" title="Salto al final del compás seleccionado (elegir el mismo otra vez lo quita)" onChange={(e) => { const v = e.currentTarget.value as Jump | ""; e.currentTarget.value = ""; if (v) setJump(v); }}>
+          <option value="">Salto…</option>
+          <For each={Object.keys(JUMP_TEXT) as Jump[]}>{(j) => <option value={j}>{JUMP_TEXT[j]}</option>}</For>
+        </select>
         <span class="hint">Afectan a las notas seleccionadas (Mayús+flechas)</span>
       </div>
 

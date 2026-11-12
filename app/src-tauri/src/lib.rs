@@ -2,7 +2,7 @@ mod audio;
 mod pdf;
 
 use nova_core::io::{self, PedalEvent, Sound};
-use nova_core::{Artic, Clef, Content, Dynamic, Document, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, TimeSig};
+use nova_core::{Artic, Clef, Content, Document, Dynamic, Jump, Marker, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, TimeSig};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
@@ -100,6 +100,22 @@ fn toggle_articulation(state: State<AppState>, part: usize, voice: usize, start_
 fn toggle_repeat(state: State<AppState>, measure: usize, start: bool) -> Res {
     let mut doc = lock(&state);
     doc.edit(|s| s.toggle_repeat(measure, start)).map_err(|e| e.to_string())?;
+    Ok(doc.score.clone())
+}
+
+/// Add or remove a segno, coda, "To Coda" or fine marker on a measure.
+#[tauri::command]
+fn toggle_marker(state: State<AppState>, measure: usize, marker: Marker) -> Res {
+    let mut doc = lock(&state);
+    doc.edit(|s| s.toggle_marker(measure, marker)).map_err(|e| e.to_string())?;
+    Ok(doc.score.clone())
+}
+
+/// Set the D.C./D.S. jump at the end of a measure (the same one again, or `None`, removes it).
+#[tauri::command]
+fn set_jump(state: State<AppState>, measure: usize, jump: Option<Jump>) -> Res {
+    let mut doc = lock(&state);
+    doc.edit(|s| s.set_jump(measure, jump)).map_err(|e| e.to_string())?;
     Ok(doc.score.clone())
 }
 
@@ -497,7 +513,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, detect_chords, set_chord, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

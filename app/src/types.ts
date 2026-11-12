@@ -29,7 +29,22 @@ export interface Measure {
   start_repeat?: boolean;
   /** Times the section is played (0/undefined = no repeat sign at the end). */
   end_repeat?: number;
+  /** Segno, coda, "To Coda" and fine marks of the measure. */
+  markers?: Marker[];
+  /** Jump taken at the end of the measure. */
+  jump?: Jump;
 }
+
+export type Marker = "Segno" | "Coda" | "ToCoda" | "Fine";
+export type Jump = "Dc" | "DcAlFine" | "DcAlCoda" | "Ds" | "DsAlFine" | "DsAlCoda";
+export const JUMP_TEXT: Record<Jump, string> = {
+  Dc: "D.C.",
+  DcAlFine: "D.C. al Fine",
+  DcAlCoda: "D.C. al Coda",
+  Ds: "D.S.",
+  DsAlFine: "D.S. al Fine",
+  DsAlCoda: "D.S. al Coda",
+};
 
 export const MAX_VOICES = 4;
 

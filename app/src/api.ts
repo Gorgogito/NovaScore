@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Pitch, Score, SpannerKind, SpPos } from "./types";
+import type { Jump, Marker, Pitch, Score, SpannerKind, SpPos } from "./types";
 
 export interface Entered {
   score: Score;
@@ -67,6 +67,8 @@ export const api = {
   toggleSpanner: (part: number, kind: SpannerKind, voice: number, start: SpPos, end: SpPos, endings?: number) =>
     invoke<Score>("toggle_spanner", { part, kind, voice, startMeasure: start.measure, startTick: start.tick, endMeasure: end.measure, endTick: end.tick, endings: endings ?? null }),
   toggleRepeat: (measure: number, start: boolean) => invoke<Score>("toggle_repeat", { measure, start }),
+  toggleMarker: (measure: number, marker: Marker) => invoke<Score>("toggle_marker", { measure, marker }),
+  setJump: (measure: number, jump: Jump | null) => invoke<Score>("set_jump", { measure, jump }),
   removeSpanners: (part: number, voice: number, start: SpPos, end: SpPos) =>
     invoke<Score>("remove_spanners", { part, voice, startMeasure: start.measure, startTick: start.tick, endMeasure: end.measure, endTick: end.tick }),
 

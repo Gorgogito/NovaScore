@@ -256,6 +256,55 @@ pub struct Measure {
     /// Repeat sign at the end: the number of times the section is played (0 = none, 2 = once repeated).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub end_repeat: u8,
+    /// Navigation markers of the measure (segno, coda, "To Coda", fine). Applies to every part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+    /// Jump taken at the end of the measure (D.C., D.S. and their "al Fine"/"al Coda" forms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<Jump>,
+}
+
+/// Navigation markers. `Segno` and `Coda` are jump targets; `ToCoda` and `Fine` act at the end of their measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Marker {
+    Segno,
+    Coda,
+    ToCoda,
+    Fine,
+}
+
+/// Jumps. `Dc` returns to the beginning, `Ds` to the segno; "al Fine" stops at the fine marker and
+/// "al Coda" leaves for the coda at the "To Coda" marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Jump {
+    Dc,
+    DcAlFine,
+    DcAlCoda,
+    Ds,
+    DsAlFine,
+    DsAlCoda,
+}
+
+impl Jump {
+    pub fn to_segno(self) -> bool {
+        matches!(self, Jump::Ds | Jump::DsAlFine | Jump::DsAlCoda)
+    }
+    pub fn al_fine(self) -> bool {
+        matches!(self, Jump::DcAlFine | Jump::DsAlFine)
+    }
+    pub fn al_coda(self) -> bool {
+        matches!(self, Jump::DcAlCoda | Jump::DsAlCoda)
+    }
+    pub fn text(self) -> &'static str {
+        match self {
+            Jump::Dc => "D.C.",
+            Jump::DcAlFine => "D.C. al Fine",
+            Jump::DcAlCoda => "D.C. al Coda",
+            Jump::Ds => "D.S.",
+            Jump::DsAlFine => "D.S. al Fine",
+            Jump::DsAlCoda => "D.S. al Coda",
+        }
+    }
 }
 
 fn is_false(v: &bool) -> bool {
@@ -513,7 +562,7 @@ fn tuplet_rests(from: u32, to: u32, t: Tuplet) -> Result<Vec<Event>, EditError> 
 
 impl Measure {
     pub fn empty(len: u32) -> Measure {
-        Measure { events: fill_rests(Vec::new(), len), voices: Vec::new(), extras: Vec::new(), start_repeat: false, end_repeat: 0 }
+        Measure { events: fill_rests(Vec::new(), len), voices: Vec::new(), extras: Vec::new(), start_repeat: false, end_repeat: 0, markers: Vec::new(), jump: None }
     }
 
     /// Events of a voice (0-based), or `None` if the voice has no content in this measure.
@@ -1102,8 +1151,42 @@ impl Score {
         Ok(())
     }
 
+    /// Add or remove a navigation marker on a measure (applies to every part).
+    pub fn toggle_marker(&mut self, measure: usize, marker: Marker) -> Result<(), EditError> {
+        if self.parts.is_empty() || self.parts.iter().any(|p| measure >= p.measures.len()) {
+            return Err(EditError::OutOfRange);
+        }
+        for p in &mut self.parts {
+            let ms = &mut p.measures[measure].markers;
+            if let Some(i) = ms.iter().position(|m| *m == marker) {
+                ms.remove(i);
+            } else {
+                ms.push(marker);
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the jump of a measure; the same jump again (or `None`) removes it.
+    pub fn set_jump(&mut self, measure: usize, jump: Option<Jump>) -> Result<(), EditError> {
+        if self.parts.is_empty() || self.parts.iter().any(|p| measure >= p.measures.len()) {
+            return Err(EditError::OutOfRange);
+        }
+        let cur = self.parts[0].measures[measure].jump;
+        let new = if cur == jump { None } else { jump };
+        for p in &mut self.parts {
+            p.measures[measure].jump = new;
+        }
+        Ok(())
+    }
+
     /// Measures in the order they are played: repeats are unfolded and each volta is only played
     /// on its pass. A measure index can appear several times.
+    ///
+    /// Jumps are taken once, at the end of their measure (after its repeat sign). From then on repeat
+    /// signs are ignored and a volta is only played if it is the last ending. "al Fine" stops after the
+    /// `Fine` measure; "al Coda" leaves at the `ToCoda` measure for the `Coda` measure. A jump whose
+    /// target is missing (a D.S. without segno) is ignored.
     pub fn playback_order(&self) -> Vec<usize> {
         let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
         let Some(first) = self.parts.first() else { return Vec::new() };
@@ -1115,27 +1198,36 @@ impl Score {
                 voltas.push((s.start.measure, last, s.endings));
             }
         }
+        let last_ending = voltas.iter().map(|v| 8 - v.2.leading_zeros() as usize).max().unwrap_or(0);
+        let find = |k: Marker| first.measures.iter().position(|m| m.markers.contains(&k));
         let mut order = Vec::new();
         let (mut i, mut pass, mut section_start) = (0usize, 1usize, 0usize);
         let mut jumped = false; // just came back to the start of a repeated section
+        let mut active: Option<Jump> = None; // a jump has been taken: repeat signs no longer apply
+        let mut taken = vec![false; n];
         let mut guard = 0usize;
         while i < n && guard < 100_000 {
             guard += 1;
             // a volta that is not for this pass is skipped
             if let Some(&(_, last, mask)) = voltas.iter().find(|v| v.0 <= i && i <= v.1) {
-                if mask != 0 && pass <= 8 && mask & (1 << (pass - 1)) == 0 {
+                let skip = if active.is_some() {
+                    mask != 0 && last_ending <= 8 && mask & (1 << (last_ending - 1)) == 0
+                } else {
+                    mask != 0 && pass <= 8 && mask & (1 << (pass - 1)) == 0
+                };
+                if skip {
                     i = last + 1;
                     continue;
                 }
             }
             let m = first.measures.get(i);
-            if m.map_or(false, |m| m.start_repeat) && !jumped {
+            if active.is_none() && m.map_or(false, |m| m.start_repeat) && !jumped {
                 section_start = i;
                 pass = 1;
             }
             jumped = false;
             order.push(i);
-            let end = m.map_or(0, |m| m.end_repeat) as usize;
+            let end = if active.is_some() { 0 } else { m.map_or(0, |m| m.end_repeat) as usize };
             if end > 0 {
                 if pass < end {
                     pass += 1;
@@ -1145,6 +1237,28 @@ impl Score {
                 }
                 pass = 1;
                 section_start = i + 1;
+            }
+            if let Some(j) = active {
+                let marks = m.map_or(&[][..], |m| &m.markers[..]);
+                if j.al_fine() && marks.contains(&Marker::Fine) {
+                    break;
+                }
+                if j.al_coda() && marks.contains(&Marker::ToCoda) {
+                    if let Some(c) = find(Marker::Coda).filter(|&c| c > i) {
+                        i = c;
+                        continue;
+                    }
+                }
+            }
+            if let Some(j) = m.and_then(|m| m.jump).filter(|_| !taken[i]) {
+                let target = if j.to_segno() { find(Marker::Segno) } else { Some(0) };
+                if let Some(t) = target {
+                    taken[i] = true;
+                    active = Some(j);
+                    pass = 1;
+                    i = t;
+                    continue;
+                }
             }
             i += 1;
         }
@@ -1844,6 +1958,50 @@ mod tests {
         s.parts[0].measures[1].end_repeat = 3;
         assert_eq!(s.playback_order(), vec![0, 1, 0, 1, 0, 1, 2]);
         assert!(s.toggle_repeat(9, true).is_err());
+    }
+
+    #[test]
+    fn jumps_unfold_into_playback_order() {
+        let new = |n| Score::new("j", TimeSig { num: 4, den: 4 }, 0, n);
+        // D.C. al Fine: 0 1 2 3 | 0 1 (fine on 1)
+        let mut s = new(4);
+        s.toggle_marker(1, Marker::Fine).unwrap();
+        s.set_jump(3, Some(Jump::DcAlFine)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 2, 3, 0, 1]);
+        // the same jump again removes it; Fine alone does nothing
+        s.set_jump(3, Some(Jump::DcAlFine)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 2, 3]);
+        // plain D.C.: everything again, once
+        s.set_jump(3, Some(Jump::Dc)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 2, 3, 0, 1, 2, 3]);
+        // D.S. al Coda: segno at 1, to-coda at 2, jump at 4, coda at 5
+        let mut s = new(6);
+        s.toggle_marker(1, Marker::Segno).unwrap();
+        s.toggle_marker(2, Marker::ToCoda).unwrap();
+        s.toggle_marker(5, Marker::Coda).unwrap();
+        s.set_jump(4, Some(Jump::DsAlCoda)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 2, 3, 4, 1, 2, 5]);
+        // D.S. without segno is ignored; so is al Coda without coda
+        let mut s = new(3);
+        s.set_jump(2, Some(Jump::Ds)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 2]);
+        let mut s = new(3);
+        s.toggle_marker(0, Marker::ToCoda).unwrap();
+        s.set_jump(2, Some(Jump::DcAlCoda)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 2, 0, 1, 2]);
+        // repeats are not taken again after the jump, and only the last ending is played
+        let mut s = new(5);
+        s.toggle_repeat(0, true).unwrap();
+        s.toggle_repeat(2, false).unwrap();
+        let v = |m: usize, mask: u8| Spanner { kind: SpannerKind::Volta, voice: 0, start: pos(m, 0), end: pos(m, 1920), endings: mask };
+        s.toggle_repeat(1, false).unwrap(); // measure 1 closes the repeat after the first ending
+        s.parts[0].measures[2].end_repeat = 0;
+        s.add_spanner(0, v(1, 0b01)).unwrap();
+        s.add_spanner(0, v(2, 0b10)).unwrap();
+        s.set_jump(4, Some(Jump::Dc)).unwrap();
+        assert_eq!(s.playback_order(), vec![0, 1, 0, 2, 3, 4, 0, 2, 3, 4]);
+        assert!(s.set_jump(9, Some(Jump::Dc)).is_err());
+        assert!(s.toggle_marker(9, Marker::Fine).is_err());
     }
 
     #[test]

@@ -499,6 +499,34 @@ pub fn export_mscx(score: &Score) -> String {
             for frag in &m.extras {
                 let _ = writeln!(x, "        {}", frag.trim());
             }
+            if pi == 0 {
+                for mk in &m.markers {
+                    let (style, subtype, text) = match mk {
+                        Marker::Segno => ("repeat_left", "segno", "<sym>segno</sym>"),
+                        Marker::Coda => ("repeat_left", "codab", "<sym>coda</sym>"),
+                        Marker::ToCoda => ("repeat_right", "coda", "To Coda"),
+                        Marker::Fine => ("repeat_right", "fine", "Fine"),
+                    };
+                    let _ = writeln!(x, "        <Marker>
+          <style>{style}</style>
+          <subtype>{subtype}</subtype>
+          <text>{text}</text>
+          <label>{subtype}</label>
+          </Marker>");
+                }
+                if let Some(j) = m.jump {
+                    let to = if j.to_segno() { "segno" } else { "start" };
+                    let until = if j.al_fine() { "fine" } else if j.al_coda() { "coda" } else { "end" };
+                    let cont = if j.al_coda() { "codab" } else { "" };
+                    let _ = writeln!(x, "        <Jump>
+          <style>repeat_right</style>
+          <text>{}</text>
+          <jumpTo>{to}</jumpTo>
+          <playUntil>{until}</playUntil>
+          <continueAt>{cont}</continueAt>
+          </Jump>", j.text());
+                }
+            }
             for v in 0..m.voice_count() {
                 let Some(evs) = m.voice(v) else { continue };
                 // Cifrado: un <Harmony> antes del evento que suena en el tick del acorde (el primer pentagrama, primera voz).
@@ -800,6 +828,35 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(back.parts[0].measures.iter().map(|m| (m.start_repeat, m.end_repeat)).collect::<Vec<_>>(), s.parts[0].measures.iter().map(|m| (m.start_repeat, m.end_repeat)).collect::<Vec<_>>());
         assert_eq!(back.playback_order(), s.playback_order());
+    }
+
+    #[test]
+    fn markers_and_jumps_roundtrip_through_mscx() {
+        let mut s = Score::new("nav", TimeSig { num: 4, den: 4 }, 0, 6);
+        s.add_part("Bajo", Clef::Bass, 0, false);
+        for m in 0..6 {
+            s.put_note(0, 0, m, 0, 1920, vec![p(m as u8 % 7, 5)]).unwrap();
+        }
+        s.toggle_marker(1, Marker::Segno).unwrap();
+        s.toggle_marker(2, Marker::ToCoda).unwrap();
+        s.toggle_marker(2, Marker::Fine).unwrap();
+        s.toggle_marker(5, Marker::Coda).unwrap();
+        s.set_jump(4, Some(Jump::DsAlCoda)).unwrap();
+        let xml = export_mscx(&s);
+        assert!(xml.contains("<jumpTo>segno</jumpTo>") && xml.contains("<playUntil>coda</playUntil>") && xml.contains("<continueAt>codab</continueAt>"));
+        assert_eq!(xml.matches("<Marker>").count(), 4, "markers are written on the first staff only");
+        let back = import_mscx(&xml).unwrap().score;
+        for part in &back.parts {
+            assert_eq!(part.measures.iter().map(|m| (m.markers.clone(), m.jump)).collect::<Vec<_>>(), s.parts[0].measures.iter().map(|m| (m.markers.clone(), m.jump)).collect::<Vec<_>>());
+        }
+        assert_eq!(back.playback_order(), s.playback_order());
+        assert_eq!(&s.playback_order()[..8], &[0, 1, 2, 3, 4, 1, 2, 5]);
+        // every jump form survives
+        for j in [Jump::Dc, Jump::DcAlFine, Jump::DcAlCoda, Jump::Ds, Jump::DsAlFine, Jump::DsAlCoda] {
+            let mut t = Score::new("j", TimeSig { num: 4, den: 4 }, 0, 2);
+            t.set_jump(1, Some(j)).unwrap();
+            assert_eq!(import_mscx(&export_mscx(&t)).unwrap().score.parts[0].measures[1].jump, Some(j));
+        }
     }
 
     #[test]

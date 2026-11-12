@@ -1,7 +1,7 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
 import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, SP, staffIdx, STAFF_H } from "./layout";
-import { chordName, ChordMark, Cursor, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
+import { chordName, ChordMark, Cursor, JUMP_TEXT, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
 const g2 = g;
@@ -666,6 +666,16 @@ export function ScoreView(props: Props) {
                                     </Show>
                                     <Show when={endsHere && !startsNext}>
                                       <text x={bx + 1} y={gy} text-anchor="end" font-family="Bravura" font-size={FONT} fill="var(--ink)">{g(0xe041)}</text>
+                                    </Show>
+                                    <Show when={pi() === 0 && ((cur?.markers?.length ?? 0) > 0 || cur?.jump)}>
+                                      <For each={(cur?.markers ?? []).filter((k) => k === "Segno" || k === "Coda")}>
+                                        {(k) => (
+                                          <text x={m.x + (m.firstInSystem ? m.headerW : 0) + 16} y={top - 12} font-family="Bravura" font-size={String(SP * 2.4)} fill="var(--ink)">{g(k === "Segno" ? 0xe047 : 0xe048)}</text>
+                                        )}
+                                      </For>
+                                      <text x={bx - 4} y={top - 10} text-anchor="end" font-size="12" font-style="italic" font-family="serif" fill="var(--ink)">
+                                        {[...(cur?.markers ?? []).filter((k) => k === "ToCoda").map(() => "To Coda"), ...(cur?.markers ?? []).filter((k) => k === "Fine").map(() => "Fine"), ...(cur?.jump ? [JUMP_TEXT[cur.jump]] : [])].join("  ")}
+                                      </text>
                                     </Show>
                                     <Show when={cur?.start_repeat && !(m.index > 0 && (props.score.parts[pi()].measures[m.index - 1]?.end_repeat ?? 0) > 0 && !m.firstInSystem)}>
                                       <text x={m.x + (m.firstInSystem ? m.headerW : 0) - 1} y={gy} font-family="Bravura" font-size={FONT} fill="var(--ink)">{g(0xe040)}</text>

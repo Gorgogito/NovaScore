@@ -64,6 +64,44 @@ fn text_of(n: Node, name: &str) -> Option<String> {
     child(n, name).map(|c| c.text().unwrap_or("").trim().to_string())
 }
 
+/// A MuseScore `<Marker>`: segno, coda (label `codab`), "To Coda" (label `coda`) or fine. Others are not understood.
+fn marker_of(n: Node) -> Option<Marker> {
+    if !n.has_tag_name("Marker") {
+        return None;
+    }
+    let label = text_of(n, "label").filter(|l| !l.is_empty()).or_else(|| text_of(n, "subtype"))?;
+    match label.as_str() {
+        "segno" => Some(Marker::Segno),
+        "codab" => Some(Marker::Coda),
+        "coda" => Some(Marker::ToCoda),
+        "fine" => Some(Marker::Fine),
+        _ => None,
+    }
+}
+
+/// A MuseScore `<Jump>`, told apart by where it goes (`jumpTo`) and where it stops (`playUntil`).
+fn jump_of(n: Node) -> Option<Jump> {
+    if !n.has_tag_name("Jump") {
+        return None;
+    }
+    let to = text_of(n, "jumpTo")?;
+    let until = text_of(n, "playUntil").unwrap_or_default();
+    let cont = text_of(n, "continueAt").unwrap_or_default();
+    // "play repeats" after the jump is not supported: the jump would sound different.
+    if text_of(n, "playRepeats").map_or(false, |v| v.trim() == "1") {
+        return None;
+    }
+    match (to.as_str(), until.as_str(), cont.as_str()) {
+        ("start", "end", "") => Some(Jump::Dc),
+        ("start", "fine", "") => Some(Jump::DcAlFine),
+        ("start", "coda", "codab") => Some(Jump::DcAlCoda),
+        ("segno", "end", "") => Some(Jump::Ds),
+        ("segno", "fine", "") => Some(Jump::DsAlFine),
+        ("segno", "coda", "codab") => Some(Jump::DsAlCoda),
+        _ => None,
+    }
+}
+
 fn int_of(n: Node, name: &str) -> Option<i64> {
     text_of(n, name).and_then(|t| t.parse::<f64>().ok()).map(|f| f.round() as i64)
 }
@@ -213,6 +251,9 @@ fn ignored_features(score: Node, preserve: bool, first_staff: &str) -> (Vec<&'st
         }
         // Dynamics and articulations NovaScore understands are imported, not ignored; the
         // <Articulation> entries of instrument definitions have no subtype.
+        if marker_of(n).is_some() || jump_of(n).is_some() {
+            continue;
+        }
         if (n.has_tag_name("Dynamic") && dynamic_of(n).is_some()) || (n.has_tag_name("Articulation") && (text_of(n, "subtype").is_none() || artic_of(n).is_some())) {
             continue;
         }
@@ -229,7 +270,7 @@ fn ignored_features(score: Node, preserve: bool, first_staff: &str) -> (Vec<&'st
             "Arpeggio" => "arpegios",
             "Ornament" => "ornamentos",
             "Fingering" => "digitaciones",
-            "Jump" | "Marker" => "saltos y marcas (D.C., segno, coda: no se ejecutan)",
+            "Jump" | "Marker" => "saltos y marcas poco habituales (no se ejecutan)",
             "Image" => "imágenes",
             _ => continue,
         };
@@ -388,6 +429,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     let mut harmony_chords: Vec<crate::chords::ChordMark> = Vec::new();
     let mut raw_staves: Vec<Vec<Vec<Vec<Raw>>>> = (0..staves.len()).map(|_| Vec::new()).collect(); // staff -> voice -> measure -> events
     let mut measure_extras: Vec<Vec<Vec<String>>> = (0..staves.len()).map(|_| Vec::new()).collect(); // staff -> measure -> fragments
+    let mut measure_nav: Vec<Vec<(Vec<Marker>, Option<Jump>)>> = (0..staves.len()).map(|_| Vec::new()).collect();
     let mut measure_repeats: Vec<Vec<(bool, u8)>> = (0..staves.len()).map(|_| Vec::new()).collect();
     let mut staff_spanners: Vec<Vec<(SpannerKind, usize, SpPos, SpPos, u8)>> = (0..staves.len()).map(|_| Vec::new()).collect();
 
@@ -461,13 +503,26 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
             if preserve {
                 let frags: Vec<String> = me
                     .children()
-                    .filter(|c| c.is_element() && !matches!(c.tag_name().name(), "voice" | "Spanner" | "startRepeat" | "endRepeat"))
+                    .filter(|c| c.is_element() && !matches!(c.tag_name().name(), "voice" | "Spanner" | "startRepeat" | "endRepeat") && marker_of(*c).is_none() && jump_of(*c).is_none())
                     .map(src)
                     .collect();
                 while measure_extras[si].len() <= mi {
                     measure_extras[si].push(Vec::new());
                 }
                 measure_extras[si][mi] = frags;
+            }
+            // Navigation: segno, coda, fine and D.C./D.S. are measure children
+            while measure_nav[si].len() <= mi {
+                measure_nav[si].push((Vec::new(), None));
+            }
+            for c in me.children().filter(|c| c.is_element()) {
+                if let Some(mk) = marker_of(c) {
+                    if !measure_nav[si][mi].0.contains(&mk) {
+                        measure_nav[si][mi].0.push(mk);
+                    }
+                } else if let Some(j) = jump_of(c) {
+                    measure_nav[si][mi].1 = Some(j);
+                }
             }
             // Repeat signs
             while measure_repeats[si].len() <= mi {
@@ -774,6 +829,13 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
             if let Some(me) = measures.get_mut(mi) {
                 me.start_repeat = start;
                 me.end_repeat = end;
+            }
+        }
+        // Markers and jumps are written on the first staff only but apply to every part.
+        for (mi, (marks, jump)) in measure_nav[0].iter().enumerate() {
+            if let Some(me) = measures.get_mut(mi) {
+                me.markers = marks.clone();
+                me.jump = *jump;
             }
         }
         let mut part = Part::new(info.name.clone(), info.clef, info.program, measures);

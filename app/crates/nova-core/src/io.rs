@@ -191,6 +191,18 @@ pub struct PedalEvent {
     pub down: bool,
 }
 
+/// `<direction>` of a segno, coda, "To Coda" or fine marker.
+fn xml_nav_marker(mk: Marker) -> String {
+    let (kind, sound) = match mk {
+        Marker::Segno => ("<segno/>", "segno=\"segno\""),
+        Marker::Coda => ("<coda/>", "coda=\"coda\""),
+        Marker::ToCoda => ("<words>To Coda</words>", "tocoda=\"coda\""),
+        Marker::Fine => ("<words>Fine</words>", "fine=\"yes\""),
+    };
+    format!("      <direction placement=\"above\"><direction-type>{kind}</direction-type><sound {sound}/></direction>
+")
+}
+
 /// Pedal presses and releases, in time order.
 pub fn pedals(score: &Score) -> Vec<PedalEvent> {
     let starts = score.measure_starts(score.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0));
@@ -587,6 +599,11 @@ pub fn export_musicxml(score: &Score) -> String {
                 b.push_str("</barline>\n");
                 x.push_str(&b);
             }
+            if pi == 0 {
+                for mk in m.markers.iter().filter(|k| matches!(k, Marker::Segno | Marker::Coda)) {
+                    x.push_str(&xml_nav_marker(*mk));
+                }
+            }
             for v in 0..m.voice_count() {
             let Some(evs) = m.voice(v) else { continue };
             if v > 0 {
@@ -690,6 +707,15 @@ pub fn export_musicxml(score: &Score) -> String {
                 }
             }
             x.push_str(&xm_tail);
+            }
+            if pi == 0 {
+                for mk in m.markers.iter().filter(|k| matches!(k, Marker::ToCoda | Marker::Fine)) {
+                    x.push_str(&xml_nav_marker(*mk));
+                }
+                if let Some(j) = m.jump {
+                    let sound = if j.to_segno() { "dalsegno=\"segno\"" } else { "dacapo=\"yes\"" };
+                    let _ = writeln!(x, "      <direction placement=\"above\"><direction-type><words>{}</words></direction-type><sound {sound}/></direction>", j.text());
+                }
             }
             let closing = voltas.iter().find(|v| v.1 == mi);
             if m.end_repeat > 0 || closing.is_some() {
@@ -818,7 +844,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
           while extra.last().map_or(false, |v| v.is_empty()) {
               extra.pop();
           }
-          out.push(Measure { events: first, voices: extra, extras: Vec::new(), start_repeat: false, end_repeat: 0 });
+          out.push(Measure { events: first, voices: extra, extras: Vec::new(), start_repeat: false, end_repeat: 0, markers: Vec::new(), jump: None });
         }
     out
 }
@@ -867,6 +893,9 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     let mut staff_sp: Vec<Vec<(usize, SpannerKind, SpPos, SpPos, u8)>> = Vec::new();
     // repeat signs per staff: (measure, is start, times)
     let mut repeat_by_staff: std::collections::HashMap<usize, Vec<(usize, bool, u8)>> = Default::default();
+    // Navigation found in any part: (measure, marker) and (measure, is D.S., words of the direction)
+    let mut nav_marks: Vec<(usize, Marker)> = Vec::new();
+    let mut nav_jumps: Vec<(usize, bool, String)> = Vec::new();
     let mut max_measures = 0usize;
     // Cifrado (`<harmony>`) de la primera parte que lo trae: (compás, tick) → acorde.
     let mut harmony_chords: Vec<ChordMark> = Vec::new();
@@ -998,6 +1027,38 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 }
                                 _ => {}
                             }
+                        }
+                        // Segno, coda, fine and the D.C./D.S. jumps are `<sound>` attributes.
+                        let words = el.descendants().filter(|n| n.has_tag_name("words")).filter_map(|n| n.text()).collect::<Vec<_>>().join(" ").to_lowercase();
+                        let mut sound_segno = false;
+                        let mut sound_coda = false;
+                        for snd in el.descendants().filter(|n| n.has_tag_name("sound")) {
+                            if snd.attribute("segno").is_some() {
+                                nav_marks.push((mi, Marker::Segno));
+                                sound_segno = true;
+                            }
+                            if snd.attribute("coda").is_some() {
+                                nav_marks.push((mi, Marker::Coda));
+                                sound_coda = true;
+                            }
+                            if snd.attribute("tocoda").is_some() {
+                                nav_marks.push((mi, Marker::ToCoda));
+                            }
+                            if snd.attribute("fine").is_some() {
+                                nav_marks.push((mi, Marker::Fine));
+                            }
+                            if snd.attribute("dacapo").map_or(false, |v| v == "yes") {
+                                nav_jumps.push((mi, false, words.clone()));
+                            }
+                            if snd.attribute("dalsegno").is_some() {
+                                nav_jumps.push((mi, true, words.clone()));
+                            }
+                        }
+                        if !sound_segno && el.descendants().any(|n| n.has_tag_name("segno")) {
+                            nav_marks.push((mi, Marker::Segno));
+                        }
+                        if !sound_coda && el.descendants().any(|n| n.has_tag_name("coda")) {
+                            nav_marks.push((mi, Marker::Coda));
                         }
                         if !got_tempo {
                             let t = el
@@ -1237,8 +1298,40 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         warnings.push(format!("{harmony_skipped} acordes con una calidad no reconocida (suspendidos, aumentados…) no se importaron."));
     }
     let lens: Vec<u32> = (0..max_measures).map(|i| score.measure_len(i)).collect();
+    // "al Fine" or "al Coda" comes from the words of the jump, else from the markers the score has.
+    nav_marks.sort_by_key(|&(m, k)| (m, k as u8));
+    nav_marks.dedup();
+    nav_jumps.sort();
+    nav_jumps.dedup();
+    let has = |k: Marker| nav_marks.iter().any(|&(_, x)| x == k);
+    let jumps: Vec<(usize, Jump)> = nav_jumps
+        .iter()
+        .map(|(m, ds, words)| {
+            let al_fine = words.contains("fine") || (!words.contains("coda") && has(Marker::Fine) && !has(Marker::ToCoda));
+            let al_coda = !words.contains("fine") && (words.contains("coda") || (has(Marker::ToCoda) && !has(Marker::Fine)));
+            let j = match (*ds, al_fine, al_coda) {
+                (false, true, _) => Jump::DcAlFine,
+                (false, _, true) => Jump::DcAlCoda,
+                (false, _, _) => Jump::Dc,
+                (true, true, _) => Jump::DsAlFine,
+                (true, _, true) => Jump::DsAlCoda,
+                (true, _, _) => Jump::Ds,
+            };
+            (*m, j)
+        })
+        .collect();
     for (si, (name, program, clef, perc, voices)) in staves.into_iter().enumerate() {
         let mut out = build_measures(&voices, max_measures, &lens);
+        for &(m, k) in &nav_marks {
+            if let Some(me) = out.get_mut(m) {
+                me.markers.push(k);
+            }
+        }
+        for &(m, j) in &jumps {
+            if let Some(me) = out.get_mut(m) {
+                me.jump = Some(j);
+            }
+        }
         for &(m, is_start, times) in repeat_by_staff.get(&si).into_iter().flatten() {
             if let Some(me) = out.get_mut(m) {
                 if is_start {
@@ -1724,6 +1817,36 @@ mod tests {
         want.sort_by_key(|x| (x.start, x.end));
         assert_eq!(got, want);
         assert_eq!(r.score.parts[0].measures, s.parts[0].measures); // MusicXML pitches are the sounding ones
+    }
+
+    #[test]
+    fn markers_and_jumps_roundtrip_through_musicxml() {
+        let mut s = Score::new("nav", TimeSig { num: 4, den: 4 }, 0, 6);
+        s.add_part("Bajo", Clef::Bass, 0, false);
+        for m in 0..6 {
+            s.put_note(0, 0, m, 0, 1920, vec![Pitch { step: (m % 7) as u8, alter: 0, octave: 5 }]).unwrap();
+        }
+        s.toggle_marker(1, Marker::Segno).unwrap();
+        s.toggle_marker(2, Marker::ToCoda).unwrap();
+        s.toggle_marker(5, Marker::Coda).unwrap();
+        s.set_jump(4, Some(Jump::DsAlCoda)).unwrap();
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<segno/>") && xml.contains("<coda/>") && xml.contains("tocoda=\"coda\"") && xml.contains("dalsegno=\"segno\""));
+        assert_eq!(xml.matches("<segno/>").count(), 1, "written once, in the first part");
+        let back = import_musicxml(&xml).unwrap().score;
+        for part in &back.parts {
+            assert_eq!(part.measures.iter().map(|m| (m.markers.clone(), m.jump)).collect::<Vec<_>>(), s.parts[0].measures.iter().map(|m| (m.markers.clone(), m.jump)).collect::<Vec<_>>());
+        }
+        assert_eq!(back.playback_order(), s.playback_order());
+        // al Fine and the plain forms are told apart by the words and the markers
+        for j in [Jump::Dc, Jump::DcAlFine, Jump::DcAlCoda, Jump::Ds, Jump::DsAlFine, Jump::DsAlCoda] {
+            let mut t = Score::new("j", TimeSig { num: 4, den: 4 }, 0, 3);
+            t.toggle_marker(0, Marker::Segno).unwrap();
+            t.toggle_marker(1, Marker::Fine).unwrap();
+            t.toggle_marker(1, Marker::ToCoda).unwrap();
+            t.set_jump(2, Some(j)).unwrap();
+            assert_eq!(import_musicxml(&export_musicxml(&t)).unwrap().score.parts[0].measures[2].jump, Some(j));
+        }
     }
 
     #[test]
