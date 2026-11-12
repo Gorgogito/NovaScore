@@ -1316,6 +1316,80 @@ impl Score {
         Ok(())
     }
 
+    /// Append `other` after the last measure of this score (movements of one piece): parts are matched by
+    /// position, a part missing on either side is filled with rests, and a different time signature
+    /// becomes a change at the join. Key signature and tempo stay those of this score. Returns true when the
+    /// key of `other` differs (the key cannot change inside a piece yet).
+    pub fn append(&mut self, other: &Score) -> bool {
+        let n0 = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+        // pad every part to the same length with the lengths in force
+        let pad = |s: &mut Score, upto: usize| {
+            let lens: Vec<u32> = (0..upto).map(|m| s.measure_len(m)).collect();
+            for p in &mut s.parts {
+                while p.measures.len() < upto {
+                    p.measures.push(Measure::empty(lens[p.measures.len()]));
+                }
+            }
+        };
+        pad(self, n0);
+        let join_time = self.time_at(n0);
+        if other.time != join_time {
+            self.time_changes.push(TimeChange { measure: n0, time: other.time });
+        }
+        for c in &other.time_changes {
+            self.time_changes.push(TimeChange { measure: c.measure + n0, time: c.time });
+        }
+        // drop changes equal to the signature already in force
+        self.time_changes.sort_by_key(|c| c.measure);
+        let mut cur = self.time;
+        self.time_changes.retain(|c| {
+            let keep = c.time != cur;
+            cur = c.time;
+            keep
+        });
+        let n1 = other.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+        while self.parts.len() < other.parts.len() {
+            let src = &other.parts[self.parts.len()];
+            let mut p = Part::new(src.name.clone(), src.clef, src.program, Vec::new());
+            p.percussion = src.percussion;
+            p.transpose = src.transpose;
+            p.tuning = src.tuning.clone();
+            self.parts.push(p);
+            pad(self, n0);
+        }
+        for (i, p) in self.parts.iter_mut().enumerate() {
+            match other.parts.get(i) {
+                Some(o) => {
+                    p.measures.extend(o.measures.iter().cloned());
+                    for sp in &o.spanners {
+                        let mut sp = sp.clone();
+                        sp.start.measure += n0;
+                        sp.end.measure += n0;
+                        p.spanners.push(sp);
+                    }
+                    // melisma lines anchored to a time
+                    for m in p.measures[n0..].iter_mut() {
+                        for e in m.events.iter_mut().chain(m.voices.iter_mut().flatten()) {
+                            for l in &mut e.lyrics {
+                                if let Some(end) = &mut l.extend_to {
+                                    end.measure += n0;
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        pad(self, n0 + n1);
+        for c in &other.chords {
+            let mut c = *c;
+            c.measure += n0;
+            self.chords.push(c);
+        }
+        other.fifths != self.fifths
+    }
+
     /// Pin the note `midi` of a chord to a string (1 = highest string, as in MusicXML); 0 goes back to automatic.
     pub fn set_string(&mut self, part: usize, voice: usize, m: usize, start: u32, midi: i32, string: u8) -> Result<(), EditError> {
         let events = self.voice_events_mut(part, voice, m)?;
@@ -2280,6 +2354,39 @@ mod tests {
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Score>(&j).unwrap().parts[0].spanners, s.parts[0].spanners);
         assert!(!serde_json::to_string(&score()).unwrap().contains("spanners"));
+    }
+
+    #[test]
+    fn appending_a_movement_joins_measures_and_shifts_anchors() {
+        let p = |step, octave| Pitch { step, alter: 0, octave };
+        let mut a = Score::new("a", TimeSig { num: 4, den: 4 }, 0, 2);
+        a.put_note(0, 0, 1, 0, 1920, vec![p(0, 5)]).unwrap();
+        let mut b = Score::new("b", TimeSig { num: 3, den: 4 }, 2, 2);
+        b.add_part("Bajo", Clef::Bass, 0, false);
+        b.put_note(0, 0, 0, 0, 1440, vec![p(1, 5)]).unwrap();
+        b.put_note(1, 0, 1, 0, 1440, vec![p(2, 3)]).unwrap();
+        b.set_lyric(0, 0, 0, 0, 0, "la", Syllabic::Single).unwrap();
+        b.set_lyric_extend(0, 0, 0, 0, 0, Some(SpPos { measure: 1, tick: 0 })).unwrap();
+        b.parts[0].spanners.push(Spanner { kind: SpannerKind::Slur, voice: 0, start: SpPos { measure: 0, tick: 0 }, end: SpPos { measure: 1, tick: 0 }, endings: 0 });
+        b.chords.push(chords::ChordMark { measure: 1, tick: 0, root: 0, quality: chords::Quality::Major, bass: 0, manual: true });
+        assert!(a.append(&b), "different key is reported");
+        assert_eq!(a.parts.len(), 2);
+        // `a` ended with a spare measure after the whole note: 3 + 3 measures
+        assert!(a.parts.iter().all(|p| p.measures.len() == 6));
+        assert_eq!(a.time_changes, vec![TimeChange { measure: 3, time: TimeSig { num: 3, den: 4 } }]);
+        assert_eq!((a.measure_len(2), a.measure_len(3)), (1920, 1440));
+        // the part that did not exist before starts with rests of the right length
+        assert!(a.parts[1].measures[..3].iter().all(|m| m.events.len() == 1 && m.events[0].content == Content::Rest && m.events[0].ticks == 1920));
+        assert!(matches!(&a.parts[1].measures[4].events[0].content, Content::Note { .. }));
+        assert_eq!(a.parts[0].spanners[0].start.measure, 3);
+        assert_eq!(a.parts[0].measures[3].events[0].lyrics[0].extend_to, Some(SpPos { measure: 4, tick: 0 }));
+        assert_eq!(a.chords[0].measure, 4);
+        assert_eq!(a.fifths, 0);
+        // same signature: no change added
+        let mut c = Score::new("c", TimeSig { num: 4, den: 4 }, 0, 1);
+        let d = Score::new("d", TimeSig { num: 4, den: 4 }, 0, 1);
+        let before = c.parts[0].measures.len() + d.parts[0].measures.len();
+        assert!(!c.append(&d) && c.time_changes.is_empty() && c.parts[0].measures.len() == before);
     }
 
     #[test]

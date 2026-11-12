@@ -19,11 +19,11 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **IA local:** audio�
 ## Comandos
 ```
 cd app && npm install && npm run tauri dev          # ejecutar
-cd app/crates/nova-core && cargo test               # 139 tests del núcleo
+cd app/crates/nova-core && cargo test               # 140 tests del núcleo
 cd app/crates/nova-audio && cargo test              # 5 tests; audio→notas (Basic Pitch/ONNX). Ejemplos: audio2notes, audio2score, roundtrip (mide F1 sobre samples/)
 cd app && npx tsc --noEmit                          # tipos del frontend
 cd app && npx tauri build --debug --no-bundle       # exe de depuración (src-tauri/target/debug/novascore.exe)
-NOVASCORE_EXPORT_PDF=salida.pdf novascore.exe archivo.(musicxml|mscz|nova|mid)   # exporta a PDF sin interacción (sirve para comprobar el dibujo)
+NOVASCORE_EXPORT_PDF=salida.pdf novascore.exe archivo.(musicxml|mscz|nova|mid|pdf|png…)   # exporta a PDF sin interacción (sirve para comprobar el dibujo)
 ```
 Verificación contra MuseScore real (necesita MuseScore 4 instalado; variable `MUSESCORE` si no está en `C:\Program Files\MuseScore 4\bin`):
 `cd app/crates/nova-core && cargo run --release --example ms_roundtrip -- entrada salida.mscz` → debe imprimir `IDENTICAL NOTES + IDENTICAL SPANNERS + IDENTICAL MARKS`.

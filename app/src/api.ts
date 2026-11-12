@@ -115,6 +115,7 @@ export const api = {
   downloadPianoModel: () => invoke<string>("download_piano_model"),
   cancelPianoDownload: () => invoke<void>("cancel_piano_download"),
   deletePianoModel: () => invoke<void>("delete_piano_model"),
+  omrStartup: () => invoke<{ state: "none" | "running" | "done"; name?: string; imported?: Imported; error?: string }>("omr_startup"),
   omrStatus: () => invoke<{ found: boolean; path?: string; source?: string }>("omr_status"),
   setOmrPath: (path: string | null) => invoke<{ found: boolean; path?: string; source?: string }>("set_omr_path", { path }),
   importOmr: (path: string) => invoke<Imported>("import_omr", { path }),

@@ -220,6 +220,36 @@ export default function App() {
     // Warm up the synthesizer and SoundFont in the background.
     player.init().then(() => setStatus((s) => (s.startsWith("Pulsa N") ? "Sonidos cargados. " + s : s))).catch((e) => setStatus(`Sonido no disponible: ${e}`));
     window.addEventListener("keydown", onKey);
+    // `novascore.exe partitura.pdf`: the recognition runs while the window opens; wait for it before anything else
+    let omr = await api.omrStartup();
+    if (omr.state === "running") {
+      setOmrBusy(omr.name ?? "partitura");
+      setStatus("Reconociendo la partitura con Audiveris… (puede tardar varios minutos)");
+      await new Promise<void>(async (resolve) => {
+        const un = await listen("omr-finished", () => {
+          un();
+          resolve();
+        });
+        const again = await api.omrStartup(); // it may have finished before we started listening
+        if (again.state === "done") {
+          un();
+          omr = again;
+          resolve();
+        }
+      });
+      if (omr.state === "running") omr = await api.omrStartup();
+      setOmrBusy(null);
+    }
+    if (omr.state === "done") {
+      if (omr.imported) {
+        setCursor({ part: 0, voice: 0, m: 0, start: 0 });
+        apply(omr.imported.score, false);
+        setDirty(true);
+        setStatus(omr.imported.warnings.join(" "));
+      } else {
+        setStatus(`No se pudo reconocer la partitura: ${omr.error}`);
+      }
+    }
     // Headless-style export: NOVASCORE_EXPORT_PDF=out.pdf novascore score.musicxml
     const out = await api.startupExport();
     if (out) {

@@ -287,6 +287,57 @@ struct Imported {
     warnings: Vec<String>,
 }
 
+/// Reconocimiento óptico lanzado desde la línea de órdenes (`novascore.exe partitura.pdf`): corre en segundo plano
+/// mientras se abre la ventana.
+enum Startup {
+    None,
+    Running(String),
+    Done(Result<Imported, String>),
+}
+static STARTUP: Mutex<Startup> = Mutex::new(Startup::None);
+
+#[derive(Serialize)]
+struct StartupState {
+    /// `none`, `running` o `done`.
+    state: &'static str,
+    name: Option<String>,
+    imported: Option<Imported>,
+    error: Option<String>,
+}
+
+/// Estado del reconocimiento de arranque; al entregar el resultado se olvida.
+#[tauri::command]
+fn omr_startup() -> StartupState {
+    let mut st = STARTUP.lock().unwrap_or_else(|e| e.into_inner());
+    match std::mem::replace(&mut *st, Startup::None) {
+        Startup::None => StartupState { state: "none", name: None, imported: None, error: None },
+        Startup::Running(name) => {
+            *st = Startup::Running(name.clone());
+            StartupState { state: "running", name: Some(name), imported: None, error: None }
+        }
+        Startup::Done(Ok(i)) => StartupState { state: "done", name: None, imported: Some(i), error: None },
+        Startup::Done(Err(e)) => StartupState { state: "done", name: None, imported: None, error: Some(e) },
+    }
+}
+
+/// Si el primer argumento es un PDF o una imagen, lanza el reconocimiento en un hilo y avisa a la interfaz al terminar.
+fn start_omr_from_args(app: &tauri::AppHandle) {
+    let Some(path) = std::env::args().nth(1).filter(|p| omr::is_omr_path(p)) else { return };
+    let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
+    *STARTUP.lock().unwrap_or_else(|e| e.into_inner()) = Startup::Running(name);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let result = omr::recognize(&models_dir(&app), &path, None).map(|r| {
+            let state = app.state::<AppState>();
+            let mut doc = lock(&state);
+            doc.replace(r.score);
+            Imported { score: doc.score.clone(), warnings: r.warnings }
+        });
+        *STARTUP.lock().unwrap_or_else(|e| e.into_inner()) = Startup::Done(result);
+        let _ = app.emit("omr-finished", ());
+    });
+}
+
 #[tauri::command]
 fn import_mscz(state: State<AppState>, path: String) -> Result<Imported, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -596,8 +647,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
+        .setup(|app| {
+            start_omr_from_args(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, detect_chords, set_chord, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

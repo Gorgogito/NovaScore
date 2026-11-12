@@ -132,7 +132,39 @@ fn find_outputs(dir: &Path) -> Vec<PathBuf> {
     }
     let mut out = Vec::new();
     walk(dir, &mut out);
-    out.sort();
+    out.sort_by_key(|p| natural_key(&p.to_string_lossy()));
+    out
+}
+
+/// Clave de orden «natural»: `mvt2` va antes que `mvt10`.
+fn natural_key(s: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let (mut text, mut num, mut in_num) = (String::new(), String::new(), false);
+    for c in s.to_lowercase().chars() {
+        if c.is_ascii_digit() {
+            if !in_num {
+                out.push((std::mem::take(&mut text), 0));
+                in_num = true;
+            }
+            num.push(c);
+        } else {
+            if in_num {
+                let n = num.parse::<u64>().unwrap_or(0);
+                if let Some(last) = out.last_mut() {
+                    last.1 = n;
+                }
+                num.clear();
+                in_num = false;
+            }
+            text.push(c);
+        }
+    }
+    if in_num {
+        if let Some(last) = out.last_mut() {
+            last.1 = num.parse::<u64>().unwrap_or(0);
+        }
+    }
+    out.push((text, 0));
     out
 }
 
@@ -235,13 +267,30 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
         })?;
         let bytes = std::fs::read(first).map_err(|e| e.to_string())?;
         let mut r = nova_core::io::import_musicxml_bytes(&bytes)?;
+        // several movements: one after the other, in the order Audiveris numbers them
+        let (mut joined, mut key_differs, mut unreadable) = (1usize, false, 0usize);
+        for extra in &outputs[1..] {
+            match std::fs::read(extra).map_err(|e| e.to_string()).and_then(|b| nova_core::io::import_musicxml_bytes(&b)) {
+                Ok(m) => {
+                    key_differs |= r.score.append(&m.score);
+                    joined += 1;
+                }
+                Err(_) => unreadable += 1,
+            }
+        }
         let name = Path::new(input).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         if r.score.title.trim().is_empty() || r.score.title == "Sin título" || r.score.title == "MIDI importado" {
             r.score.title = name;
         }
         r.warnings.insert(0, "Reconocimiento óptico (Audiveris): es un borrador, revisa notas, ritmos, alteraciones y letra frente a la partitura original.".into());
-        if outputs.len() > 1 {
-            r.warnings.push(format!("Audiveris produjo {} movimientos o partes sueltas; solo se importó el primero.", outputs.len()));
+        if joined > 1 {
+            r.warnings.push(format!("Audiveris separó la obra en {joined} movimientos: se unieron uno tras otro (los cambios de compás se conservan)."));
+        }
+        if key_differs {
+            r.warnings.push("Algún movimiento tiene otra tonalidad: solo se conserva la del primero (los cambios de armadura aún no se admiten); revisa las alteraciones.".into());
+        }
+        if unreadable > 0 {
+            r.warnings.push(format!("{unreadable} movimiento(s) no se pudieron leer y se omitieron."));
         }
         Ok(r)
     })();
@@ -258,6 +307,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn natural_order_puts_movement_2_before_10() {
+        let mut v = vec!["a/obra.mvt10.mxl", "a/obra.mvt2.mxl", "a/obra.mvt1.mxl"];
+        v.sort_by_key(|p| natural_key(p));
+        assert_eq!(v, vec!["a/obra.mvt1.mxl", "a/obra.mvt2.mxl", "a/obra.mvt10.mxl"]);
     }
 
     #[test]
@@ -281,33 +337,35 @@ mod tests {
     }
 
     /// Un «Audiveris» de mentira: copia una partitura de ejemplo a `<salida>/<nombre>/<nombre>.xml`, como haría el real.
-    fn fake_audiveris(dir: &Path, produce: bool) -> PathBuf {
-        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("samples").join("demo.musicxml");
-        let sample = sample.canonicalize().unwrap();
-        if cfg!(windows) {
-            let exe = dir.join("fake-audiveris.cmd");
-            let body = if produce {
-                format!("@echo off\r\nset OUT=%~4\r\nmkdir \"%OUT%\\%~n5\"\r\ncopy /Y \"{}\" \"%OUT%\\%~n5\\%~n5.xml\" >nul\r\nexit /b 0\r\n", sample.display().to_string().trim_start_matches(r"\\?\"))
-            } else {
-                "@echo off\r\necho no se pudo leer la imagen 1>&2\r\nexit /b 1\r\n".to_string()
+    fn fake_audiveris(dir: &Path, movements: u32) -> PathBuf {
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("samples");
+        let plain = |p: PathBuf| p.canonicalize().unwrap().display().to_string().trim_start_matches(r"\\?\").to_string();
+        let (first, second) = (plain(samples.join("demo.musicxml")), plain(samples.join("tuplets.musicxml")));
+        // The engine receives `-batch -export -output <dir> <input>`: the output folder is argument 4 and the input 5.
+        // It writes `<dir>/<name>/<name>.xml` (one movement) or `.mvt1.xml` and `.mvt2.xml` (two).
+        let (exe, body) = if cfg!(windows) {
+            let body = match movements {
+                0 => "@echo off\r\necho no se pudo leer la imagen 1>&2\r\nexit /b 1\r\n".to_string(),
+                1 => format!("@echo off\r\nset OUT=%~4\r\nmkdir \"%OUT%\\%~n5\"\r\ncopy /Y \"{first}\" \"%OUT%\\%~n5\\%~n5.xml\" >nul\r\nexit /b 0\r\n"),
+                _ => format!("@echo off\r\nset OUT=%~4\r\nmkdir \"%OUT%\\%~n5\"\r\ncopy /Y \"{first}\" \"%OUT%\\%~n5\\%~n5.mvt1.xml\" >nul\r\ncopy /Y \"{second}\" \"%OUT%\\%~n5\\%~n5.mvt2.xml\" >nul\r\nexit /b 0\r\n"),
             };
-            std::fs::write(&exe, body).unwrap();
-            exe
+            (dir.join("fake-audiveris.cmd"), body)
         } else {
-            let exe = dir.join("fake-audiveris.sh");
-            let body = if produce {
-                format!("#!/bin/sh\nout=\"$4\"\nname=$(basename \"$5\")\nname=\"${{name%.*}}\"\nmkdir -p \"$out/$name\"\ncp \"{}\" \"$out/$name/$name.xml\"\n", sample.display())
-            } else {
-                "#!/bin/sh\necho 'no se pudo leer la imagen' >&2\nexit 1\n".to_string()
+            let head = "#!/bin/sh\nout=\"$4\"\nname=$(basename \"$5\")\nname=\"${name%.*}\"\nmkdir -p \"$out/$name\"\n";
+            let body = match movements {
+                0 => "#!/bin/sh\necho 'no se pudo leer la imagen' >&2\nexit 1\n".to_string(),
+                1 => format!("{head}cp \"{first}\" \"$out/$name/$name.xml\"\n"),
+                _ => format!("{head}cp \"{first}\" \"$out/$name/$name.mvt1.xml\"\ncp \"{second}\" \"$out/$name/$name.mvt2.xml\"\n"),
             };
-            std::fs::write(&exe, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            exe
+            (dir.join("fake-audiveris.sh"), body)
+        };
+        std::fs::write(&exe, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        exe
     }
 
     #[test]
@@ -316,13 +374,19 @@ mod tests {
         let input = d.join("Mi partitura.pdf");
         std::fs::write(&input, b"%PDF-1.4").unwrap();
         // the tests of this module share the single-run lock: run them one after the other
-        let ok = fake_audiveris(&d, true);
+        let ok = fake_audiveris(&d, 1);
         let r = recognize(&d, &input.to_string_lossy(), Some(&ok)).unwrap();
         assert!(!r.score.parts.is_empty() && r.score.parts[0].measures.iter().any(|m| !m.events.is_empty()));
         assert!(r.warnings[0].contains("Audiveris"), "{:?}", r.warnings);
-        let bad = fake_audiveris(&d, false);
+        let bad = fake_audiveris(&d, 0);
         let e = recognize(&d, &input.to_string_lossy(), Some(&bad)).unwrap_err();
         assert!(e.contains("no produjo ninguna partitura") && e.contains("no se pudo leer la imagen"), "{e}");
+        // two movements are joined in order, with a time change where the signature differs
+        let two = fake_audiveris(&d, 2);
+        let joined = recognize(&d, &input.to_string_lossy(), Some(&two)).unwrap();
+        let (a, b) = (nova_core::io::import_musicxml(include_str!("../../../samples/demo.musicxml")).unwrap().score, nova_core::io::import_musicxml(include_str!("../../../samples/tuplets.musicxml")).unwrap().score);
+        assert_eq!(joined.score.parts[0].measures.len(), a.parts[0].measures.len() + b.parts[0].measures.len(), "{:?}", joined.warnings);
+        assert!(joined.warnings.iter().any(|w| w.contains("2 movimientos")), "{:?}", joined.warnings);
         // a slow engine can be cancelled and leaves nothing behind
         let slow = d.join(if cfg!(windows) { "slow-audiveris.cmd" } else { "slow-audiveris.sh" });
         std::fs::write(&slow, if cfg!(windows) { "@echo off
