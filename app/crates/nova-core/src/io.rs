@@ -1567,7 +1567,6 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
         notes: Vec<(u32, u32, u8)>, // start, end (ticks @ PPQ), key
     }
     let mut streams: Vec<Stream> = Vec::new();
-    let mut triplet_hint = false;
 
     for (ti, track) in smf.tracks.iter().enumerate() {
         let mut t: u64 = 0;
@@ -1673,36 +1672,91 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
     let mlen = score.time.measure_ticks();
     let limit = MAX_MEASURES * mlen;
     let mut truncated = false;
+    // Compound meters (6/8, 12/8...) divide the beat in three on their own: no tuplet detection there.
+    let simple_meter = score.time.den != 8 && score.time_changes.iter().all(|c| c.time.den != 8);
+    let (mut tuplet_count, mut voice_extra, mut hand_splits, mut dropped) = ([0usize; 3], 0usize, 0usize, false);
 
     for s in &streams {
-        let mut onsets: BTreeMap<u32, Vec<(u8, u32)>> = BTreeMap::new();
-        for &(st, en, key) in &s.notes {
-            let qs = q(st);
-            let qe = q(en).max(qs + GRID);
-            if (st % GRID != 0 && (st % GRID).abs_diff(GRID / 2) < 20) || (en % GRID != 0 && (en % GRID).abs_diff(GRID / 2) < 20) {
-                triplet_hint = true;
+        let mean = s.notes.iter().map(|n| n.2 as u32).sum::<u32>() / s.notes.len() as u32;
+        if s.percussion {
+            // Drum hits are short and need neither tuplets nor voices.
+            let mut onsets: BTreeMap<u32, Vec<(u8, u32)>> = BTreeMap::new();
+            for &(st, en, key) in &s.notes {
+                let qs = q(st);
+                let qe = q(en).max(qs + GRID);
+                if qs >= limit {
+                    truncated = true;
+                    continue;
+                }
+                onsets.entry(qs).or_default().push((key, qe.min(limit) - qs));
             }
+            let mut part = Part::new(s.name.clone(), Clef::Treble, s.program, vec![Measure::empty(mlen)]);
+            part.percussion = true;
+            score.parts.push(part);
+            let pi = score.parts.len() - 1;
+            let starts: Vec<u32> = onsets.keys().copied().collect();
+            for (i, st) in starts.iter().enumerate() {
+                let group = &onsets[st];
+                let mut dur = group.iter().map(|g| g.1).min().unwrap_or(GRID);
+                if let Some(next) = starts.get(i + 1) {
+                    dur = dur.min(next - st);
+                }
+                let pitches: Vec<Pitch> = group.iter().map(|g| Pitch::from_midi(g.0 as i32, sharps)).collect();
+                score.put_abs(pi, *st, dur.max(GRID), &pitches).map_err(|e| e.to_string())?;
+            }
+            continue;
+        }
+        // Groups of 3, 5 or 6 notes per beat are detected from the onsets and written as tuplets.
+        let starts: Vec<f64> = s.notes.iter().map(|n| n.0 as f64).collect();
+        let tuplets = if simple_meter { crate::quantize::detect_tuplet_beats(&starts) } else { Default::default() };
+        for &v in tuplets.values() {
+            match v {
+                3 => tuplet_count[0] += 1,
+                5 => tuplet_count[1] += 1,
+                _ => tuplet_count[2] += 1,
+            }
+        }
+        let mut notes: Vec<crate::quantize::Q> = Vec::new();
+        for &(st, en, key) in &s.notes {
+            let qs = crate::quantize::snap(st as f64, &tuplets);
             if qs >= limit {
                 truncated = true;
                 continue;
             }
-            onsets.entry(qs).or_default().push((key, qe.min(limit) - qs));
+            let qe = crate::quantize::snap(en as f64, &tuplets).max(qs + crate::quantize::slot_ticks(qs / PPQ, &tuplets));
+            notes.push(crate::quantize::Q { s: qs, e: qe.min(limit), pitch: key });
         }
-        let mean = s.notes.iter().map(|n| n.2 as u32).sum::<u32>() / s.notes.len() as u32;
-        let clef = if mean < 57 && !s.percussion { Clef::Bass } else { Clef::Treble };
-        let mut part = Part::new(s.name.clone(), clef, s.program, vec![Measure::empty(mlen)]);
-        part.percussion = s.percussion;
-        score.parts.push(part);
-        let pi = score.parts.len() - 1;
-        let starts: Vec<u32> = onsets.keys().copied().collect();
-        for (i, st) in starts.iter().enumerate() {
-            let group = &onsets[st];
-            let mut dur = group.iter().map(|g| g.1).min().unwrap_or(GRID);
-            if let Some(next) = starts.get(i + 1) {
-                dur = dur.min(next - st);
+        // A legato overlap of up to one sixteenth is a performance detail, not a second voice.
+        let mut onset_list: Vec<u32> = notes.iter().map(|n| n.s).collect();
+        onset_list.sort_unstable();
+        onset_list.dedup();
+        for n in &mut notes {
+            if let Some(&next) = onset_list.get(onset_list.partition_point(|&o| o <= n.s)) {
+                if n.e > next && n.e - next <= GRID {
+                    n.e = next;
+                }
             }
-            let pitches: Vec<Pitch> = group.iter().map(|g| Pitch::from_midi(g.0 as i32, sharps)).collect();
-            score.put_abs(pi, *st, dur.max(GRID), &pitches).map_err(|e| e.to_string())?;
+        }
+        // A wide range in one track (a piano) goes to two staves, split at middle C.
+        let low = notes.iter().filter(|n| n.pitch < 60).count();
+        let high = notes.len() - low;
+        let hands = low.min(high) >= 4 && low.min(high) * 12 >= notes.len();
+        let staves: Vec<(String, Clef, Vec<crate::quantize::Q>)> = if hands {
+            hand_splits += 1;
+            vec![
+                (s.name.clone(), Clef::Treble, notes.iter().copied().filter(|n| n.pitch >= 60).collect()),
+                (format!("{} (2)", s.name), Clef::Bass, notes.iter().copied().filter(|n| n.pitch < 60).collect()),
+            ]
+        } else {
+            vec![(s.name.clone(), if mean < 57 { Clef::Bass } else { Clef::Treble }, notes)]
+        };
+        for (name, clef, staff_notes) in staves {
+            let mut part = Part::new(name, clef, s.program, vec![Measure::empty(mlen)]);
+            part.percussion = false;
+            score.parts.push(part);
+            let pi = score.parts.len() - 1;
+            dropped |= crate::quantize::place_staff(&mut score, pi, staff_notes, 4, GRID, false, &tuplets, sharps);
+            voice_extra += score.parts[pi].measures.iter().map(|m| m.voices.iter().filter(|v| !v.is_empty()).count()).max().unwrap_or(0);
         }
     }
     let max_len = score.parts.iter().map(|p| p.measures.len()).max().unwrap_or(1);
@@ -1716,10 +1770,24 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
     if truncated {
         warnings.push(format!("El archivo se recortó a {MAX_MEASURES} compases."));
     }
-    if triplet_hint {
-        warnings.push("Se detectaron figuras que no encajan en la cuadrícula de semicorcheas (¿tresillos?); se cuantizaron.".into());
+    if dropped {
+        warnings.push("Algunas notas no pudieron colocarse y se omitieron.".into());
     }
-    warnings.push("Las notas se cuantizaron a semicorcheas; la percusión (canal 10) se importa como pentagrama de percusión.".into());
+    let kinds: Vec<String> = [(tuplet_count[0], "tresillos"), (tuplet_count[1], "quintillos"), (tuplet_count[2], "seisillos")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, name)| format!("{n} pulsos de {name}"))
+        .collect();
+    if !kinds.is_empty() {
+        warnings.push(format!("Se detectaron grupos irregulares y se escribieron como tales: {}.", kinds.join(", ")));
+    }
+    if voice_extra > 0 {
+        warnings.push("Las notas que suenan a la vez con distinta duración se repartieron en voces (hasta 4 por pentagrama).".into());
+    }
+    if hand_splits > 0 {
+        warnings.push(format!("{hand_splits} pista(s) con un registro amplio se dividieron en dos pentagramas (mano derecha e izquierda, corte en do central)."));
+    }
+    warnings.push("Las notas se cuantizaron a semicorcheas (y a tercios, quintos o sextos de negra en los grupos irregulares); la percusión (canal 10) se importa como pentagrama de percusión.".into());
     Ok(ImportReport { score, warnings })
 }
 
@@ -1742,6 +1810,116 @@ mod tests {
         assert_eq!(r.score.parts.len(), 1);
         assert_eq!(r.score.parts[0].program, 40);
         assert_eq!(sounds(&r.score), sounds(&s));
+    }
+
+    /// Sounds without the part index, sorted: the same notes wherever the importer put them.
+    fn flat(s: &Score) -> Vec<(u32, u32, i32)> {
+        let mut v: Vec<_> = sounds(s).iter().map(|x| (x.start, x.ticks, x.midi)).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn midi_import_writes_triplets_as_tuplets() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        // eight beats of eighth-note triplets alternating with quarter notes, then plain eighths
+        for b in 0..8u32 {
+            if b % 2 == 0 {
+                let items: Vec<(u32, u32, Vec<Pitch>, bool)> = (0..3).map(|k| (k, 1, vec![p(72 + k as i32 + b as i32)], false)).collect();
+                s.put_triplet_beat(0, 0, b * 480, &items).unwrap();
+            } else {
+                s.put_abs(0, b * 480, 480, &[p(70)]).unwrap();
+            }
+        }
+        for k in 0..4u32 {
+            s.put_abs(0, 3840 + k * 240, 240, &[p(74 + k as i32)]).unwrap();
+        }
+        let r = import_midi(&export_midi(&s)).unwrap();
+        assert_eq!(flat(&r.score), flat(&s));
+        let evs = &r.score.parts[0].measures[0].events;
+        assert!(evs.iter().filter(|e| e.tuplet.is_some()).count() == 6, "{:?}", evs.iter().map(|e| (e.start, e.ticks, e.tuplet.is_some())).collect::<Vec<_>>());
+        assert!(evs.iter().filter(|e| e.tuplet.is_some()).all(|e| e.ticks == 160 && e.tuplet.map_or(false, |t| t.actual == 3 && t.normal == 2)));
+        assert!(r.score.parts[0].measures[2].events.iter().all(|e| e.tuplet.is_none()), "plain eighths stay plain");
+        assert!(r.warnings.iter().any(|w| w.contains("tresillos")), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn midi_import_separates_voices_and_hands() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        // one track: a held upper note over a moving line (two voices), plus a bass line (second hand)
+        let mut s = Score::new("v", TimeSig { num: 4, den: 4 }, 0, 1);
+        for m in 0..4u32 {
+            s.put_abs_voice(0, 0, m * 1920, 1920, &[p(79)]).unwrap();
+            for k in 0..4u32 {
+                s.put_abs_voice(0, 1, m * 1920 + k * 480, 480, &[p(64 + (k as i32 % 3))]).unwrap();
+            }
+        }
+        let bass = s.add_part("Bajo", Clef::Bass, 0, false);
+        for m in 0..4u32 {
+            s.put_abs(bass, m * 1920, 1920, &[p(45)]).unwrap();
+        }
+        // each part is its own channel, so the bass is a stream by itself and the first one has two voices
+        let r = import_midi(&export_midi(&s)).unwrap();
+        assert_eq!(flat(&r.score), flat(&s));
+        assert_eq!(r.score.parts.len(), 2);
+        // the first stream keeps two voices
+        let m0 = &r.score.parts[0].measures[0];
+        assert_eq!(m0.voices.iter().filter(|v| !v.is_empty()).count(), 1, "second voice");
+        assert!(m0.events.iter().all(|e| e.ticks == 1920) || m0.events.iter().all(|e| e.ticks == 480), "{:?}", m0.events.iter().map(|e| e.ticks).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn midi_import_splits_a_wide_track_into_two_hands() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("h", TimeSig { num: 4, den: 4 }, 0, 1);
+        for m in 0..4u32 {
+            for k in 0..4u32 {
+                s.put_abs(0, m * 1920 + k * 480, 480, &[p(72 + k as i32), p(48 + k as i32)]).unwrap();
+            }
+        }
+        s.parts[0].name = "Piano".into();
+        let r = import_midi(&export_midi(&s)).unwrap();
+        assert_eq!(flat(&r.score), flat(&s));
+        assert_eq!(r.score.parts.len(), 2);
+        assert_eq!((r.score.parts[0].clef, r.score.parts[1].clef), (Clef::Treble, Clef::Bass));
+        assert_eq!((r.score.parts[0].name.as_str(), r.score.parts[1].name.as_str()), ("Piano", "Piano (2)"));
+        assert!(r.warnings.iter().any(|w| w.contains("dos pentagramas")), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn legato_overlaps_do_not_create_voices() {
+        // hand-made performance: each quarter note lasts 540 ticks (60 over the next onset)
+        let mut track: Vec<(u32, bool, u8)> = Vec::new();
+        for k in 0..8u32 {
+            track.push((k * 480, true, 72 + (k % 4) as u8));
+            track.push((k * 480 + 540, false, 72 + (k % 4) as u8));
+        }
+        track.sort_by_key(|e| (e.0, e.1));
+        let mut data: Vec<u8> = Vec::new();
+        let mut last = 0u32;
+        for (t, on, key) in track {
+            let mut d = t - last;
+            last = t;
+            let mut vl = vec![(d & 0x7f) as u8];
+            d >>= 7;
+            while d > 0 {
+                vl.insert(0, ((d & 0x7f) as u8) | 0x80);
+                d >>= 7;
+            }
+            data.extend(vl);
+            data.extend([if on { 0x90 } else { 0x80 }, key, 64]);
+        }
+        data.extend([0, 0xff, 0x2f, 0]);
+        let mut smf = b"MThd".to_vec();
+        smf.extend(6u32.to_be_bytes());
+        smf.extend([0, 0, 0, 1, 0x01, 0xe0]);
+        smf.extend(b"MTrk");
+        smf.extend((data.len() as u32).to_be_bytes());
+        smf.extend(data);
+        let r = import_midi(&smf).unwrap();
+        assert!(r.score.parts[0].measures[0].voices.iter().all(|v| v.is_empty()), "overlap of 60 ticks is legato, not a voice");
+        assert_eq!(r.score.parts[0].measures[0].events.iter().map(|e| e.ticks).collect::<Vec<_>>(), vec![480; 4]);
     }
 
     #[test]

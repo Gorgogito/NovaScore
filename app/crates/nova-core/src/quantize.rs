@@ -250,10 +250,10 @@ pub fn estimate_key_with(notes: &[RawNote], p: &KeyParams) -> (i8, f64, f64) {
 }
 
 #[derive(Clone, Copy)]
-struct Q {
-    s: u32,
-    e: u32,
-    pitch: u8,
+pub(crate) struct Q {
+    pub s: u32,
+    pub e: u32,
+    pub pitch: u8,
 }
 
 struct Group {
@@ -349,7 +349,7 @@ pub fn detect_tuplet_beats(ticks: &[f64]) -> HashMap<u32, u8> {
 
 /// Ajusta una posición (ticks) a la rejilla de su pulso: en un pulso con grupo irregular, a
 /// 1/3, 1/5 o 1/6 de negra; en los demás, a semicorcheas.
-fn snap(t: f64, tuplets: &HashMap<u32, u8>) -> u32 {
+pub(crate) fn snap(t: f64, tuplets: &HashMap<u32, u8>) -> u32 {
     let t = t.max(0.0);
     let beat = (t / PPQ as f64).floor() as u32;
     match tuplets.get(&beat) {
@@ -362,7 +362,7 @@ fn snap(t: f64, tuplets: &HashMap<u32, u8>) -> u32 {
 }
 
 /// Ticks de una ranura en el pulso `beat` (una semicorchea si no hay grupo irregular).
-fn slot_ticks(beat: u32, tuplets: &HashMap<u32, u8>) -> u32 {
+pub(crate) fn slot_ticks(beat: u32, tuplets: &HashMap<u32, u8>) -> u32 {
     tuplets.get(&beat).map_or(GRID, |&n| PPQ / n as u32)
 }
 
@@ -372,7 +372,7 @@ fn touches_tuplet(s: u32, e: u32, tuplets: &HashMap<u32, u8>) -> bool {
 }
 
 /// Reparte notas ya cuantizadas de un pentagrama en hasta 4 voces (la 0 = la más aguda).
-fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32, tuplets: &HashMap<u32, u8>) -> Vec<Vec<Group>> {
+fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32, simplify: bool, tuplets: &HashMap<u32, u8>) -> Vec<Vec<Group>> {
     notes.sort_by(|a, b| a.s.cmp(&b.s).then(b.pitch.cmp(&a.pitch)));
     let mut voices: Vec<Vec<Group>> = Vec::new();
     let mean = |g: &Group| g.pitches.iter().map(|&p| p as f64).sum::<f64>() / g.pitches.len() as f64;
@@ -439,7 +439,7 @@ fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32, tuplets: &
         for i in 0..v.len() {
             let next = v.get(i + 1).map(|g| g.s);
             let d = v[i].e - v[i].s;
-            if next != Some(v[i].e) && d <= 1920 && !SIMPLE.contains(&d) && !touches_tuplet(v[i].s, v[i].e, tuplets) {
+            if simplify && next != Some(v[i].e) && d <= 1920 && !SIMPLE.contains(&d) && !touches_tuplet(v[i].s, v[i].e, tuplets) {
                 let best = SIMPLE.iter().copied().min_by_key(|&s| (s.abs_diff(d), s)).unwrap();
                 v[i].e = v[i].s + best;
             }
@@ -451,6 +451,63 @@ fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32, tuplets: &
         m(b).partial_cmp(&m(a)).unwrap()
     });
     voices
+}
+
+/// Write quantized notes into the staff `pi` of `score`: they are split into voices, runs outside
+/// irregular beats are written as plain notes (tied where needed) and irregular beats as tuplets.
+/// Returns true when some note could not be placed.
+pub(crate) fn place_staff(score: &mut Score, pi: usize, notes: Vec<Q>, max_voices: usize, legato_ticks: u32, simplify: bool, tuplet_beats: &HashMap<u32, u8>, sharps: bool) -> bool {
+    let mut dropped_voices = false;
+    let voices = allocate_voices(notes, max_voices.clamp(1, crate::MAX_VOICES), legato_ticks, simplify, tuplet_beats);
+    for (vi, v) in voices.iter().enumerate() {
+        // pulsos con grupo irregular de esta voz: pulso → (ranura, nº de ranuras, alturas, ligada)
+        let mut beats: BTreeMap<u32, Vec<(u32, u32, Vec<Pitch>, bool)>> = BTreeMap::new();
+        for g in v {
+            let mut ps: Vec<Pitch> = g.pitches.iter().map(|&m| Pitch::from_midi(m as i32, sharps)).collect();
+            ps.sort_by_key(|p| p.midi());
+            let mut pos = g.s;
+            while pos < g.e {
+                let beat = pos / PPQ;
+                if let Some(&slots) = tuplet_beats.get(&beat) {
+                    let unit = PPQ / slots as u32;
+                    let seg_end = g.e.min((beat + 1) * PPQ);
+                    let slot = ((pos - beat * PPQ) as f64 / unit as f64).round() as u32;
+                    let n = (((seg_end - pos) as f64 / unit as f64).round() as u32).max(1);
+                    let tie = seg_end < g.e;
+                    if n >= slots as u32 || slot + n > slots as u32 {
+                        // llena el pulso: una negra normal, sin grupo irregular
+                        if score.put_abs_voice_tied(pi, vi, pos, seg_end - pos, &ps, tie).is_err() {
+                            dropped_voices = true;
+                        }
+                    } else {
+                        beats.entry(beat).or_default().push((slot, n, ps.clone(), tie));
+                    }
+                    pos = seg_end;
+                } else {
+                    // tramo recto hasta el siguiente pulso con grupo irregular
+                    let mut seg_end = g.e;
+                    let mut b = beat + 1;
+                    while b * PPQ < g.e {
+                        if tuplet_beats.contains_key(&b) {
+                            seg_end = b * PPQ;
+                            break;
+                        }
+                        b += 1;
+                    }
+                    if score.put_abs_voice_tied(pi, vi, pos, seg_end - pos, &ps, seg_end < g.e).is_err() {
+                        dropped_voices = true;
+                    }
+                    pos = seg_end;
+                }
+            }
+        }
+        for (beat, items) in beats {
+            if score.put_tuplet_beat(pi, vi, beat * PPQ, tuplet_beats[&beat] as u32, &items).is_err() {
+                dropped_voices = true;
+            }
+        }
+    }
+    dropped_voices
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1106,59 +1163,11 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
     score.parts.clear();
     let mut dropped_voices = false;
     for (name, clef, notes) in staves {
-        let voices = allocate_voices(notes, o.max_voices.clamp(1, crate::MAX_VOICES), o.legato_ticks, &tuplet_beats);
         let mut part = Part::new(name, clef, o.program, vec![Measure::empty(mlen)]);
         part.percussion = false;
         score.parts.push(part);
         let pi = score.parts.len() - 1;
-        for (vi, v) in voices.iter().enumerate() {
-            // pulsos con grupo irregular de esta voz: pulso → (ranura, nº de ranuras, alturas, ligada)
-            let mut beats: BTreeMap<u32, Vec<(u32, u32, Vec<Pitch>, bool)>> = BTreeMap::new();
-            for g in v {
-                let mut ps: Vec<Pitch> = g.pitches.iter().map(|&m| Pitch::from_midi(m as i32, sharps)).collect();
-                ps.sort_by_key(|p| p.midi());
-                let mut pos = g.s;
-                while pos < g.e {
-                    let beat = pos / PPQ;
-                    if let Some(&slots) = tuplet_beats.get(&beat) {
-                        let unit = PPQ / slots as u32;
-                        let seg_end = g.e.min((beat + 1) * PPQ);
-                        let slot = ((pos - beat * PPQ) as f64 / unit as f64).round() as u32;
-                        let n = (((seg_end - pos) as f64 / unit as f64).round() as u32).max(1);
-                        let tie = seg_end < g.e;
-                        if n >= slots as u32 || slot + n > slots as u32 {
-                            // llena el pulso: una negra normal, sin grupo irregular
-                            if score.put_abs_voice_tied(pi, vi, pos, seg_end - pos, &ps, tie).is_err() {
-                                dropped_voices = true;
-                            }
-                        } else {
-                            beats.entry(beat).or_default().push((slot, n, ps.clone(), tie));
-                        }
-                        pos = seg_end;
-                    } else {
-                        // tramo recto hasta el siguiente pulso con grupo irregular
-                        let mut seg_end = g.e;
-                        let mut b = beat + 1;
-                        while b * PPQ < g.e {
-                            if tuplet_beats.contains_key(&b) {
-                                seg_end = b * PPQ;
-                                break;
-                            }
-                            b += 1;
-                        }
-                        if score.put_abs_voice_tied(pi, vi, pos, seg_end - pos, &ps, seg_end < g.e).is_err() {
-                            dropped_voices = true;
-                        }
-                        pos = seg_end;
-                    }
-                }
-            }
-            for (beat, items) in beats {
-                if score.put_tuplet_beat(pi, vi, beat * PPQ, tuplet_beats[&beat] as u32, &items).is_err() {
-                    dropped_voices = true;
-                }
-            }
-        }
+        dropped_voices |= place_staff(&mut score, pi, notes, o.max_voices, o.legato_ticks, true, &tuplet_beats, sharps);
     }
     if dropped_voices {
         warnings.push("Algunas notas no pudieron colocarse y se omitieron.".into());

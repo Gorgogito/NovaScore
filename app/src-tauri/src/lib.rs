@@ -513,7 +513,7 @@ fn load_score(state: State<AppState>, path: String) -> Res {
     Ok(doc.score.clone())
 }
 
-/// Score to show on start: the file given as first CLI argument (.nova / .musicxml / .xml), or a blank one.
+/// Score to show on start: the file given as first CLI argument (.nova / .musicxml / .xml / .mid / .mscz / audio), or a blank one.
 fn initial_score() -> Score {
     if let Some(path) = std::env::args().nth(1) {
         let lower = path.to_lowercase();
@@ -521,6 +521,13 @@ fn initial_score() -> Score {
             match audio::audio_to_score(&path, &Default::default(), std::path::Path::new(".")) {
                 Ok(r) => return r.score,
                 Err(e) => eprintln!("No se pudo transcribir {path}: {e}"),
+            }
+        } else if lower.ends_with(".mid") || lower.ends_with(".midi") {
+            if let Ok(bytes) = std::fs::read(&path) {
+                match io::import_midi(&bytes) {
+                    Ok(r) => return r.score,
+                    Err(e) => eprintln!("No se pudo importar {path}: {e}"),
+                }
             }
         } else if lower.ends_with(".mscz") || lower.ends_with(".mscx") {
             if let Ok(bytes) = std::fs::read(&path) {
