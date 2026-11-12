@@ -72,7 +72,13 @@ export interface LayoutResult {
   height: number;
   systems: LSystem[];
   staffTops: (system: LSystem) => number[];
+  /** Distance from the top of a staff to the top of its tablature staff (parts with a tuning). */
+  tabDy: number;
 }
+
+/** Line spacing of a tablature staff and the height of the 6-line staff drawn under a part. */
+export const TAB_SP = 8;
+export const tabHeight = (lines: number) => (lines - 1) * TAB_SP;
 
 const SHARP_ORDER = [3, 0, 4, 1, 5, 2, 6]; // F C G D A E B
 const FLAT_ORDER = [6, 2, 5, 1, 4, 0, 3]; // B E A D G C F
@@ -289,7 +295,10 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const verses = score.parts.reduce((a, p) => Math.max(a, ...p.measures.flatMap((m) => [m.events, ...(m.voices ?? [])]).flatMap((evs) => evs.flatMap((e) => (e.lyrics ?? []).map((y) => y.verse + 1)))), 0);
   const lyricGap = verses ? verses * LYRIC_LINE + 4 : 0;
   const partGap = PART_GAP + lyricGap;
-  const systemH = nParts * STAFF_H + (nParts - 1) * partGap;
+  // A part with a tuning also holds a tablature staff under its staff.
+  const tabDy = STAFF_H + 56 + lyricGap;
+  const extra = (p: { tuning?: number[]; percussion?: boolean }) => (p.tuning && !p.percussion ? tabDy - STAFF_H + tabHeight(p.tuning.length) : 0);
+  const systemH = score.parts.reduce((a, p) => a + STAFF_H + extra(p), 0) + (nParts - 1) * partGap;
   const systems: LSystem[] = [];
   const sysGap = SYSTEM_GAP + (score.chords?.length ? CHORD_GAP : 0) + lyricGap;
   lines.forEach((line, li) => {
@@ -339,6 +348,14 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
     width: pageWidth,
     height,
     systems,
-    staffTops: (s) => score.parts.map((_, i) => s.top + i * (STAFF_H + partGap)),
+    staffTops: (s) => {
+      let y = s.top;
+      return score.parts.map((p) => {
+        const top = y;
+        y += STAFF_H + extra(p) + partGap;
+        return top;
+      });
+    },
+    tabDy,
   };
 }

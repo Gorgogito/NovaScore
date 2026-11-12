@@ -17,7 +17,7 @@ export const DYNAMICS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "fp", "
 export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato" | "mordent" | "shorttrill" | "turn" | "invertedturn";
 
 export type Lyric = { verse: number; text: string; syllabic: "single" | "begin" | "middle" | "end"; extend_to?: { measure: number; tick: number } };
-export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[]; text?: string } & (
+export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[]; text?: string; strings?: number[]; /** Set by `displayScore` on tablature parts: the sounding MIDI pitches (the drawn ones are shifted). */ snd?: number[] } & (
   | { kind: "note"; pitches: Pitch[]; tie: boolean }
   | { kind: "rest" }
 );
@@ -112,6 +112,8 @@ export interface Part {
   percussion: boolean;
   /** Transposing instrument: sounding = written + interval. Notes are stored at sounding pitch. */
   transpose?: Transpose;
+  /** Tablature: open strings (sounding MIDI pitch) of the instrument; a tab staff is drawn under the staff. */
+  tuning?: number[];
   /** Set by `displayScore`: key signature this staff is drawn with (written key of a transposing instrument). */
   shown_fifths?: number;
   spanners?: Spanner[];
@@ -233,16 +235,17 @@ export const ottavaShiftAt = (p: Part, measure: number, tick: number): number =>
  */
 export const displayScore = (s: Score): Score => {
   const hasOttava = (p: Part) => (p.spanners ?? []).some((x) => ottavaOctaves(x.kind) !== 0);
-  if (!s.parts.some((p) => hasOttava(p) || p.transpose)) return s;
+  if (!s.parts.some((p) => hasOttava(p) || p.transpose || p.tuning)) return s;
   return {
     ...s,
     parts: s.parts.map((p) => {
-      if (!hasOttava(p) && !p.transpose) return p;
+      if (!hasOttava(p) && !p.transpose && !p.tuning) return p;
       const shifted = (evs: EventData[], mi: number): EventData[] =>
         evs.map((e) => {
           if (e.kind !== "note") return e;
           const k = ottavaShiftAt(p, mi, e.start);
-          return { ...e, pitches: e.pitches.map((q) => { const w = writtenPitch(q, p.transpose); return k ? { ...w, octave: w.octave - k } : w; }) };
+          const snd = p.tuning ? e.pitches.map(pitchMidi) : undefined;
+          return { ...e, snd, pitches: e.pitches.map((q) => { const w = writtenPitch(q, p.transpose); return k ? { ...w, octave: w.octave - k } : w; }) };
         });
       return {
         ...p,

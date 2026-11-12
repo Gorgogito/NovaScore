@@ -278,6 +278,27 @@ fn clef_of(s: &str) -> (Clef, bool) {
     }
 }
 
+/// A clef that sounds an octave (or two) away from its notation (`G8vb` on the guitar) is shown as a transposition,
+/// so the notes are stored at sounding pitch and drawn where the player reads them.
+fn octave_clef(s: &str) -> Option<Transpose> {
+    let s = s.trim();
+    if !(s.starts_with('G') || s.starts_with('F') || s.starts_with('C')) {
+        return None;
+    }
+    let (d, c): (i8, i8) = if s.contains("15mb") {
+        (-14, -24)
+    } else if s.contains("15ma") {
+        (14, 24)
+    } else if s.contains("8vb") {
+        (-7, -12)
+    } else if s.contains("8va") {
+        (7, 12)
+    } else {
+        return None;
+    };
+    Some(Transpose { diatonic: d, chromatic: c })
+}
+
 fn key_fifths(n: Node) -> Option<i8> {
     int_of(n, "concertKey").or_else(|| int_of(n, "accidental")).or_else(|| int_of(n, "key")).map(|v| v.clamp(-7, 7) as i8)
 }
@@ -296,6 +317,10 @@ struct StaffInfo {
     clef_set: bool,
     group: u32,
     transpose: Option<Transpose>,
+    /// Open strings of the instrument (`<StringData>`), lowest first.
+    tuning: Option<Vec<u8>>,
+    /// Tablature staff (its notes repeat those of the staff above and carry the strings).
+    tab: bool,
     instrument_xml: Option<String>,
     staff_xml: Option<String>,
 }
@@ -465,7 +490,9 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 percussion: percussion || perc_clef,
                 clef_set: clef_txt.is_some(),
                 group: group as u32,
-                transpose,
+                transpose: transpose.or_else(|| clef_txt.as_deref().and_then(octave_clef)),
+                tuning: inst.and_then(|i| i.descendants().find(|n| n.has_tag_name("StringData"))).map(|d| d.children().filter(|c| c.has_tag_name("string")).filter_map(|c| c.text()?.trim().parse::<u8>().ok()).collect::<Vec<u8>>()).filter(|v| !v.is_empty()),
+                tab: child(*st, "StaffType").and_then(|t| t.attribute("group")) == Some("tablature"),
                 instrument_xml: if preserve { inst.map(src) } else { None },
                 staff_xml: if preserve {
                     // contents between <Staff ...> and </Staff>
@@ -745,10 +772,13 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                 }
                             };
                             let mut pitches = Vec::new();
+                            let mut note_strings: Vec<u8> = Vec::new();
                             let mut tie = false;
                             if is_chord {
                                 for note in el.children().filter(|c| c.is_element() && c.has_tag_name("Note")) {
                                     let Some(midi) = int_of(note, "pitch") else { continue };
+                                    // string numbers: MuseScore counts from the highest string at 0, MusicXML from 1
+                                    note_strings.push(int_of(note, "string").map_or(0, |v| (v + 1).clamp(0, 255) as u8));
                                     let tpc = int_of(note, "tpc").map(|v| v as i32);
                                     pitches.push(if staves[si].percussion { Pitch::from_midi(midi as i32, true) } else { spell(midi as i32, tpc) });
                                     tie |= note.children().any(|c| {
@@ -808,7 +838,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                         }
                                     }
                                 }
-                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, text: pending_text.take(), lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
+                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, strings: if staves[si].tab { note_strings } else { Vec::new() }, text: pending_text.take(), lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
                             }
                             pos += real;
                         }
@@ -891,10 +921,50 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
         }
     }
     let lens: Vec<u32> = (0..max_measures.max(1)).map(|i| score.measure_len(i)).collect();
+    // A tablature staff repeats the notes of the staff above it in its part: it is not a part of its own, but the
+    // strings of its notes go to that staff.
+    let mut tab_target: HashMap<usize, usize> = HashMap::new();
+    let mut tab_maps: HashMap<usize, HashMap<(usize, u32, i32), u8>> = HashMap::new();
     for (si, info) in staves.iter().enumerate() {
+        if !info.tab {
+            continue;
+        }
+        if let Some(ti) = (0..si).rev().find(|&t| !staves[t].tab && staves[t].group == info.group) {
+            tab_target.insert(si, ti);
+            let map = tab_maps.entry(ti).or_default();
+            for voice in &raw_staves[si] {
+                for (mi, raws) in voice.iter().enumerate() {
+                    for r in raws {
+                        for (p, &sn) in r.pitches.iter().zip(&r.strings) {
+                            if sn > 0 {
+                                map.insert((mi, r.start, p.midi()), sn);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (si, info) in staves.iter().enumerate() {
+        if tab_target.contains_key(&si) {
+            continue;
+        }
         let mut raw = std::mem::take(&mut raw_staves[si]);
         if raw.is_empty() {
             raw.push(Vec::new());
+        }
+        let tuning = info.tuning.clone().filter(|_| info.tab || tab_maps.contains_key(&si));
+        if let (Some(tn), Some(map)) = (&tuning, tab_maps.get(&si)) {
+            for (mi, raws) in raw.iter_mut().flat_map(|v| v.iter_mut().enumerate()) {
+                for r in raws.iter_mut().filter(|r| !r.rest) {
+                    let mut pairs: Vec<(Pitch, Option<u8>)> = r.pitches.iter().map(|p| (*p, map.get(&(mi, r.start, p.midi())).copied())).collect();
+                    pairs.sort_by_key(|(p, _)| (p.midi(), p.step));
+                    pairs.dedup_by_key(|(p, _)| p.midi());
+                    if !pairs.is_empty() && pairs.iter().all(|(_, s)| s.map_or(false, |s| (s as usize) <= tn.len())) {
+                        r.strings = pairs.iter().map(|(_, s)| s.unwrap()).collect();
+                    }
+                }
+            }
         }
         let mut measures = build_measures(&raw, max_measures.max(1), &lens);
         for (mi, frags) in measure_extras[si].iter().enumerate() {
@@ -939,9 +1009,11 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 clef: info.clef,
                 percussion: info.percussion,
                 transpose: info.transpose,
+                tuning: info.tuning.clone(),
             });
         }
         part.transpose = info.transpose;
+        part.tuning = tuning;
         score.parts.push(part);
     }
 

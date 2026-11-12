@@ -7,15 +7,17 @@ export interface Instrument {
   percussion?: boolean;
   /** Transposing instrument: sounding = written + interval (MuseScore's sign). */
   transpose?: { diatonic: number; chromatic: number };
+  /** Open strings: the part is also shown as a tablature. */
+  tuning?: number[];
 }
 
 export const INSTRUMENTS: Instrument[] = [
   { name: "Piano", program: 0, clef: "treble" },
   { name: "Piano (mano izquierda)", program: 0, clef: "bass" },
   { name: "Órgano", program: 19, clef: "treble" },
-  { name: "Guitarra de nailon", program: 24, clef: "treble" },
-  { name: "Guitarra de acero", program: 25, clef: "treble" },
-  { name: "Bajo eléctrico", program: 33, clef: "bass" },
+  { name: "Guitarra de nailon", program: 24, clef: "treble", transpose: { diatonic: -7, chromatic: -12 }, tuning: [40, 45, 50, 55, 59, 64] },
+  { name: "Guitarra de acero", program: 25, clef: "treble", transpose: { diatonic: -7, chromatic: -12 }, tuning: [40, 45, 50, 55, 59, 64] },
+  { name: "Bajo eléctrico", program: 33, clef: "bass", transpose: { diatonic: -7, chromatic: -12 }, tuning: [28, 33, 38, 43] },
   { name: "Violín", program: 40, clef: "treble" },
   { name: "Viola", program: 41, clef: "treble" },
   { name: "Violonchelo", program: 42, clef: "bass" },

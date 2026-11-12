@@ -7,6 +7,7 @@ pub mod io;
 pub mod mscx;
 pub mod mscx_write;
 pub mod quantize;
+pub mod tab;
 
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +139,10 @@ pub struct Event {
     /// Free text above the staff that starts at this event (staff text: "pizz.", "dolce"...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Tablature: string chosen for each pitch (ascending), numbered as in MusicXML (1 = highest string); 0 = automatic.
+    /// Empty when the player did not choose; editing the pitches of the event drops it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strings: Vec<u8>,
 }
 
 /// How a lyric syllable joins the next one.
@@ -386,7 +391,7 @@ pub fn tuplet_notated(ticks: u32, actual: u8, normal: u8) -> Option<u32> {
 
 impl Event {
     pub fn new(start: u32, ticks: u32, content: Content) -> Event {
-        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None }
+        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new() }
     }
 
     /// Written (notated) duration: the sounding duration scaled back by the tuplet ratio.
@@ -513,6 +518,13 @@ pub struct Part {
     /// Transposing instrument: notes are stored at sounding pitch and shown at written pitch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transpose: Option<Transpose>,
+    /// Tablature: MIDI pitch of each open string (sounding, lowest string first). When set a tab staff is drawn
+    /// under the staff, and the frets go to MusicXML and MuseScore files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<Vec<u8>>,
+    /// Only while writing a MuseScore file: this part is the tablature twin of the one before it.
+    #[serde(skip)]
+    pub tab_staff: bool,
     /// Slurs and hairpins, anchored to positions in time so they stay put while notes change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spanners: Vec<Spanner>,
@@ -598,6 +610,8 @@ pub struct MsOrigin {
     pub percussion: bool,
     #[serde(default)]
     pub transpose: Option<Transpose>,
+    #[serde(default)]
+    pub tuning: Option<Vec<u8>>,
 }
 
 fn default_volume() -> u8 {
@@ -610,7 +624,7 @@ impl Part {
     }
 
     pub fn new(name: impl Into<String>, clef: Clef, program: u8, measures: Vec<Measure>) -> Part {
-        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, spanners: Vec::new(), measures }
+        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, tuning: None, tab_staff: false, spanners: Vec::new(), measures }
     }
 }
 
@@ -627,10 +641,13 @@ pub struct PartUpdate {
     /// `Some(None)` clears the transposition; absent leaves it unchanged.
     #[serde(default, deserialize_with = "double_option")]
     pub transpose: Option<Option<Transpose>>,
+    /// Tablature: `Some(Some(strings))` shows a tab staff with that tuning, `Some(None)` hides it.
+    #[serde(default, deserialize_with = "double_option")]
+    pub tuning: Option<Option<Vec<u8>>>,
 }
 
-fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Transpose>>, D::Error> {
-    Ok(Some(Option::<Transpose>::deserialize(d)?))
+fn double_option<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+    Ok(Some(Option::<T>::deserialize(d)?))
 }
 
 /// A time signature that starts at `measure` (0-based) and lasts until the next change.
@@ -721,7 +738,7 @@ fn tuplet_rests(from: u32, to: u32, t: Tuplet) -> Result<Vec<Event>, EditError> 
     let mut off = o0;
     for piece in split_standard(o1 - o0) {
         let (a, b) = (t.tick_at(off), t.tick_at(off + piece));
-        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None });
+        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new() });
         off += piece;
     }
     Ok(out)
@@ -935,7 +952,7 @@ impl Score {
         }
         let mut next: Vec<Event> = events.iter().filter(|e| e.tuplet != Some(t) || e.start + e.ticks <= lo || e.start >= hi).cloned().collect();
         next.extend(tuplet_rests(lo, start, t)?);
-        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None });
+        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new() });
         next.extend(tuplet_rests(end, hi, t)?);
         next.sort_by_key(|e| e.start);
         *events = next;
@@ -982,7 +999,7 @@ impl Score {
         let each = span / normal as u32; // written value of one slot
         let t = Tuplet { actual, normal, start };
         let slots: Vec<Event> = (0..actual as u32)
-            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() }, text: if i == 0 { e.text.clone() } else { None } })
+            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() }, text: if i == 0 { e.text.clone() } else { None }, strings: Vec::new() })
             .collect();
         events.splice(idx..=idx, slots);
         Ok(())
@@ -1017,6 +1034,7 @@ impl Score {
         events[idx].extras.retain(|x| matches!(x.place, ExtraPlace::Before | ExtraPlace::After));
         events[idx].articulations.clear();
         events[idx].lyrics.clear();
+        events[idx].strings.clear();
         // Merge adjacent plain rests back into standard values (tuplet events keep their slots).
         let mut merged: Vec<Event> = Vec::new();
         // A run of merged rests keeps the dynamic and markup of its first event.
@@ -1065,6 +1083,7 @@ impl Score {
             Content::Note { pitches, tie } => {
                 e.content = Content::note([pitches.clone(), vec![pitch]].concat(), *tie);
                 e.extras.retain(|x| !matches!(x.place, ExtraPlace::Note(_)));
+                e.strings.clear();
                 Ok(())
             }
             Content::Rest => Err(EditError::OutOfRange),
@@ -1079,6 +1098,7 @@ impl Score {
             if let Content::Note { pitches, .. } = &mut e.content {
                 if pitches.len() > 1 {
                     pitches.retain(|p| p.midi() != midi);
+                    e.strings.clear();
                     return Ok(());
                 }
             } else {
@@ -1109,6 +1129,7 @@ impl Score {
                 *p = Pitch::from_midi(p.midi() + semitones, sharps);
             }
             e.extras.retain(|x| !matches!(x.place, ExtraPlace::Note(_)));
+            e.strings.clear();
             Ok(())
         } else {
             Err(EditError::OutOfRange)
@@ -1220,6 +1241,7 @@ impl Score {
             articulations: Vec::new(),
             lyrics: Vec::new(),
             text: None,
+            strings: Vec::new(),
         };
         let mut new_events: Vec<Event> = Vec::new();
         // pieces of at most `max_n` slots; a note keeps its tie on the last piece only
@@ -1291,6 +1313,22 @@ impl Score {
         let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
         let t = text.trim();
         e.text = if t.is_empty() { None } else { Some(t.to_string()) };
+        Ok(())
+    }
+
+    /// Pin the note `midi` of a chord to a string (1 = highest string, as in MusicXML); 0 goes back to automatic.
+    pub fn set_string(&mut self, part: usize, voice: usize, m: usize, start: u32, midi: i32, string: u8) -> Result<(), EditError> {
+        let events = self.voice_events_mut(part, voice, m)?;
+        let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
+        let Content::Note { pitches, .. } = &e.content else { return Err(EditError::OutOfRange) };
+        let i = pitches.iter().position(|p| p.midi() == midi).ok_or(EditError::OutOfRange)?;
+        if e.strings.len() != pitches.len() {
+            e.strings = vec![0; pitches.len()];
+        }
+        e.strings[i] = string;
+        if e.strings.iter().all(|&x| x == 0) {
+            e.strings.clear();
+        }
         Ok(())
     }
 
@@ -1606,6 +1644,9 @@ impl Score {
         }
         if let Some(t) = u.transpose {
             p.transpose = t;
+        }
+        if let Some(t) = u.tuning {
+            p.tuning = t.filter(|v| !v.is_empty() && v.len() <= 8);
         }
         Ok(())
     }

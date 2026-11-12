@@ -24,6 +24,8 @@ export interface PartUpdate {
   percussion?: boolean;
   /** `null` clears the transposition. */
   transpose?: Transpose | null;
+  /** Tablature: open strings; `null` hides the tab staff. */
+  tuning?: number[] | null;
 }
 export interface PedalEvent {
   part: number;
@@ -64,6 +66,8 @@ export const api = {
 
   setText: (part: number, voice: number, measure: number, start: number, text: string) =>
     invoke<Score>("set_text", { part, voice, measure, start, text }),
+  setString: (part: number, voice: number, measure: number, start: number, midi: number, string: number) =>
+    invoke<Score>("set_string", { part, voice, measure, start, midi, string }),
   setLyricExtend: (part: number, voice: number, measure: number, start: number, verse: number, endMeasure: number | null, endTick: number) =>
     invoke<Score>("set_lyric_extend", { part, voice, measure, start, verse, endMeasure, endTick }),
   setLyric: (part: number, voice: number, measure: number, start: number, verse: number, text: string, syllabic: string) =>
@@ -80,8 +84,8 @@ export const api = {
   removeSpanners: (part: number, voice: number, start: SpPos, end: SpPos) =>
     invoke<Score>("remove_spanners", { part, voice, startMeasure: start.measure, startTick: start.tick, endMeasure: end.measure, endTick: end.tick }),
 
-  addPart: (name: string, clef: "treble" | "bass", program: number, percussion: boolean, transpose?: Transpose) =>
-    invoke<Score>("add_part", { name, clef, program, percussion, transpose: transpose ?? null }),
+  addPart: (name: string, clef: "treble" | "bass", program: number, percussion: boolean, transpose?: Transpose, tuning?: number[]) =>
+    invoke<Score>("add_part", { name, clef, program, percussion, transpose: transpose ?? null, tuning: tuning ?? null }),
   removePart: (part: number) => invoke<Score>("remove_part", { part }),
   updatePart: (part: number, update: PartUpdate) => invoke<Score>("update_part", { part, update }),
 

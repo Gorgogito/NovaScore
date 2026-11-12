@@ -30,7 +30,7 @@ export function paginate(layout: LayoutResult): LayoutResult[] {
     const top = pages.length === 0 ? FIRST_TOP : NEXT_TOP;
     const n = perPage(top);
     const slice: LSystem[] = sys.slice(i, i + n).map((s, j) => ({ ...s, top: top + j * pitch }));
-    pages.push({ width: PAGE_W, height: PAGE_H, systems: slice, staffTops: layout.staffTops });
+    pages.push({ width: PAGE_W, height: PAGE_H, systems: slice, staffTops: layout.staffTops, tabDy: layout.tabDy });
     i += n;
   }
   return pages;

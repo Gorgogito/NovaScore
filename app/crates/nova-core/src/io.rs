@@ -595,6 +595,7 @@ pub fn export_musicxml(score: &Score) -> String {
     x.push_str("  </part-list>\n");
 
     let mut melismas: std::collections::HashMap<(usize, usize), LyricCovers> = Default::default();
+    let mut tab_cache: std::collections::HashMap<(usize, usize), std::collections::HashMap<(usize, u32), Vec<Option<crate::tab::Fret>>>> = Default::default();
     for (pi, part) in score.parts.iter().enumerate() {
         let _ = writeln!(x, "  <part id=\"P{}\">", pi + 1);
         for (mi, m) in part.measures.iter().enumerate() {
@@ -610,10 +611,22 @@ pub fn export_musicxml(score: &Score) -> String {
                 // A transposing instrument reads its own key and writes <transpose>; pitches below are written ones.
                 let fifths = part.transpose.map_or(score.fifths, |t| t.written_fifths(score.fifths));
                 let transpose_xml = part.transpose.map_or(String::new(), |t| format!("<transpose><diatonic>{}</diatonic><chromatic>{}</chromatic></transpose>", t.diatonic, t.chromatic));
+                // open strings, lowest first (line 1 of <staff-tuning>)
+                let tuning_xml = part.tuning.as_ref().map_or(String::new(), |tn| {
+                    let lines: String = tn
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &m)| {
+                            let (st, al) = xml_step(m % 12, 0);
+                            format!("<staff-tuning line=\"{}\"><tuning-step>{}</tuning-step>{}<tuning-octave>{}</tuning-octave></staff-tuning>", i + 1, st, if al != 0 { format!("<tuning-alter>{al}</tuning-alter>") } else { String::new() }, m as i32 / 12 - 1)
+                        })
+                        .collect();
+                    format!("<staff-details>{lines}</staff-details>")
+                });
                 let _ = writeln!(
                     x,
-                    "      <attributes><divisions>{}</divisions><key><fifths>{}</fifths></key><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>{}</sign><line>{}</line></clef>{}</attributes>",
-                    PPQ, fifths, score.time.num, score.time.den, sign, line, transpose_xml
+                    "      <attributes><divisions>{}</divisions><key><fifths>{}</fifths></key><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>{}</sign><line>{}</line></clef>{}{}</attributes>",
+                    PPQ, fifths, score.time.num, score.time.den, sign, line, tuning_xml, transpose_xml
                 );
                 if pi == 0 {
                     let _ = writeln!(
@@ -660,6 +673,7 @@ pub fn export_musicxml(score: &Score) -> String {
             let next_first = part.measures.get(mi + 1).and_then(|n| n.voice(v)).and_then(|e| e.first());
             let (xm, xm_tail) = xml_marks(score, part, v, mi, evs);
             let mel = melismas.entry((pi, v)).or_insert_with(|| score.lyric_covers(pi, v));
+            let tabs = tab_cache.entry((pi, v)).or_insert_with(|| score.tab_positions(pi, v));
             for (ei, e) in evs.iter().enumerate() {
                 if pi == 0 && v == 0 {
                     // el acorde se escribe antes del evento que suena en su tick, con desplazamiento si cae a mitad
@@ -752,6 +766,9 @@ pub fn export_musicxml(score: &Score) -> String {
                                 .collect();
                             let orn = if k == 0 && (!xm[ei].orn.is_empty() || !signs.is_empty()) { format!("<ornaments>{}{signs}</ornaments>", xm[ei].orn) } else { String::new() };
                             let tup = if k == 0 { format!("{tnot}{}{orn}{artics}", xm[ei].slur) } else { String::new() };
+                            // tablature: string and fret of this note
+                            let tech = tabs.get(&(mi, e.start)).and_then(|v| v.get(k).copied().flatten()).map_or(String::new(), |f| format!("<technical><string>{}</string><fret>{}</fret></technical>", f.string, f.fret));
+                            let tup = format!("{tup}{tech}");
                             if tie_stop || tie_start || !tup.is_empty() {
                                 s.push_str("<notations>");
                                 if tie_stop {
@@ -891,6 +908,14 @@ fn xml_lyrics(el: &roxmltree::Node) -> (Vec<Lyric>, Vec<(u8, String)>) {
     (out, exts)
 }
 
+/// Pitch of a MusicXML `<note>` as written in the file (no transposition applied).
+fn xml_note_pitch(el: &roxmltree::Node) -> Option<Pitch> {
+    let p = el.children().find(|c| c.has_tag_name("pitch"))?;
+    let step = STEPS.iter().position(|s| Some(*s) == text_of(p, "step").as_deref())? as u8;
+    let alter = num_of(p, "alter").unwrap_or(0).clamp(-2, 2) as i8;
+    Some(Pitch { step, alter, octave: num_of(p, "octave")? as i8 })
+}
+
 pub(crate) struct Raw {
     pub start: u32,
     pub ticks: u32,
@@ -904,6 +929,7 @@ pub(crate) struct Raw {
     pub articulations: Vec<Artic>,
     pub lyrics: Vec<Lyric>,
     pub text: Option<String>,
+    pub strings: Vec<u8>,
 }
 
 /// Turn raw per-voice events of one staff into measures: durations are snapped to standard
@@ -928,7 +954,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     let tuplet = r.tup.filter(|&(a, n, _)| tuplet_notated(r.ticks, a, n).map_or(false, valid_duration) && r.start + r.ticks <= mlen);
                     if let Some((a, n, gs)) = tuplet {
                         let content = if r.rest { Content::Rest } else { Content::note(r.pitches.clone(), r.tie) };
-                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone(), text: r.text.clone() });
+                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone(), text: r.text.clone(), strings: r.strings.clone() });
                         pos = r.start + r.ticks;
                         continue;
                     }
@@ -946,6 +972,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     ev.articulations = r.articulations.clone();
                     ev.lyrics = r.lyrics.clone();
                     ev.text = r.text.clone();
+                    ev.strings = r.strings.clone();
                     events.push(ev);
                     pos = r.start + t;
                 }
@@ -1003,6 +1030,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     // (name, program, clef, voices -> measures -> events)
     let mut staves: Vec<(String, u8, Clef, bool, Vec<Vec<Vec<Raw>>>)> = Vec::new();
     let mut staff_tr: std::collections::HashMap<usize, Transpose> = Default::default();
+    let mut staff_tab: std::collections::HashMap<usize, Vec<u8>> = Default::default();
     let mut key_read = false; // the score key comes from the first part
     let mut perc_staves: std::collections::BTreeSet<usize> = Default::default();
     // Slurs and hairpins per staff: (voice, kind, start, end).
@@ -1037,6 +1065,11 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut clefs: std::collections::HashMap<u32, Clef> = Default::default();
         // <transpose> of this part: its notes are written pitches and are stored as sounding ones.
         let mut part_tr: Option<Transpose> = None;
+        let mut part_clef_tr: Option<Transpose> = None;
+        // Tablature: open strings of the part, TAB staves (their notes only tell us strings) and the string of each note.
+        let mut part_tuning: Option<Vec<u8>> = None;
+        let mut tab_staves: std::collections::HashSet<u32> = Default::default();
+        let mut tab_strings: std::collections::HashMap<(usize, i64, i32), u8> = Default::default();
         let first_staff_idx = staves.len();
         let mut staff_index: std::collections::HashMap<u32, usize> = Default::default();
         let mut mcount = 0usize;
@@ -1079,6 +1112,35 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                             let no = c.attribute("number").and_then(|v| v.parse().ok()).unwrap_or(1u32);
                             let clef = if text_of(c, "sign").as_deref() == Some("F") { Clef::Bass } else { Clef::Treble };
                             clefs.insert(no, clef);
+                            // A clef with an octave sign (guitar: treble 8vb) only changes how the notes are drawn: the pitches
+                            // of the file are already the sounding ones, so it is shown as a transposition without converting them.
+                            if part_clef_tr.is_none() && text_of(c, "sign").as_deref() != Some("TAB") {
+                                let oc = num_of(c, "clef-octave-change").unwrap_or(0);
+                                if oc != 0 {
+                                    part_clef_tr = Some(Transpose { diatonic: (7 * oc).clamp(-127, 127) as i8, chromatic: (12 * oc).clamp(-127, 127) as i8 });
+                                }
+                            }
+                            if text_of(c, "sign").as_deref() == Some("TAB") {
+                                tab_staves.insert(no);
+                                if part_tuning.is_none() {
+                                    part_tuning = Some(crate::tab::GUITAR.to_vec());
+                                }
+                            }
+                        }
+                        for sd in el.children().filter(|c| c.has_tag_name("staff-details")) {
+                            let mut lines: Vec<(i64, i32)> = Vec::new();
+                            for st in sd.children().filter(|c| c.has_tag_name("staff-tuning")) {
+                                let line = st.attribute("line").and_then(|v| v.parse::<i64>().ok()).unwrap_or(lines.len() as i64 + 1);
+                                let step = text_of(st, "tuning-step").and_then(|t| xml_pc(&t, 0)).map(|pc| pc as i32);
+                                let (alter, octave) = (num_of(st, "tuning-alter").unwrap_or(0) as i32, num_of(st, "tuning-octave"));
+                                if let (Some(pc), Some(oct)) = (step, octave) {
+                                    lines.push((line, (oct as i32 + 1) * 12 + pc + alter));
+                                }
+                            }
+                            if !lines.is_empty() {
+                                lines.sort();
+                                part_tuning = Some(lines.iter().map(|l| l.1.clamp(0, 127) as u8).collect());
+                            }
                         }
                     }
                     "harmony" => {
@@ -1259,6 +1321,15 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         if !chord && !grace {
                             pos += dur;
                         }
+                        // A TAB staff repeats the notes of the staff above: only its strings are of interest.
+                        if tab_staves.contains(&staff) {
+                            if let (Some(sn), Some(p)) = (el.descendants().find(|c| c.has_tag_name("string")).and_then(|c| c.text()).and_then(|t| t.trim().parse::<u8>().ok()), xml_note_pitch(&el)) {
+                                let p = part_tr.map_or(p, |t| t.to_sounding(p));
+                                tab_strings.insert((mi, start, p.midi()), sn);
+                            }
+                            last_note = if chord { last_note } else { None };
+                            continue;
+                        }
                         if !keep {
                             if !grace {
                                 dropped += 1;
@@ -1354,6 +1425,12 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         if let Some(t) = part_tr {
                             pitch = pitch.map(|p| t.to_sounding(p));
                         }
+                        if let (Some(p), Some(sn)) = (pitch, el.descendants().find(|c| c.has_tag_name("technical")).and_then(|t| t.children().find(|c| c.has_tag_name("string"))).and_then(|c| c.text()).and_then(|t| t.trim().parse::<u8>().ok())) {
+                            tab_strings.insert((mi, start, p.midi()), sn);
+                            if part_tuning.is_none() {
+                                part_tuning = Some(crate::tab::GUITAR.to_vec());
+                            }
+                        }
                         if pitch.is_none() && el.children().any(|c| c.has_tag_name("unpitched")) {
                             let inst = el.children().find(|c| c.has_tag_name("instrument")).and_then(|c| c.attribute("id"));
                             if let Some(midi) = inst.and_then(|i| drum_map.get(i)) {
@@ -1402,7 +1479,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         };
                         let (lyrics, lyric_exts) = xml_lyrics(&el);
                         let raw_idx = ms[mi].len();
-                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics, text: pending_text.remove(&staff) });
+                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics, text: pending_text.remove(&staff), strings: Vec::new() });
                         for (verse, kind) in lyric_exts {
                             let key = (staff, vi, verse);
                             if kind == "start" {
@@ -1443,8 +1520,23 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             }
         }
         for si in first_staff_idx..staves.len() {
-            if let Some(t) = part_tr {
+            if let Some(t) = part_tr.or(part_clef_tr) {
                 staff_tr.insert(si, t);
+            }
+            if let Some(tuning) = &part_tuning {
+                staff_tab.insert(si, tuning.clone());
+                if !tab_strings.is_empty() {
+                    for (mi, ms) in staves[si].4.iter_mut().flat_map(|v| v.iter_mut().enumerate()).map(|(mi, r)| (mi, r)) {
+                        for raw in ms.iter_mut().filter(|r| !r.rest) {
+                            let mut pairs: Vec<(Pitch, Option<u8>)> = raw.pitches.iter().map(|p| (*p, tab_strings.get(&(mi, raw.start as i64, p.midi())).copied())).collect();
+                            pairs.sort_by_key(|(p, _)| (p.midi(), p.step));
+                            pairs.dedup_by_key(|(p, _)| p.midi());
+                            if !pairs.is_empty() && pairs.iter().all(|(_, s)| s.map_or(false, |s| s >= 1 && (s as usize) <= tuning.len())) {
+                                raw.strings = pairs.iter().map(|(_, s)| s.unwrap()).collect();
+                            }
+                        }
+                    }
+                }
             }
         }
         max_measures = max_measures.max(mcount);
@@ -1519,6 +1611,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         }
         let mut part = Part::new(name, clef, program, out);
         part.transpose = staff_tr.get(&si).copied();
+        part.tuning = staff_tab.get(&si).cloned();
         part.spanners = staff_sp[si]
             .iter()
             .filter_map(|&(vi, kind, start, mut end, endings)| {
@@ -1867,6 +1960,36 @@ mod tests {
         assert_eq!(evs[..7].iter().map(|e| e.start).collect::<Vec<_>>(), vec![0, 69, 137, 206, 274, 343, 411]);
         assert!(r.warnings.iter().any(|w| w.contains("septillos")), "{:?}", r.warnings);
         assert!(r.score.parts[0].measures[2].events.iter().all(|e| e.tuplet.is_none()));
+    }
+
+    #[test]
+    fn tablature_roundtrips_through_musicxml_and_reads_a_tab_staff() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.parts[0].tuning = Some(crate::tab::GUITAR.to_vec());
+        s.put_note(0, 0, 0, 0, 480, vec![p(52)]).unwrap(); // automatic: D string, fret 2
+        s.put_note(0, 0, 0, 480, 480, vec![p(52)]).unwrap();
+        s.set_string(0, 0, 0, 480, 52, 5).unwrap(); // pinned to the A string, fret 7
+        s.put_note(0, 0, 0, 960, 960, vec![p(40), p(55), p(64)]).unwrap();
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<string>4</string><fret>2</fret>") && xml.contains("<string>5</string><fret>7</fret>"), "{xml}");
+        assert!(xml.contains("<staff-tuning line=\"1\"><tuning-step>E</tuning-step><tuning-octave>2</tuning-octave>"));
+        let back = import_musicxml(&xml).unwrap().score;
+        assert_eq!(back.parts[0].tuning, s.parts[0].tuning);
+        assert_eq!(back.tab_positions(0, 0), s.tab_positions(0, 0));
+        assert_eq!(back.parts[0].measures[0].events[1].strings, vec![5]);
+        // a guitar written with a second TAB staff (as MuseScore exports it) is one part with its strings
+        let r = import_musicxml(include_str!("../../../../samples/tablatura.musicxml")).unwrap();
+        assert_eq!(r.score.parts.len(), 1, "the TAB staff is not a part of its own");
+        let part = &r.score.parts[0];
+        assert_eq!(part.tuning.as_deref(), Some(&crate::tab::GUITAR[..]));
+        // the 8vb clef of the guitar is shown as a written octave above the sound; the pitches stay the sounding ones
+        assert_eq!(part.transpose, Some(Transpose { diatonic: -7, chromatic: -12 }));
+        assert!(matches!(&part.measures[0].events[0].content, Content::Note { pitches, .. } if pitches[0].midi() == 52));
+        let pos = r.score.tab_positions(0, 0);
+        assert_eq!(pos[&(0, 0)], vec![Some(crate::tab::Fret { string: 5, fret: 7 })]);
+        assert_eq!(pos[&(0, 480)], vec![Some(crate::tab::Fret { string: 3, fret: 0 })]);
+        assert_eq!(part.measures[0].events[0].strings, vec![5]);
     }
 
     #[test]

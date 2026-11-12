@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, AudioOptions } from "./api";
 import { drumFromPos, DRUM_KEYS } from "./drum";
 import { INSTRUMENTS } from "./instruments";
+import { OCTAVE_BELOW, playableStrings, tabPositions, TUNINGS } from "./tab";
 import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
@@ -407,6 +408,21 @@ export default function App() {
     }
   };
 
+  /** Clic en un número de la tablatura: pasa esa nota a la siguiente cuerda en la que se puede tocar. */
+  const cycleString = async (part: number, voice: number, m: number, start: number, midi: number) => {
+    const s = score()!;
+    const tuning = s.parts[part].tuning;
+    if (!tuning) return;
+    const ev = voiceEvents(s.parts[part].measures[m], voice)?.find((e) => e.start === start);
+    if (ev?.kind !== "note") return;
+    const idx = ev.pitches.findIndex((p) => pitchMidi(p) === midi);
+    const current = tabPositions(s, part, voice).get(`${m}:${start}`)?.[idx]?.string ?? 0;
+    const options = playableStrings(tuning, midi);
+    if (!options.length) { setStatus("Esa nota no se puede tocar con esta afinación."); return; }
+    const next = options[(options.indexOf(current) + 1) % options.length];
+    if (await run(api.setString(part, voice, m, start, midi, next))) setStatus(`Nota movida a la cuerda ${next} (se conserva al guardar).`);
+  };
+
   const [newInstrument, setNewInstrument] = createSignal(6);
   const instrumentIndex = (program: number, clef: string, percussion: boolean, tr?: { diatonic: number; chromatic: number }) => {
     if (percussion) return INSTRUMENTS.findIndex((i) => i.percussion);
@@ -424,7 +440,7 @@ export default function App() {
   };
   const addInstrument = async () => {
     const ins = INSTRUMENTS[newInstrument()];
-    if (await run(api.addPart(ins.name, ins.clef, ins.program, ins.percussion ?? false, ins.transpose))) selectPart(score()!.parts.length - 1);
+    if (await run(api.addPart(ins.name, ins.clef, ins.program, ins.percussion ?? false, ins.transpose, ins.tuning))) selectPart(score()!.parts.length - 1);
   };
 
   /** Switch the active voice (1-4), keeping the cursor on the same beat when possible. */
@@ -826,7 +842,7 @@ export default function App() {
         <main class="canvas">
           <Show when={score() && layout()} fallback={<p class="loading">Cargando…</p>}>
             <div class="page" style={{ width: `${zoom()}%` }}>
-              <ScoreView score={shown()!} layout={layout()!} cursor={cursor()} selection={selection()} playing={playing()} inputMode={inputMode()} onPick={onPick} onChordClick={(c, x, y) => openChordEditor(c.measure, c.tick, x, y)} />
+              <ScoreView score={shown()!} layout={layout()!} cursor={cursor()} selection={selection()} playing={playing()} inputMode={inputMode()} onPick={onPick} onChordClick={(c, x, y) => openChordEditor(c.measure, c.tick, x, y)} onTabClick={cycleString} />
             </div>
           </Show>
         </main>
@@ -843,10 +859,20 @@ export default function App() {
                   <select
                     value={instrumentIndex(p.program, p.clef, p.percussion, p.transpose)}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => { const ins = INSTRUMENTS[Number(e.currentTarget.value)]; if (ins) run(api.updatePart(i(), { program: ins.program, clef: ins.clef, percussion: ins.percussion ?? false, transpose: ins.transpose ?? null })); }}
+                    onChange={(e) => { const ins = INSTRUMENTS[Number(e.currentTarget.value)]; if (ins) run(api.updatePart(i(), { program: ins.program, clef: ins.clef, percussion: ins.percussion ?? false, transpose: ins.transpose ?? null, tuning: ins.tuning ?? null })); }}
                   >
                     <Show when={instrumentIndex(p.program, p.clef, p.percussion, p.transpose) < 0}><option value="-1">Programa GM {p.program + 1}</option></Show>
                     <For each={INSTRUMENTS}>{(ins, k) => <option value={k()}>{ins.name}</option>}</For>
+                  </select>
+                  <select
+                    class="tab-select"
+                    title="Tablatura: dibuja un pentagrama de tablatura bajo el pentagrama"
+                    value={TUNINGS.findIndex((t) => t.strings.join() === (p.tuning ?? []).join())}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => { const k = Number(e.currentTarget.value); run(api.updatePart(i(), k >= 0 ? { tuning: TUNINGS[k].strings, ...(TUNINGS[k].octave && !p.transpose ? { transpose: OCTAVE_BELOW } : {}) } : { tuning: null })); }}
+                  >
+                    <option value="-1">{p.tuning && TUNINGS.findIndex((t) => t.strings.join() === p.tuning!.join()) < 0 ? "Tablatura (afinación propia)" : "Sin tablatura"}</option>
+                    <For each={TUNINGS}>{(t, k) => <option value={k()}>Tablatura: {t.name}</option>}</For>
                   </select>
                   <div class="inst-mix" onClick={(e) => e.stopPropagation()}>
                     <button classList={{ on: p.muted }} title="Silenciar" onClick={() => run(api.updatePart(i(), { muted: !p.muted }))}>M</button>

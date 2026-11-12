@@ -1,6 +1,7 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
-import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, staffIdx, STAFF_H } from "./layout";
+import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, TAB_SP, tabHeight, staffIdx, STAFF_H } from "./layout";
+import { tabPositions } from "./tab";
 import { chordName, ChordMark, Cursor, JUMP_TEXT, lyricCovers, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
@@ -112,6 +113,8 @@ interface Props {
   selection?: Selection | null;
   /** Click on a chord symbol (screen position for the editor). */
   onChordClick?: (c: ChordMark, x: number, y: number) => void;
+  /** Click on a fret number of a tablature staff: the app moves that note to another string. */
+  onTabClick?: (part: number, voice: number, measure: number, start: number, midi: number) => void;
   /** Static rendering for export: fixed size, no hit areas. */
   printMode?: boolean;
   /** Draw the title and composer (first page only when printing). */
@@ -603,6 +606,67 @@ export function ScoreView(props: Props) {
     return <For each={segs}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.1} />}</For>;
   };
 
+  /** Tablature staff under a part with a tuning: one line per string, fret numbers on the lines. */
+  const tabStaff = (pi: number, top: number, sys: LSystem) => {
+    const part = props.score.parts[pi];
+    const n = part.tuning!.length;
+    const ty = top + props.layout.tabDy;
+    const x1 = sys.measures[0].x;
+    const last = sys.measures[sys.measures.length - 1];
+    const x2 = last.x + last.width;
+    const lineY = (string: number) => ty + (string - 1) * TAB_SP;
+    return (
+      <g>
+        <For each={Array.from({ length: n }, (_, i) => i)}>
+          {(i) => <line x1={x1} x2={x2} y1={ty + i * TAB_SP} y2={ty + i * TAB_SP} stroke="var(--ink)" stroke-width={1} />}
+        </For>
+        <line x1={x1} x2={x1} y1={ty} y2={ty + tabHeight(n)} stroke="var(--ink)" stroke-width={1.4} />
+        <For each={sys.measures}>
+          {(m) => <line x1={m.x + m.width} x2={m.x + m.width} y1={ty} y2={ty + tabHeight(n)} stroke="var(--ink)" stroke-width={1} />}
+        </For>
+        <text x={x1 + 8} y={ty + tabHeight(n) / 2 - 4} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">T</text>
+        <text x={x1 + 8} y={ty + tabHeight(n) / 2 + 8} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">A</text>
+        <text x={x1 + 8} y={ty + tabHeight(n) / 2 + 20} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">B</text>
+        <For each={sys.measures}>
+          {(m) => (
+            <For each={m.lanes.filter((l) => l.part === pi)}>
+              {(lane) => {
+                const positions = tabPositions(props.score, pi, lane.voice);
+                return (
+                  <For each={lane.events}>
+                    {(le) => {
+                      const frets = positions.get(`${m.index}:${le.ev.start}`);
+                      const ev = le.ev;
+                      return (
+                        <Show when={frets && ev.kind === "note"}>
+                          <For each={frets!}>
+                            {(f, k) => {
+                              const midi = ev.kind === "note" ? (ev.snd ?? ev.pitches.map(pitchMidi))[k()] : 0;
+                              const x = le.x + 5;
+                              const y = f ? lineY(f.string) : ty + tabHeight(n) / 2;
+                              const label = f ? String(f.fret) : "×";
+                              return (
+                                <g style={props.onTabClick ? { cursor: "pointer" } : undefined} onClick={() => props.onTabClick?.(pi, lane.voice, m.index, ev.start, midi)}>
+                                  <rect x={x - 1 - (label.length - 1) * 3} y={y - 5.5} width={5 + label.length * 5.2} height={11} fill="#fbfaf6" />
+                                  <text x={x + 1.5} y={y + 4} text-anchor="middle" font-family="system-ui" font-size="11" fill="var(--ink)">{label}</text>
+                                  <title>{f ? `Cuerda ${f.string}, traste ${f.fret}${ev.strings?.length ? " (fijada)" : ""}. Clic: otra cuerda` : "Fuera de la afinación"}</title>
+                                </g>
+                              );
+                            }}
+                          </For>
+                        </Show>
+                      );
+                    }}
+                  </For>
+                );
+              }}
+            </For>
+          )}
+        </For>
+      </g>
+    );
+  };
+
   const keySig = (top: number, x: number, f: number) => {
     const posList = f > 0 ? SHARP_POS : FLAT_POS;
     const shift = clef() === "bass" ? -2 : 0;
@@ -724,6 +788,7 @@ export function ScoreView(props: Props) {
                         }}
                       </For>
                       <line x1={first.x} x2={first.x} y1={top} y2={top + STAFF_H} stroke="var(--ink)" stroke-width={1.4} />
+                      <Show when={part.tuning && !part.percussion}>{tabStaff(pi(), top, sys)}</Show>
                     </g>
                   );
                 }}

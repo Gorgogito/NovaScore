@@ -100,9 +100,18 @@ fn generated_instrument(p: &Part, name: &str) -> String {
         return DRUMSET.replace("<longName>Drum Kit</longName>", &format!("<longName>{}</longName>", esc(name)))
             .replace("<trackName>Drum Kit</trackName>", &format!("<trackName>{}</trackName>", esc(name)));
     }
+    let strings = p.tuning.as_ref().map_or(String::new(), |t| {
+        let list: String = t.iter().map(|m| format!("
+          <string>{m}</string>")).collect();
+        format!("
+        <StringData>
+          <frets>25</frets>{list}
+          </StringData>")
+    });
     let vol = if p.volume != 100 { format!("\n          <controller ctrl=\"7\" value=\"{}\"/>", p.volume) } else { String::new() };
     format!(
-        "<Instrument id=\"{id}\">\n        <longName>{n}</longName>\n        <shortName>{s}</shortName>\n        <trackName>{n}</trackName>\n        <minPitchP>0</minPitchP>\n        <maxPitchP>127</maxPitchP>\n        <minPitchA>0</minPitchA>\n        <maxPitchA>127</maxPitchA>{tr}\n        <Channel>\n          <program value=\"{prog}\"/>{vol}\n          <synti>Fluid</synti>\n          </Channel>\n        </Instrument>",
+        "<Instrument id=\"{id}\">\n        <longName>{n}</longName>\n        <shortName>{s}</shortName>\n        <trackName>{n}</trackName>\n        <minPitchP>0</minPitchP>\n        <maxPitchP>127</maxPitchP>\n        <minPitchA>0</minPitchA>\n        <maxPitchA>127</maxPitchA>{tr}{strings}\n        <Channel>\n          <program value=\"{prog}\"/>{vol}\n          <synti>Fluid</synti>\n          </Channel>\n        </Instrument>",
+        strings = strings,
         tr = p.transpose.map_or(String::new(), |t| format!("
         <transposeDiatonic>{}</transposeDiatonic>
         <transposeChromatic>{}</transposeChromatic>", t.diatonic, t.chromatic)),
@@ -115,6 +124,30 @@ fn generated_instrument(p: &Part, name: &str) -> String {
 }
 
 fn generated_staff(p: &Part) -> String {
+    if p.tab_staff {
+        let lines = p.tuning.as_ref().map_or(6, |t| t.len());
+        return format!("<StaffType group=\"tablature\">
+          <name>tab{lines}StrCommon</name>
+          <lines>{lines}</lines>
+          <lineDistance>1.5</lineDistance>
+          <durations>0</durations>
+          <durationFontName>MuseScore Tab Modern</durationFontName>
+          <durationFontSize>15</durationFontSize>
+          <durationFontY>0</durationFontY>
+          <fretUseTextStyle>1</fretUseTextStyle>
+          <fretTextStyle>tab_fret_number</fretTextStyle>
+          <linesThrough>0</linesThrough>
+          <minimStyle>1</minimStyle>
+          <onLines>1</onLines>
+          <showRests>1</showRests>
+          <stemsDown>1</stemsDown>
+          <stemsThrough>0</stemsThrough>
+          <upsideDown>0</upsideDown>
+          <showTabFingering>1</showTabFingering>
+          <useNumbers>1</useNumbers>
+          </StaffType>
+        <defaultClef>TAB</defaultClef>");
+    }
     if p.percussion {
         "<StaffType group=\"percussion\">\n          <name>perc5Line</name>\n          <keysig>0</keysig>\n          </StaffType>\n        <defaultClef>PERC</defaultClef>".into()
     } else {
@@ -125,7 +158,7 @@ fn generated_staff(p: &Part) -> String {
 
 /// True when the part still matches the MuseScore data it was imported with.
 fn origin_valid(p: &Part) -> Option<&MsOrigin> {
-    p.ms.as_ref().filter(|o| o.name == p.name && o.program == p.program && o.clef == p.clef && o.percussion == p.percussion && o.transpose == p.transpose)
+    p.ms.as_ref().filter(|o| o.name == p.name && o.program == p.program && o.clef == p.clef && o.percussion == p.percussion && o.transpose == p.transpose && o.tuning == p.tuning)
 }
 
 /// Groups of consecutive parts that share one MuseScore `<Part>` (a piano's two staves).
@@ -167,6 +200,8 @@ struct Marks {
     lyric_ext: Vec<(u8, u32)>,
     /// Transposition of the part: notes also carry the written spelling (`tpc2`).
     transpose: Option<Transpose>,
+    /// Tablature position of each pitch (ascending): string (MuseScore counts from 0 at the highest) and fret.
+    tab: Vec<Option<(u8, u8)>>,
 }
 
 /// Move a spanner's ends onto real event boundaries of its voice. Slurs need notes at both
@@ -208,6 +243,16 @@ fn compute_marks(score: &Score, part: &Part, voice: usize, mi: usize, evs: &[Eve
     let mut marks = vec![Marks::default(); evs.len()];
     for m in &mut marks {
         m.transpose = part.transpose;
+    }
+    if part.tuning.is_some() {
+        if let Some(pi) = score.parts.iter().position(|q| std::ptr::eq(q, part)) {
+            let positions = score.tab_positions(pi, voice);
+            for (i, e) in evs.iter().enumerate() {
+                if let Some(v) = positions.get(&(mi, e.start)) {
+                    marks[i].tab = v.iter().map(|f| f.map(|f| (f.string - 1, f.fret))).collect();
+                }
+            }
+        }
     }
     // Octave lines act on the whole staff, whatever voice they were written in.
     for sp in part.spanners.iter().filter(|s| s.kind.octaves() != 0) {
@@ -461,7 +506,7 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
             for x in e.extras.iter().filter(|x| x.place == ExtraPlace::Inside) {
                 let _ = writeln!(out, "{indent}  {}", x.xml.trim());
             }
-            for p in pitches {
+            for (pk, p) in pitches.iter().enumerate() {
                 let midi = p.midi();
                 // Under an octave line MuseScore stores the written pitch.
                 let written = midi - 12 * mk.oct;
@@ -491,7 +536,8 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
                     let _ = writeln!(out, "{indent}      </Spanner>");
                 }
                 let tpc2 = mk.transpose.map_or(String::new(), |t| format!("\n{indent}    <tpc2>{}</tpc2>", tpc(&t.to_written(*p))));
-                let _ = writeln!(out, "{indent}    <pitch>{written}</pitch>\n{indent}    <tpc>{}</tpc>{tpc2}\n{indent}    </Note>", tpc(p));
+                let fret = mk.tab.get(pk).copied().flatten().map_or(String::new(), |(string, fret)| format!("\n{indent}    <fret>{fret}</fret>\n{indent}    <string>{string}</string>"));
+                let _ = writeln!(out, "{indent}    <pitch>{written}</pitch>\n{indent}    <tpc>{}</tpc>{tpc2}{fret}\n{indent}    </Note>", tpc(p));
             }
             let _ = writeln!(out, "{indent}  </Chord>");
         }
@@ -499,7 +545,43 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
 }
 
 /// Write the score as a MuseScore 4 `.mscx` document.
+/// MuseScore shows a tablature as a second staff of the part: a copy of the notes with a tablature staff type.
+/// Returns the score with that twin after every part that has a tuning.
+fn with_tab_twins(score: &Score) -> Score {
+    let mut out = score.clone();
+    out.parts.clear();
+    for p in &score.parts {
+        out.parts.push(p.clone());
+        if p.tuning.is_some() && !p.percussion {
+            let mut twin = p.clone();
+            twin.name = format!("{} (2)", p.name);
+            twin.ms = None;
+            twin.tab_staff = true;
+            twin.spanners.clear();
+            for m in &mut twin.measures {
+                m.extras.clear();
+                for e in m.events.iter_mut().chain(m.voices.iter_mut().flatten()) {
+                    e.extras.clear();
+                    e.dynamic = None;
+                    e.articulations.clear();
+                    e.lyrics.clear();
+                    e.text = None;
+                }
+            }
+            out.parts.push(twin);
+        }
+    }
+    out
+}
+
 pub fn export_mscx(score: &Score) -> String {
+    let twins;
+    let score = if score.parts.iter().any(|p| p.tuning.is_some() && !p.percussion) {
+        twins = with_tab_twins(score);
+        &twins
+    } else {
+        score
+    };
     let n_measures = score.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
     let mut x = String::new();
     x.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<museScore version=\"4.60\">\n  <Score>\n");

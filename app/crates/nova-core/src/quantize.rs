@@ -302,7 +302,7 @@ pub fn detect_tuplet_beats_with(ticks: &[f64], septuplets: bool) -> HashMap<u32,
 /// [`SEPTUPLET_2`] en su primer pulso y con 71 en el segundo.
 pub fn detect_tuplet_beats_ext(ticks: &[f64], septuplets: bool, bar_beats: Option<u32>) -> HashMap<u32, u8> {
     let mut doubles: HashMap<u32, u8> = HashMap::new();
-    let mut ticks_owned: Vec<f64> = Vec::new();
+    let ticks_owned: Vec<f64>;
     let mut ticks = ticks;
     if let (true, Some(bpb)) = (septuplets, bar_beats.filter(|&b| b >= 2)) {
         const SIGMA: f64 = 0.012;
