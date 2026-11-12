@@ -295,6 +295,7 @@ struct StaffInfo {
     percussion: bool,
     clef_set: bool,
     group: u32,
+    transpose: Option<Transpose>,
     instrument_xml: Option<String>,
     staff_xml: Option<String>,
 }
@@ -427,7 +428,6 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
 
     // ---- parts and staves (one of our parts per staff)
     let mut staves: Vec<StaffInfo> = Vec::new();
-    let mut transposing = false;
     for (group, part) in score_el.children().filter(|c| c.has_tag_name("Part")).enumerate() {
         let inst = child(part, "Instrument");
         let mut name = inst.and_then(|i| text_of(i, "longName")).filter(|s| !s.is_empty()).or_else(|| text_of(part, "trackName")).filter(|s| !s.is_empty()).unwrap_or_else(|| "Instrumento".into());
@@ -445,11 +445,11 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(100)
             .clamp(0, 127) as u8;
-        if let Some(i) = inst {
-            if int_of(i, "transposeChromatic").unwrap_or(0) != 0 || int_of(i, "transposeDiatonic").unwrap_or(0) != 0 {
-                transposing = true;
-            }
-        }
+        // sounding = written + interval, as in MuseScore's <transposeDiatonic>/<transposeChromatic>
+        let transpose = inst.and_then(|i| {
+            let (d, c) = (int_of(i, "transposeDiatonic").unwrap_or(0), int_of(i, "transposeChromatic").unwrap_or(0));
+            (d != 0 || c != 0).then(|| Transpose { diatonic: d.clamp(-127, 127) as i8, chromatic: c.clamp(-127, 127) as i8 })
+        });
         let part_staves: Vec<Node> = part.children().filter(|c| c.has_tag_name("Staff")).collect();
         for (k, st) in part_staves.iter().enumerate() {
             let percussion = child(*st, "StaffType").and_then(|t| t.attribute("group")) == Some("percussion");
@@ -465,6 +465,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 percussion: percussion || perc_clef,
                 clef_set: clef_txt.is_some(),
                 group: group as u32,
+                transpose,
                 instrument_xml: if preserve { inst.map(src) } else { None },
                 staff_xml: if preserve {
                     // contents between <Staff ...> and </Staff>
@@ -749,11 +750,6 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                 for note in el.children().filter(|c| c.is_element() && c.has_tag_name("Note")) {
                                     let Some(midi) = int_of(note, "pitch") else { continue };
                                     let tpc = int_of(note, "tpc").map(|v| v as i32);
-                                    if let Some(t2) = int_of(note, "tpc2") {
-                                        if Some(t2 as i32) != tpc {
-                                            transposing = true;
-                                        }
-                                    }
                                     pitches.push(if staves[si].percussion { Pitch::from_midi(midi as i32, true) } else { spell(midi as i32, tpc) });
                                     tie |= note.children().any(|c| {
                                         c.is_element()
@@ -942,8 +938,10 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 program: info.program,
                 clef: info.clef,
                 percussion: info.percussion,
+                transpose: info.transpose,
             });
         }
+        part.transpose = info.transpose;
         score.parts.push(part);
     }
 
@@ -959,9 +957,6 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     }
     if dropped_voices > 0 {
         warnings.push("Se descartaron voces adicionales (máximo 4 por pentagrama).".into());
-    }
-    if transposing {
-        warnings.push("Hay instrumentos transpositores: las notas se muestran en altura real (de concierto).".into());
     }
     harmony_chords.sort_by_key(|c| (c.measure, c.tick));
     harmony_chords.dedup_by_key(|c| (c.measure, c.tick));

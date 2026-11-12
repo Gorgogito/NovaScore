@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Jump, Marker, Pitch, Score, SpannerKind, SpPos } from "./types";
+import type { Jump, Marker, Pitch, Score, SpannerKind, SpPos, Transpose } from "./types";
 
 export interface Entered {
   score: Score;
@@ -22,6 +22,8 @@ export interface PartUpdate {
   muted?: boolean;
   solo?: boolean;
   percussion?: boolean;
+  /** `null` clears the transposition. */
+  transpose?: Transpose | null;
 }
 export interface PedalEvent {
   part: number;
@@ -78,8 +80,8 @@ export const api = {
   removeSpanners: (part: number, voice: number, start: SpPos, end: SpPos) =>
     invoke<Score>("remove_spanners", { part, voice, startMeasure: start.measure, startTick: start.tick, endMeasure: end.measure, endTick: end.tick }),
 
-  addPart: (name: string, clef: "treble" | "bass", program: number, percussion: boolean) =>
-    invoke<Score>("add_part", { name, clef, program, percussion }),
+  addPart: (name: string, clef: "treble" | "bass", program: number, percussion: boolean, transpose?: Transpose) =>
+    invoke<Score>("add_part", { name, clef, program, percussion, transpose: transpose ?? null }),
   removePart: (part: number) => invoke<Score>("remove_part", { part }),
   updatePart: (part: number, update: PartUpdate) => invoke<Score>("update_part", { part, update }),
 

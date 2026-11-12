@@ -144,7 +144,10 @@ function applyVoiceOffsets(lanes: LLane[], percussion: boolean[]) {
 
 export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const nMeasures = Math.max(...score.parts.map((p) => p.measures.length));
-  const keyW = Math.abs(score.fifths) * 11 + (score.fifths ? 8 : 0);
+  // Transposing staves read their own key; the header is as wide as the widest one.
+  const partKey = (p: { shown_fifths?: number }) => p.shown_fifths ?? score.fifths;
+  const maxKey = Math.max(...score.parts.map((p) => Math.abs(partKey(p))));
+  const keyW = maxKey * 11 + (maxKey ? 8 : 0);
   const clefW = 42;
   const timeW = 30;
   const hasTime = (idx: number) => idx === 0 || (score.time_changes ?? []).some((c) => c.measure === idx);
@@ -191,7 +194,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
         const accs: LAccidental[] = [];
         ev.pitches.forEach((pitch, i) => {
           const idx = diatonic(pitch);
-          const cur = state.get(idx) ?? keyAlter(score.fifths, pitch.step);
+          const cur = state.get(idx) ?? keyAlter(partKey(p), pitch.step);
           if (cur !== pitch.alter) accs.push({ pitchIndex: i, alter: pitch.alter, col: 0 });
           state.set(idx, pitch.alter);
         });

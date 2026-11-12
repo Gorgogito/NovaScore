@@ -603,8 +603,7 @@ export function ScoreView(props: Props) {
     return <For each={segs}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.1} />}</For>;
   };
 
-  const keySig = (top: number, x: number) => {
-    const f = props.score.fifths;
+  const keySig = (top: number, x: number, f: number) => {
     const posList = f > 0 ? SHARP_POS : FLAT_POS;
     const shift = clef() === "bass" ? -2 : 0;
     return (
@@ -652,7 +651,7 @@ export function ScoreView(props: Props) {
                       <Show when={sys === props.layout.systems[0] || props.score.parts.length > 1}>
                         <text x={first.x + 4} y={top - 20} font-size="10" fill="var(--ink-dim)" font-family="system-ui" font-style="italic">{part.name}</text>
                       </Show>
-                      <Show when={!part.percussion}>{keySig(top, first.x + 40)}</Show>
+                      <Show when={!part.percussion}>{keySig(top, first.x + 40, part.shown_fifths ?? props.score.fifths)}</Show>
                       <For each={sys.measures}>
                         {(m) => {
                           const lanes = m.lanes.filter((l) => l.part === pi());

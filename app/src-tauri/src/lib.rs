@@ -189,10 +189,11 @@ fn remove_spanners(state: State<AppState>, part: usize, voice: usize, start_meas
 }
 
 #[tauri::command]
-fn add_part(state: State<AppState>, name: String, clef: Clef, program: u8, percussion: bool) -> Res {
+fn add_part(state: State<AppState>, name: String, clef: Clef, program: u8, percussion: bool, transpose: Option<nova_core::Transpose>) -> Res {
     let mut doc = lock(&state);
     doc.edit(|s| {
-        s.add_part(&name, clef, program, percussion);
+        let i = s.add_part(&name, clef, program, percussion);
+        s.parts[i].transpose = transpose;
         Ok(())
     })
     .map_err(|e| e.to_string())?;

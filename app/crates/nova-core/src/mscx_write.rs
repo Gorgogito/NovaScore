@@ -102,7 +102,10 @@ fn generated_instrument(p: &Part, name: &str) -> String {
     }
     let vol = if p.volume != 100 { format!("\n          <controller ctrl=\"7\" value=\"{}\"/>", p.volume) } else { String::new() };
     format!(
-        "<Instrument id=\"{id}\">\n        <longName>{n}</longName>\n        <shortName>{s}</shortName>\n        <trackName>{n}</trackName>\n        <minPitchP>0</minPitchP>\n        <maxPitchP>127</maxPitchP>\n        <minPitchA>0</minPitchA>\n        <maxPitchA>127</maxPitchA>\n        <Channel>\n          <program value=\"{prog}\"/>{vol}\n          <synti>Fluid</synti>\n          </Channel>\n        </Instrument>",
+        "<Instrument id=\"{id}\">\n        <longName>{n}</longName>\n        <shortName>{s}</shortName>\n        <trackName>{n}</trackName>\n        <minPitchP>0</minPitchP>\n        <maxPitchP>127</maxPitchP>\n        <minPitchA>0</minPitchA>\n        <maxPitchA>127</maxPitchA>{tr}\n        <Channel>\n          <program value=\"{prog}\"/>{vol}\n          <synti>Fluid</synti>\n          </Channel>\n        </Instrument>",
+        tr = p.transpose.map_or(String::new(), |t| format!("
+        <transposeDiatonic>{}</transposeDiatonic>
+        <transposeChromatic>{}</transposeChromatic>", t.diatonic, t.chromatic)),
         id = instrument_id(p.program),
         n = esc(name),
         s = esc(&short_name(name)),
@@ -122,7 +125,7 @@ fn generated_staff(p: &Part) -> String {
 
 /// True when the part still matches the MuseScore data it was imported with.
 fn origin_valid(p: &Part) -> Option<&MsOrigin> {
-    p.ms.as_ref().filter(|o| o.name == p.name && o.program == p.program && o.clef == p.clef && o.percussion == p.percussion)
+    p.ms.as_ref().filter(|o| o.name == p.name && o.program == p.program && o.clef == p.clef && o.percussion == p.percussion && o.transpose == p.transpose)
 }
 
 /// Groups of consecutive parts that share one MuseScore `<Part>` (a piano's two staves).
@@ -162,6 +165,8 @@ struct Marks {
     oct: i32,
     /// Melisma lengths in ticks past the end of this event, per verse.
     lyric_ext: Vec<(u8, u32)>,
+    /// Transposition of the part: notes also carry the written spelling (`tpc2`).
+    transpose: Option<Transpose>,
 }
 
 /// Move a spanner's ends onto real event boundaries of its voice. Slurs need notes at both
@@ -201,6 +206,9 @@ pub(crate) fn snap_spanner(score: &Score, part: &Part, sp: &Spanner) -> Option<(
 /// Markers for the events of one voice in one measure, plus end markers on the closing barline.
 fn compute_marks(score: &Score, part: &Part, voice: usize, mi: usize, evs: &[Event]) -> (Vec<Marks>, Vec<(SpannerKind, i32, i64)>) {
     let mut marks = vec![Marks::default(); evs.len()];
+    for m in &mut marks {
+        m.transpose = part.transpose;
+    }
     // Octave lines act on the whole staff, whatever voice they were written in.
     for sp in part.spanners.iter().filter(|s| s.kind.octaves() != 0) {
         for (i, e) in evs.iter().enumerate() {
@@ -482,7 +490,8 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
                     }
                     let _ = writeln!(out, "{indent}      </Spanner>");
                 }
-                let _ = writeln!(out, "{indent}    <pitch>{written}</pitch>\n{indent}    <tpc>{}</tpc>\n{indent}    </Note>", tpc(p));
+                let tpc2 = mk.transpose.map_or(String::new(), |t| format!("\n{indent}    <tpc2>{}</tpc2>", tpc(&t.to_written(*p))));
+                let _ = writeln!(out, "{indent}    <pitch>{written}</pitch>\n{indent}    <tpc>{}</tpc>{tpc2}\n{indent}    </Note>", tpc(p));
             }
             let _ = writeln!(out, "{indent}  </Chord>");
         }
@@ -609,7 +618,8 @@ pub fn export_mscx(score: &Score) -> String {
                     }
                     if mi == 0 {
                         if !part.percussion {
-                            let _ = writeln!(x, "          <KeySig>\n            <concertKey>{}</concertKey>\n            </KeySig>", score.fifths);
+                            let actual = part.transpose.map_or(String::new(), |t| format!("\n            <actualKey>{}</actualKey>", t.written_fifths(score.fifths)));
+                            let _ = writeln!(x, "          <KeySig>\n            <concertKey>{}</concertKey>{actual}\n            </KeySig>", score.fifths);
                         }
                         if pi == 0 {
                             let _ = writeln!(

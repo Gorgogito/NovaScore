@@ -110,9 +110,53 @@ export interface Part {
   muted: boolean;
   solo: boolean;
   percussion: boolean;
+  /** Transposing instrument: sounding = written + interval. Notes are stored at sounding pitch. */
+  transpose?: Transpose;
+  /** Set by `displayScore`: key signature this staff is drawn with (written key of a transposing instrument). */
+  shown_fifths?: number;
   spanners?: Spanner[];
   measures: Measure[];
 }
+
+export interface Transpose {
+  diatonic: number;
+  chromatic: number;
+}
+
+const SEMI = [0, 2, 4, 5, 7, 9, 11];
+const SPELL_SHARP: [number, number][] = [[0, 0], [0, 1], [1, 0], [1, 1], [2, 0], [3, 0], [3, 1], [4, 0], [4, 1], [5, 0], [5, 1], [6, 0]];
+const SPELL_FLAT: [number, number][] = [[0, 0], [1, -1], [1, 0], [2, -1], [2, 0], [3, 0], [4, -1], [4, 0], [5, -1], [5, 0], [6, -1], [6, 0]];
+
+/** Move a pitch by `sign` times the interval (mirror of `Transpose::shift` in nova-core). */
+const shiftPitch = (p: Pitch, t: Transpose, sign: number): Pitch => {
+  const total = p.octave * 7 + p.step + sign * t.diatonic;
+  const octave = Math.floor(total / 7);
+  const step = ((total % 7) + 7) % 7;
+  const target = pitchMidi(p) + sign * t.chromatic;
+  const alter = target - ((octave + 1) * 12 + SEMI[step]);
+  if (Math.abs(alter) > 2) {
+    const [st, al] = (alter < 0 ? SPELL_FLAT : SPELL_SHARP)[((target % 12) + 12) % 12];
+    return { step: st, alter: al, octave: Math.floor(target / 12) - 1 };
+  }
+  return { step, alter, octave };
+};
+
+/** Pitch as the player reads it, from the sounding one. */
+export const writtenPitch = (p: Pitch, t?: Transpose): Pitch => (t ? shiftPitch(p, t, -1) : p);
+/** Sounding pitch of a written one. */
+export const soundingPitch = (p: Pitch, t?: Transpose): Pitch => (t ? shiftPitch(p, t, 1) : p);
+
+/** Key signature a transposing instrument reads for a sounding major key. */
+export const writtenFifths = (fifths: number, t?: Transpose): number => {
+  if (!t) return fifths;
+  const BASE = [0, 2, 4, -1, 1, 3, 5];
+  const tonic: Pitch = { step: (((fifths * 4) % 7) + 7) % 7, alter: Math.floor((fifths + 1) / 7), octave: 4 };
+  const w = writtenPitch(tonic, t);
+  let out = BASE[w.step] + 7 * w.alter;
+  while (out > 7) out -= 12;
+  while (out < -7) out += 12;
+  return out;
+};
 
 export interface TimeSig {
   num: number;
@@ -186,18 +230,23 @@ export const ottavaShiftAt = (p: Part, measure: number, tick: number): number =>
  * where they sound. Editing keeps working on the real (sounding) score.
  */
 export const displayScore = (s: Score): Score => {
-  if (!s.parts.some((p) => (p.spanners ?? []).some((x) => ottavaOctaves(x.kind) !== 0))) return s;
+  const hasOttava = (p: Part) => (p.spanners ?? []).some((x) => ottavaOctaves(x.kind) !== 0);
+  if (!s.parts.some((p) => hasOttava(p) || p.transpose)) return s;
   return {
     ...s,
     parts: s.parts.map((p) => {
-      if (!(p.spanners ?? []).some((x) => ottavaOctaves(x.kind) !== 0)) return p;
+      if (!hasOttava(p) && !p.transpose) return p;
       const shifted = (evs: EventData[], mi: number): EventData[] =>
         evs.map((e) => {
           if (e.kind !== "note") return e;
           const k = ottavaShiftAt(p, mi, e.start);
-          return k ? { ...e, pitches: e.pitches.map((q) => ({ ...q, octave: q.octave - k })) } : e;
+          return { ...e, pitches: e.pitches.map((q) => { const w = writtenPitch(q, p.transpose); return k ? { ...w, octave: w.octave - k } : w; }) };
         });
-      return { ...p, measures: p.measures.map((m, mi) => ({ ...m, events: shifted(m.events, mi), voices: m.voices?.map((v) => shifted(v, mi)) })) };
+      return {
+        ...p,
+        shown_fifths: p.transpose ? writtenFifths(s.fifths, p.transpose) : undefined,
+        measures: p.measures.map((m, mi) => ({ ...m, events: shifted(m.events, mi), voices: m.voices?.map((v) => shifted(v, mi)) })),
+      };
     }),
   };
 };

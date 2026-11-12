@@ -46,6 +46,55 @@ impl Pitch {
     }
 }
 
+/// Interval between written and sounding pitch of a transposing instrument, with the MuseScore sign:
+/// sounding = written + interval (a B♭ clarinet is `diatonic -1, chromatic -2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transpose {
+    pub diatonic: i8,
+    pub chromatic: i8,
+}
+
+impl Transpose {
+    /// Move a pitch by `sign` times the interval, keeping the spelling consistent with the diatonic step.
+    fn shift(self, p: Pitch, sign: i32) -> Pitch {
+        const SEMI: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
+        let total = p.octave as i32 * 7 + p.step as i32 + sign * self.diatonic as i32;
+        let (octave, step) = (total.div_euclid(7), total.rem_euclid(7));
+        let target = p.midi() + sign * self.chromatic as i32;
+        let alter = target - ((octave + 1) * 12 + SEMI[step as usize]);
+        if alter.abs() > 2 {
+            return Pitch::from_midi(target, alter < 0);
+        }
+        Pitch { step: step as u8, alter: alter as i8, octave: octave as i8 }
+    }
+
+    /// Pitch as the player reads it, from the sounding one.
+    pub fn to_written(self, p: Pitch) -> Pitch {
+        self.shift(p, -1)
+    }
+
+    /// Sounding pitch of a written one.
+    pub fn to_sounding(self, p: Pitch) -> Pitch {
+        self.shift(p, 1)
+    }
+
+    /// Key signature (number of sharps, flats negative) the player reads for a sounding major key.
+    pub fn written_fifths(self, fifths: i8) -> i8 {
+        const BASE: [i32; 7] = [0, 2, 4, -1, 1, 3, 5];
+        let f = fifths as i32;
+        let tonic = Pitch { step: (f * 4).rem_euclid(7) as u8, alter: ((f + 1).div_euclid(7)) as i8, octave: 4 };
+        let w = self.to_written(tonic);
+        let mut out = BASE[w.step as usize] + 7 * w.alter as i32;
+        while out > 7 {
+            out -= 12;
+        }
+        while out < -7 {
+            out += 12;
+        }
+        out as i8
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Content {
@@ -461,6 +510,9 @@ pub struct Part {
     /// Where this part came from in a MuseScore file (instrument definition, staff settings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ms: Option<MsOrigin>,
+    /// Transposing instrument: notes are stored at sounding pitch and shown at written pitch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transpose: Option<Transpose>,
     /// Slurs and hairpins, anchored to positions in time so they stay put while notes change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spanners: Vec<Spanner>,
@@ -544,6 +596,8 @@ pub struct MsOrigin {
     pub program: u8,
     pub clef: Clef,
     pub percussion: bool,
+    #[serde(default)]
+    pub transpose: Option<Transpose>,
 }
 
 fn default_volume() -> u8 {
@@ -556,7 +610,7 @@ impl Part {
     }
 
     pub fn new(name: impl Into<String>, clef: Clef, program: u8, measures: Vec<Measure>) -> Part {
-        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, spanners: Vec::new(), measures }
+        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, spanners: Vec::new(), measures }
     }
 }
 
@@ -570,6 +624,13 @@ pub struct PartUpdate {
     pub muted: Option<bool>,
     pub solo: Option<bool>,
     pub percussion: Option<bool>,
+    /// `Some(None)` clears the transposition; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub transpose: Option<Option<Transpose>>,
+}
+
+fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Transpose>>, D::Error> {
+    Ok(Some(Option::<Transpose>::deserialize(d)?))
 }
 
 /// A time signature that starts at `measure` (0-based) and lasts until the next change.
@@ -1535,6 +1596,9 @@ impl Score {
         if let Some(v) = u.solo {
             p.solo = v;
         }
+        if let Some(t) = u.transpose {
+            p.transpose = t;
+        }
         Ok(())
     }
 
@@ -1762,6 +1826,36 @@ mod tests {
         let mut d = Document::new(score());
         assert!(d.edit(|s| s.put(0, 0, 0, 0, 7, c4())).is_err());
         assert!(!d.undo());
+    }
+
+    #[test]
+    fn written_pitch_and_key_of_transposing_instruments() {
+        let bb = Transpose { diatonic: -1, chromatic: -2 };
+        let c5 = Pitch { step: 0, alter: 0, octave: 5 };
+        assert_eq!(bb.to_written(c5), Pitch { step: 1, alter: 0, octave: 5 }); // concert C reads D
+        assert_eq!(bb.to_sounding(Pitch { step: 1, alter: 0, octave: 5 }), c5);
+        // concert B♭ reads C; concert E♭ reads F; concert F reads G
+        assert_eq!(bb.to_written(Pitch { step: 6, alter: -1, octave: 4 }), Pitch { step: 0, alter: 0, octave: 5 });
+        let eb_alto = Transpose { diatonic: -5, chromatic: -9 };
+        assert_eq!(eb_alto.to_written(c5), Pitch { step: 5, alter: 0, octave: 5 }); // concert C reads A
+        let horn = Transpose { diatonic: -4, chromatic: -7 };
+        assert_eq!(horn.to_written(c5), Pitch { step: 4, alter: 0, octave: 5 }); // concert C reads G
+        for t in [bb, eb_alto, horn, Transpose { diatonic: 7, chromatic: 12 }, Transpose { diatonic: -7, chromatic: -12 }] {
+            for midi in 40..90 {
+                for sharps in [true, false] {
+                    let p = Pitch::from_midi(midi, sharps);
+                    assert_eq!(t.to_sounding(t.to_written(p)).midi(), midi);
+                    assert_eq!(t.to_written(p).midi(), midi - t.chromatic as i32);
+                }
+            }
+        }
+        // concert C major reads D major (2 sharps) for B♭ clarinet; concert B♭ major (-2) reads C major
+        assert_eq!(bb.written_fifths(0), 2);
+        assert_eq!(bb.written_fifths(-2), 0);
+        assert_eq!(horn.written_fifths(0), 1);
+        assert_eq!(eb_alto.written_fifths(0), 3);
+        assert_eq!(eb_alto.written_fifths(5), -4); // B major reads G♯ major (8 sharps) -> A♭ major
+        assert_eq!(Transpose { diatonic: 7, chromatic: 12 }.written_fifths(3), 3);
     }
 
     #[test]

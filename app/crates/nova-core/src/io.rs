@@ -607,10 +607,13 @@ pub fn export_musicxml(score: &Score) -> String {
             }
             if mi == 0 {
                 let (sign, line) = if part.clef == Clef::Treble { ("G", 2) } else { ("F", 4) };
+                // A transposing instrument reads its own key and writes <transpose>; pitches below are written ones.
+                let fifths = part.transpose.map_or(score.fifths, |t| t.written_fifths(score.fifths));
+                let transpose_xml = part.transpose.map_or(String::new(), |t| format!("<transpose><diatonic>{}</diatonic><chromatic>{}</chromatic></transpose>", t.diatonic, t.chromatic));
                 let _ = writeln!(
                     x,
-                    "      <attributes><divisions>{}</divisions><key><fifths>{}</fifths></key><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>{}</sign><line>{}</line></clef></attributes>",
-                    PPQ, score.fifths, score.time.num, score.time.den, sign, line
+                    "      <attributes><divisions>{}</divisions><key><fifths>{}</fifths></key><time><beats>{}</beats><beat-type>{}</beat-type></time><clef><sign>{}</sign><line>{}</line></clef>{}</attributes>",
+                    PPQ, fifths, score.time.num, score.time.den, sign, line, transpose_xml
                 );
                 if pi == 0 {
                     let _ = writeln!(
@@ -702,6 +705,7 @@ pub fn export_musicxml(score: &Score) -> String {
                     Content::Note { pitches, tie } => {
                         let (base, dot) = base_and_dots(e.notated_ticks());
                         for (k, p) in pitches.iter().enumerate() {
+                            let p = &part.transpose.map_or(*p, |t| t.to_written(*p));
                             let tie_stop = matches!(prev.map(|v| &v.content), Some(Content::Note { pitches: pp, tie: true }) if pp.iter().any(|q| q.midi() == p.midi()));
                             let tie_start = *tie && matches!(next.map(|v| &v.content), Some(Content::Note { pitches: np, .. }) if np.iter().any(|q| q.midi() == p.midi()));
                             let mut s = String::from("      <note>");
@@ -998,6 +1002,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     // (part index, staff) -> measures of raw events and clef
     // (name, program, clef, voices -> measures -> events)
     let mut staves: Vec<(String, u8, Clef, bool, Vec<Vec<Vec<Raw>>>)> = Vec::new();
+    let mut staff_tr: std::collections::HashMap<usize, Transpose> = Default::default();
+    let mut key_read = false; // the score key comes from the first part
     let mut perc_staves: std::collections::BTreeSet<usize> = Default::default();
     // Slurs and hairpins per staff: (voice, kind, start, end).
     let mut staff_sp: Vec<Vec<(usize, SpannerKind, SpPos, SpPos, u8)>> = Vec::new();
@@ -1029,6 +1035,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut slur_open: std::collections::HashMap<(u32, usize, String), (usize, i64)> = Default::default();
         let mut wedge_open: std::collections::HashMap<(u32, String), (SpannerKind, usize, (usize, i64))> = Default::default();
         let mut clefs: std::collections::HashMap<u32, Clef> = Default::default();
+        // <transpose> of this part: its notes are written pitches and are stored as sounding ones.
+        let mut part_tr: Option<Transpose> = None;
         let first_staff_idx = staves.len();
         let mut staff_index: std::collections::HashMap<u32, usize> = Default::default();
         let mut mcount = 0usize;
@@ -1045,10 +1053,18 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         if let Some(d) = num_of(el, "divisions") {
                             divisions = d.max(1) as f64;
                         }
+                        if let Some(t) = el.children().find(|c| c.has_tag_name("transpose")) {
+                            let oct = num_of(t, "octave-change").unwrap_or(0);
+                            let (d, c) = (num_of(t, "diatonic").unwrap_or(0) + 7 * oct, num_of(t, "chromatic").unwrap_or(0) + 12 * oct);
+                            part_tr = (d != 0 || c != 0).then(|| Transpose { diatonic: d.clamp(-127, 127) as i8, chromatic: c.clamp(-127, 127) as i8 });
+                        }
                         if let Some(k) = el.children().find(|c| c.has_tag_name("key")) {
-                            if mi == 0 && staves.len() == first_staff_idx {
+                            if mi == 0 && staves.len() == first_staff_idx && !key_read {
                                 if let Some(f) = num_of(k, "fifths") {
-                                    score.fifths = f.clamp(-7, 7) as i8;
+                                    key_read = true;
+                                    let f = f.clamp(-7, 7) as i8;
+                                    // the file gives the written key; the score keeps the concert one
+                                    score.fifths = part_tr.and_then(|t| (-7..=7).find(|&c| t.written_fifths(c) == f)).unwrap_or(f);
                                 }
                             }
                         }
@@ -1335,6 +1351,9 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                             let octave = num_of(p, "octave")? as i8;
                             Some(Pitch { step, alter, octave })
                         });
+                        if let Some(t) = part_tr {
+                            pitch = pitch.map(|p| t.to_sounding(p));
+                        }
                         if pitch.is_none() && el.children().any(|c| c.has_tag_name("unpitched")) {
                             let inst = el.children().find(|c| c.has_tag_name("instrument")).and_then(|c| c.attribute("id"));
                             if let Some(midi) = inst.and_then(|i| drum_map.get(i)) {
@@ -1423,6 +1442,11 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                 staves[*si].2 = *c;
             }
         }
+        for si in first_staff_idx..staves.len() {
+            if let Some(t) = part_tr {
+                staff_tr.insert(si, t);
+            }
+        }
         max_measures = max_measures.max(mcount);
     }
     if dropped > 0 {
@@ -1494,6 +1518,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             }
         }
         let mut part = Part::new(name, clef, program, out);
+        part.transpose = staff_tr.get(&si).copied();
         part.spanners = staff_sp[si]
             .iter()
             .filter_map(|&(vi, kind, start, mut end, endings)| {
@@ -1981,6 +2006,29 @@ mod tests {
         let back = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap();
         assert_eq!(back.score.parts[0].measures[0].events[0].lyrics, s.parts[0].measures[0].events[0].lyrics);
         assert_eq!(back.score.parts[0].measures[0].events[1].lyrics, s.parts[0].measures[0].events[1].lyrics);
+    }
+
+    #[test]
+    fn transposing_instruments_store_sounding_pitch_and_write_written_pitch() {
+        let r = import_musicxml(include_str!("../../../../samples/transpositor.musicxml")).unwrap();
+        let s = &r.score;
+        let bb = Transpose { diatonic: -1, chromatic: -2 };
+        assert_eq!(s.parts[0].transpose, Some(bb));
+        assert_eq!(s.parts[1].transpose, None);
+        // the file reads D major with written D E F# G; the score keeps the concert key C major and C D E F
+        assert_eq!(s.fifths, 0);
+        let midis: Vec<i32> = s.parts[0].measures[0].events.iter().filter_map(|e| if let Content::Note { pitches, .. } = &e.content { Some(pitches[0].midi()) } else { None }).collect();
+        assert_eq!(midis, vec![72, 74, 76, 77]);
+        // the piano, written in the same file as concert pitch, is not shifted
+        assert!(matches!(&s.parts[1].measures[0].events[0].content, Content::Note { pitches, .. } if pitches[0].midi() == 72));
+        let xml = export_musicxml(s);
+        assert!(xml.contains("<transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose>"));
+        let back = import_musicxml(&xml).unwrap().score;
+        assert_eq!(back.parts[0].measures, s.parts[0].measures);
+        assert_eq!((back.fifths, back.parts[0].transpose), (0, Some(bb)));
+        let ms = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(s)).unwrap().score;
+        assert_eq!(ms.parts[0].transpose, Some(bb));
+        assert_eq!(ms.parts[0].measures[0].events.iter().map(|e| e.content.clone()).collect::<Vec<_>>(), s.parts[0].measures[0].events.iter().map(|e| e.content.clone()).collect::<Vec<_>>());
     }
 
     #[test]

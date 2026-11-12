@@ -5,6 +5,8 @@ export interface Instrument {
   clef: "treble" | "bass";
   /** Drum staff (MIDI channel 10). */
   percussion?: boolean;
+  /** Transposing instrument: sounding = written + interval (MuseScore's sign). */
+  transpose?: { diatonic: number; chromatic: number };
 }
 
 export const INSTRUMENTS: Instrument[] = [
@@ -17,19 +19,24 @@ export const INSTRUMENTS: Instrument[] = [
   { name: "Violín", program: 40, clef: "treble" },
   { name: "Viola", program: 41, clef: "treble" },
   { name: "Violonchelo", program: 42, clef: "bass" },
-  { name: "Contrabajo", program: 43, clef: "bass" },
+  { name: "Contrabajo", program: 43, clef: "bass", transpose: { diatonic: -7, chromatic: -12 } },
   { name: "Arpa", program: 46, clef: "treble" },
   { name: "Cuerdas (conjunto)", program: 48, clef: "treble" },
   { name: "Coro", program: 52, clef: "treble" },
-  { name: "Trompeta", program: 56, clef: "treble" },
+  { name: "Trompeta en Si♭", program: 56, clef: "treble", transpose: { diatonic: -1, chromatic: -2 } },
   { name: "Trombón", program: 57, clef: "bass" },
   { name: "Tuba", program: 58, clef: "bass" },
-  { name: "Trompa", program: 60, clef: "treble" },
-  { name: "Saxo alto", program: 65, clef: "treble" },
-  { name: "Saxo tenor", program: 66, clef: "treble" },
+  { name: "Trompa en Fa", program: 60, clef: "treble", transpose: { diatonic: -4, chromatic: -7 } },
+  { name: "Saxo soprano", program: 64, clef: "treble", transpose: { diatonic: -1, chromatic: -2 } },
+  { name: "Saxo alto", program: 65, clef: "treble", transpose: { diatonic: -5, chromatic: -9 } },
+  { name: "Saxo tenor", program: 66, clef: "treble", transpose: { diatonic: -8, chromatic: -14 } },
+  { name: "Saxo barítono", program: 67, clef: "treble", transpose: { diatonic: -12, chromatic: -21 } },
   { name: "Oboe", program: 68, clef: "treble" },
   { name: "Fagot", program: 70, clef: "bass" },
-  { name: "Clarinete", program: 71, clef: "treble" },
+  { name: "Corno inglés", program: 69, clef: "treble", transpose: { diatonic: -4, chromatic: -7 } },
+  { name: "Clarinete en Si♭", program: 71, clef: "treble", transpose: { diatonic: -1, chromatic: -2 } },
+  { name: "Clarinete en La", program: 71, clef: "treble", transpose: { diatonic: -2, chromatic: -3 } },
+  { name: "Flautín", program: 72, clef: "treble", transpose: { diatonic: 7, chromatic: 12 } },
   { name: "Flauta", program: 73, clef: "treble" },
   { name: "Flauta dulce", program: 74, clef: "treble" },
   { name: "Marimba", program: 12, clef: "treble" },

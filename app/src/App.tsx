@@ -8,7 +8,7 @@ import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
 import { ScoreView } from "./ScoreView";
-import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, SpannerKind, timeAt, voiceEvents } from "./types";
+import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, timeAt, voiceEvents, writtenFifths } from "./types";
 import "./styles.css";
 
 const BASE: Record<number, number> = { 3: 120, 4: 240, 5: 480, 6: 960, 7: 1920 };
@@ -238,13 +238,16 @@ export default function App() {
   };
 
   // ---- note entry --------------------------------------------------------
+  /** Keys and clicks give written pitches; a transposing instrument stores the sounding one. */
+  const toSounding = (part: number, p: Pitch): Pitch => soundingPitch(p, score()!.parts[part].transpose);
+  const keyFifths = (part: number) => writtenFifths(score()!.fifths, score()!.parts[part].transpose);
   const pitchFor = (step: number, alterOverride: number | null): Pitch => {
-    const alter = alterOverride ?? keyAlter(score()!.fifths, step);
+    const alter = alterOverride ?? keyAlter(keyFifths(cursor().part), step);
     let best: Pitch = { step, alter, octave: 4 };
     let bestD = Infinity;
     for (let o = 0; o <= 8; o++) {
       const p = { step, alter, octave: o };
-      const d = Math.abs(pitchMidi(p) - lastMidi());
+      const d = Math.abs(pitchMidi(toSounding(cursor().part, p)) - lastMidi());
       if (d < bestD) {
         bestD = d;
         best = p;
@@ -339,8 +342,9 @@ export default function App() {
     await run(api.removeSpanners(r.part, r.voice, { measure: r.from.m, tick: r.from.start }, end));
   };
 
-  const enter = async (p: Pitch) => {
+  const enter = async (written: Pitch) => {
     const c = cursor();
+    const p = toSounding(c.part, written);
     try {
       const r = await api.enterNote(c.part, c.voice, c.m, c.start, ticks(), p);
       setScore(r.score);
@@ -370,10 +374,10 @@ export default function App() {
     const ev = voiceEvents(score()!.parts[t.part].measures[t.m], t.voice)?.find((e) => e.start === t.start);
     if (ev?.kind !== "note") return;
     const top = Math.max(...ev.pitches.map(pitchMidi));
-    const alter = pendingAlter() ?? keyAlter(score()!.fifths, step);
+    const alter = pendingAlter() ?? keyAlter(keyFifths(t.part), step);
     let p: Pitch | null = null;
     for (let o = 0; o <= 8 && !p; o++) {
-      const cand = { step, alter, octave: o };
+      const cand = toSounding(t.part, { step, alter, octave: o });
       if (pitchMidi(cand) > top) p = cand;
     }
     if (!p) return;
@@ -384,10 +388,13 @@ export default function App() {
   };
 
   const [newInstrument, setNewInstrument] = createSignal(6);
-  const instrumentIndex = (program: number, clef: string, percussion: boolean) => {
+  const instrumentIndex = (program: number, clef: string, percussion: boolean, tr?: { diatonic: number; chromatic: number }) => {
     if (percussion) return INSTRUMENTS.findIndex((i) => i.percussion);
-    const exact = INSTRUMENTS.findIndex((i) => !i.percussion && i.program === program && i.clef === clef);
-    return exact >= 0 ? exact : INSTRUMENTS.findIndex((i) => !i.percussion && i.program === program);
+    const sameTr = (i: (typeof INSTRUMENTS)[number]) => (i.transpose?.chromatic ?? 0) === (tr?.chromatic ?? 0) && (i.transpose?.diatonic ?? 0) === (tr?.diatonic ?? 0);
+    const exact = INSTRUMENTS.findIndex((i) => !i.percussion && i.program === program && i.clef === clef && sameTr(i));
+    if (exact >= 0) return exact;
+    const sameProgram = INSTRUMENTS.findIndex((i) => !i.percussion && i.program === program && i.clef === clef);
+    return sameProgram >= 0 ? sameProgram : INSTRUMENTS.findIndex((i) => !i.percussion && i.program === program);
   };
   const selectPart = (part: number) => {
     const c = cursor();
@@ -397,7 +404,7 @@ export default function App() {
   };
   const addInstrument = async () => {
     const ins = INSTRUMENTS[newInstrument()];
-    if (await run(api.addPart(ins.name, ins.clef, ins.program, ins.percussion ?? false))) selectPart(score()!.parts.length - 1);
+    if (await run(api.addPart(ins.name, ins.clef, ins.program, ins.percussion ?? false, ins.transpose))) selectPart(score()!.parts.length - 1);
   };
 
   /** Switch the active voice (1-4), keeping the cursor on the same beat when possible. */
@@ -466,7 +473,7 @@ export default function App() {
       const idx = bottom + pos;
       const step = ((idx % 7) + 7) % 7;
       // A click is a written position: under an octave line the note sounds shifted.
-      const p: Pitch = { step, alter: pendingAlter() ?? keyAlter(s.fifths, step), octave: Math.floor(idx / 7) + ottavaShiftAt(s.parts[part], m, start) };
+      const p: Pitch = { step, alter: pendingAlter() ?? keyAlter(keyFifths(part), step), octave: Math.floor(idx / 7) + ottavaShiftAt(s.parts[part], m, start) };
       await enter(p);
     }
   };
@@ -814,11 +821,11 @@ export default function App() {
                     <button title="Quitar instrumento" disabled={score()!.parts.length < 2} onClick={(e) => { e.stopPropagation(); run(api.removePart(i())); }}>✕</button>
                   </div>
                   <select
-                    value={instrumentIndex(p.program, p.clef, p.percussion)}
+                    value={instrumentIndex(p.program, p.clef, p.percussion, p.transpose)}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => { const ins = INSTRUMENTS[Number(e.currentTarget.value)]; if (ins) run(api.updatePart(i(), { program: ins.program, clef: ins.clef, percussion: ins.percussion ?? false })); }}
+                    onChange={(e) => { const ins = INSTRUMENTS[Number(e.currentTarget.value)]; if (ins) run(api.updatePart(i(), { program: ins.program, clef: ins.clef, percussion: ins.percussion ?? false, transpose: ins.transpose ?? null })); }}
                   >
-                    <Show when={instrumentIndex(p.program, p.clef, p.percussion) < 0}><option value="-1">Programa GM {p.program + 1}</option></Show>
+                    <Show when={instrumentIndex(p.program, p.clef, p.percussion, p.transpose) < 0}><option value="-1">Programa GM {p.program + 1}</option></Show>
                     <For each={INSTRUMENTS}>{(ins, k) => <option value={k()}>{ins.name}</option>}</For>
                   </select>
                   <div class="inst-mix" onClick={(e) => e.stopPropagation()}>
