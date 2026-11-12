@@ -83,6 +83,34 @@ pub struct Event {
     pub dynamic: Option<Dynamic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub articulations: Vec<Artic>,
+    /// Lyric syllables sung on this event (one per verse).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lyrics: Vec<Lyric>,
+}
+
+/// How a lyric syllable joins the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Syllabic {
+    /// A whole word.
+    #[default]
+    Single,
+    /// First syllable of a word (a hyphen follows).
+    Begin,
+    /// Inner syllable (hyphens on both sides).
+    Middle,
+    /// Last syllable of a word.
+    End,
+}
+
+/// A lyric syllable. `verse` is 0-based.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lyric {
+    #[serde(default)]
+    pub verse: u8,
+    pub text: String,
+    #[serde(default)]
+    pub syllabic: Syllabic,
 }
 
 /// Dynamic markings, with the MIDI velocity MuseScore uses for them.
@@ -294,7 +322,7 @@ pub fn tuplet_notated(ticks: u32, actual: u8, normal: u8) -> Option<u32> {
 
 impl Event {
     pub fn new(start: u32, ticks: u32, content: Content) -> Event {
-        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new() }
+        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new() }
     }
 
     /// Written (notated) duration: the sounding duration scaled back by the tuplet ratio.
@@ -617,7 +645,7 @@ fn tuplet_rests(from: u32, to: u32, t: Tuplet) -> Result<Vec<Event>, EditError> 
     let mut off = o0;
     for piece in split_standard(o1 - o0) {
         let (a, b) = (t.tick_at(off), t.tick_at(off + piece));
-        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new() });
+        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new() });
         off += piece;
     }
     Ok(out)
@@ -831,7 +859,7 @@ impl Score {
         }
         let mut next: Vec<Event> = events.iter().filter(|e| e.tuplet != Some(t) || e.start + e.ticks <= lo || e.start >= hi).cloned().collect();
         next.extend(tuplet_rests(lo, start, t)?);
-        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new() });
+        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new() });
         next.extend(tuplet_rests(end, hi, t)?);
         next.sort_by_key(|e| e.start);
         *events = next;
@@ -878,7 +906,7 @@ impl Score {
         let each = span / normal as u32; // written value of one slot
         let t = Tuplet { actual, normal, start };
         let slots: Vec<Event> = (0..actual as u32)
-            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() } })
+            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() } })
             .collect();
         events.splice(idx..=idx, slots);
         Ok(())
@@ -912,6 +940,7 @@ impl Score {
         events[idx].content = Content::Rest;
         events[idx].extras.retain(|x| matches!(x.place, ExtraPlace::Before | ExtraPlace::After));
         events[idx].articulations.clear();
+        events[idx].lyrics.clear();
         // Merge adjacent plain rests back into standard values (tuplet events keep their slots).
         let mut merged: Vec<Event> = Vec::new();
         // A run of merged rests keeps the dynamic and markup of its first event.
@@ -1104,6 +1133,7 @@ impl Score {
             extras: Vec::new(),
             dynamic: None,
             articulations: Vec::new(),
+            lyrics: Vec::new(),
         };
         let mut new_events: Vec<Event> = Vec::new();
         // pieces of at most `max_n` slots; a note keeps its tie on the last piece only
@@ -1166,6 +1196,22 @@ impl Score {
         let events = self.voice_events_mut(part, voice, m)?;
         let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
         e.dynamic = if e.dynamic == d { None } else { d };
+        Ok(())
+    }
+
+    /// Set the syllable of a verse on a note (an empty text removes it).
+    pub fn set_lyric(&mut self, part: usize, voice: usize, m: usize, start: u32, verse: u8, text: &str, syllabic: Syllabic) -> Result<(), EditError> {
+        let events = self.voice_events_mut(part, voice, m)?;
+        let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
+        if !matches!(e.content, Content::Note { .. }) {
+            return Err(EditError::OutOfRange);
+        }
+        e.lyrics.retain(|l| l.verse != verse);
+        let text = text.trim();
+        if !text.is_empty() {
+            e.lyrics.push(Lyric { verse, text: text.to_string(), syllabic });
+            e.lyrics.sort_by_key(|l| l.verse);
+        }
         Ok(())
     }
 
@@ -2006,6 +2052,24 @@ mod tests {
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Score>(&j).unwrap().parts[0].spanners, s.parts[0].spanners);
         assert!(!serde_json::to_string(&score()).unwrap().contains("spanners"));
+    }
+
+    #[test]
+    fn lyrics_are_set_replaced_and_removed() {
+        let mut s = score();
+        s.put_note(0, 0, 0, 0, 480, vec![p(0, 5)]).unwrap();
+        s.put_note(0, 0, 0, 480, 480, vec![p(1, 5)]).unwrap();
+        s.set_lyric(0, 0, 0, 0, 0, " la ", Syllabic::Begin).unwrap();
+        s.set_lyric(0, 0, 0, 0, 0, "lo", Syllabic::Single).unwrap(); // replaces the verse
+        s.set_lyric(0, 0, 0, 0, 1, "li", Syllabic::Single).unwrap();
+        let l = &s.parts[0].measures[0].events[0].lyrics;
+        assert_eq!(l.iter().map(|x| (x.verse, x.text.as_str())).collect::<Vec<_>>(), vec![(0, "lo"), (1, "li")]);
+        s.set_lyric(0, 0, 0, 0, 0, "", Syllabic::Single).unwrap(); // empty removes
+        assert_eq!(s.parts[0].measures[0].events[0].lyrics.len(), 1);
+        assert!(s.set_lyric(0, 0, 0, 100, 0, "x", Syllabic::Single).is_err());
+        s.delete_event(0, 0, 0, 0).unwrap();
+        assert!(s.parts[0].measures[0].events[0].lyrics.is_empty());
+        assert!(s.set_lyric(0, 0, 0, 0, 0, "x", Syllabic::Single).is_err(), "rests carry no lyrics");
     }
 
     #[test]

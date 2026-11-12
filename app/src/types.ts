@@ -16,7 +16,8 @@ export interface Tuplet {
 export const DYNAMICS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "fp", "sf", "sfz", "rfz"] as const;
 export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato" | "mordent" | "shorttrill" | "turn" | "invertedturn";
 
-export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[] } & (
+export type Lyric = { verse: number; text: string; syllabic: "single" | "begin" | "middle" | "end" };
+export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[] } & (
   | { kind: "note"; pitches: Pitch[]; tie: boolean }
   | { kind: "rest" }
 );

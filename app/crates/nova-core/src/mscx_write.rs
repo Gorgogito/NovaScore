@@ -396,6 +396,27 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
                 let tag = if a.is_ornament() { "Ornament" } else { "Articulation" };
                 let _ = writeln!(out, "{indent}  <{tag}>\n{indent}    <subtype>{}</subtype>\n{indent}    </{tag}>", artic_subtype(*a));
             }
+            for l in &e.lyrics {
+                let _ = write!(out, "{indent}  <Lyrics>
+");
+                if l.verse > 0 {
+                    let _ = writeln!(out, "{indent}    <no>{}</no>", l.verse);
+                }
+                match l.syllabic {
+                    Syllabic::Single => {}
+                    Syllabic::Begin => {
+                        let _ = writeln!(out, "{indent}    <syllabic>begin</syllabic>");
+                    }
+                    Syllabic::Middle => {
+                        let _ = writeln!(out, "{indent}    <syllabic>middle</syllabic>");
+                    }
+                    Syllabic::End => {
+                        let _ = writeln!(out, "{indent}    <syllabic>end</syllabic>");
+                    }
+                }
+                let _ = writeln!(out, "{indent}    <text>{}</text>
+{indent}    </Lyrics>", l.text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+            }
             for &loc in &mk.slur_end {
                 write_slur_marker(out, &format!("{indent}  "), false, loc);
             }
@@ -743,13 +764,13 @@ mod tests {
         let ev = &s.parts[0].measures[0].events;
         assert_eq!(ev[0].dynamic, Some(Dynamic::Mf));
         assert_eq!(ev[0].articulations, vec![Artic::Staccato]);
-        assert!(ev[0].extras.iter().any(|x| x.place == ExtraPlace::Inside && x.xml.contains("Lyrics")));
+        assert_eq!(ev[0].lyrics, vec![Lyric { verse: 0, text: "la".into(), syllabic: Syllabic::Single }]);
         assert!(ev[0].extras.iter().any(|x| x.place == ExtraPlace::Note(72) && x.xml.contains("Fingering")));
         assert!(ev[1].extras.iter().all(|x| !x.xml.contains("Slur")), "slurs become real spanners, not copied markup");
         assert_eq!(s.parts[0].spanners, vec![Spanner { kind: SpannerKind::Slur, voice: 0, start: SpPos { measure: 0, tick: 0 }, end: SpPos { measure: 0, tick: 960 }, endings: 0 }]);
         assert!(ev[1].extras.iter().any(|x| x.place == ExtraPlace::After && x.xml.contains("Fermata")));
         assert!(s.parts[0].measures[0].start_repeat && s.parts[0].measures[0].extras.is_empty()); // <startRepeat/> is native now
-        assert!(r.warnings.iter().any(|w| w.contains("Se conservan") && w.contains("letra")), "{:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.contains("Se conservan") && w.contains("calderones")), "{:?}", r.warnings);
         assert!(!r.warnings.iter().any(|w| w.contains("dinámicas") || w.contains("articulaciones")), "{:?}", r.warnings);
         assert!(!r.warnings.iter().any(|w| w.contains("ligaduras de expresión")), "{:?}", r.warnings);
 
@@ -899,7 +920,7 @@ mod tests {
         let r = import_mscx(&v2).unwrap();
         assert!(r.score.parts[0].measures[0].events.iter().all(|e| e.extras.is_empty()));
         assert!(r.score.parts[0].ms.is_none() && r.score.ms_style.is_none());
-        assert!(r.warnings.iter().any(|w| w.contains("Se perderán") && w.contains("letra")), "{:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.contains("Se perderán") && w.contains("calderones")), "{:?}", r.warnings);
         // dynamics and articulations are understood in every version
         assert_eq!(r.score.parts[0].measures[0].events[0].dynamic, Some(Dynamic::Mf));
         assert_eq!(r.score.parts[0].measures[0].events[0].articulations, vec![Artic::Staccato]);

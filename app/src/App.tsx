@@ -88,6 +88,54 @@ export default function App() {
     }
   };
 
+  /** Entrada de letra: escribe una sílaba por nota; Espacio avanza, «-» avanza uniendo con guion, Retroceso vuelve atrás. */
+  const [lyricEdit, setLyricEdit] = createSignal<{ verse: number; text: string } | null>(null);
+  const noteStarts = () => {
+    const s = score();
+    if (!s) return [];
+    const c = cursor();
+    return positions().filter((p) => voiceEvents(s.parts[c.part].measures[p.m], c.voice)?.find((e) => e.start === p.start)?.kind === "note");
+  };
+  const lyricOf = (m: number, start: number, verse: number) =>
+    voiceEvents(score()!.parts[cursor().part].measures[m], cursor().voice)?.find((e) => e.start === start)?.lyrics?.find((y) => y.verse === verse);
+  const startLyrics = (verse = 0) => {
+    const notes = noteStarts();
+    if (!notes.length) { setStatus("No hay notas para poner letra."); return; }
+    const c = cursor();
+    const here = notes.find((p) => p.m === c.m && p.start === c.start) ?? notes.find((p) => p.m > c.m || (p.m === c.m && p.start > c.start)) ?? notes[0];
+    setCursor({ ...c, m: here.m, start: here.start });
+    setLyricEdit({ verse, text: lyricOf(here.m, here.start, verse)?.text ?? "" });
+    setStatus("Letra: escribe la sílaba; Espacio = siguiente nota, «-» = sílaba con guion, Retroceso (vacío) = nota anterior, Esc = terminar.");
+  };
+  const lyricCommit = async (text: string, hyphen: boolean) => {
+    const ed = lyricEdit();
+    if (!ed) return;
+    const c = cursor();
+    const notes = noteStarts();
+    const i = notes.findIndex((p) => p.m === c.m && p.start === c.start);
+    const prev = i > 0 ? lyricOf(notes[i - 1].m, notes[i - 1].start, ed.verse) : undefined;
+    const cont = prev?.syllabic === "begin" || prev?.syllabic === "middle";
+    const syl = hyphen ? (cont ? "middle" : "begin") : cont ? "end" : "single";
+    const t = text.trim();
+    if (t || lyricOf(c.m, c.start, ed.verse)) {
+      if (!(await run(api.setLyric(c.part, c.voice, c.m, c.start, ed.verse, t, syl)))) return;
+    }
+    const next = notes[i + 1];
+    if (!next) { setLyricEdit(null); setStatus("Letra: fin de las notas."); return; }
+    setCursor({ ...c, m: next.m, start: next.start });
+    setLyricEdit({ verse: ed.verse, text: lyricOf(next.m, next.start, ed.verse)?.text ?? "" });
+  };
+  const lyricBack = () => {
+    const ed = lyricEdit();
+    const c = cursor();
+    const notes = noteStarts();
+    const i = notes.findIndex((p) => p.m === c.m && p.start === c.start);
+    if (!ed || i <= 0) return;
+    const p = notes[i - 1];
+    setCursor({ ...c, m: p.m, start: p.start });
+    setLyricEdit({ verse: ed.verse, text: lyricOf(p.m, p.start, ed.verse)?.text ?? "" });
+  };
+
   const run = async (p: Promise<Score>, markDirty = true) => {
     try {
       apply(await p, markDirty);
@@ -539,6 +587,7 @@ export default function App() {
     else if (k === "arrowup") await transpose(1);
     else if (k === "arrowdown") await transpose(-1);
     else if (k === "k") openChordEditor(cursor().m, cursor().start);
+    else if (k === "l") { e.preventDefault(); startLyrics(); }
     else if (k === "delete") await run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start));
     else if (k === "backspace") {
       await run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start));
@@ -750,6 +799,31 @@ export default function App() {
         <span>Duración: {ticks()} ticks</span>
         <span class="grow">{status()}</span>
       </footer>
+
+      <Show when={lyricEdit()}>
+        {(ed) => (
+          <div class="lyric-editor" style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "48px", "z-index": 50, background: "var(--panel, #fff)", border: "1px solid var(--ink-dim, #888)", "border-radius": "6px", padding: "8px", "box-shadow": "0 2px 10px rgba(0,0,0,.3)", display: "flex", gap: "6px", "align-items": "center" }}>
+            <span>Letra, estrofa</span>
+            <select value={ed().verse} onChange={(e) => startLyrics(Number(e.currentTarget.value))}>
+              {[0, 1, 2, 3].map((v) => <option value={v}>{v + 1}</option>)}
+            </select>
+            <input
+              ref={(el) => setTimeout(() => { el.focus(); el.select(); })}
+              value={ed().text}
+              size={14}
+              placeholder="sílaba"
+              onInput={(e) => setLyricEdit({ ...ed(), text: e.currentTarget.value })}
+              onKeyDown={(e) => {
+                if (e.key === " " || e.key === "Enter") { e.preventDefault(); void lyricCommit(e.currentTarget.value, false); }
+                else if (e.key === "-") { e.preventDefault(); void lyricCommit(e.currentTarget.value, true); }
+                else if (e.key === "Backspace" && e.currentTarget.value === "") { e.preventDefault(); lyricBack(); }
+                else if (e.key === "Escape") { e.preventDefault(); setLyricEdit(null); }
+              }}
+            />
+            <button onClick={() => setLyricEdit(null)}>Terminar</button>
+          </div>
+        )}
+      </Show>
 
       <Show when={chordEdit()}>
         {(ed) => (

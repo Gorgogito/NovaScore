@@ -2,7 +2,7 @@ mod audio;
 mod pdf;
 
 use nova_core::io::{self, PedalEvent, Sound};
-use nova_core::{Artic, Clef, Content, Document, Dynamic, Jump, Marker, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, TimeSig};
+use nova_core::{Artic, Clef, Content, Document, Dynamic, Jump, Marker, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, Syllabic, TimeSig};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
@@ -79,6 +79,22 @@ fn set_dynamic(state: State<AppState>, part: usize, voice: usize, measure: usize
     };
     let mut doc = lock(&state);
     doc.edit(|s| s.set_dynamic(part, voice, measure, start, d)).map_err(|e| e.to_string())?;
+    Ok(doc.score.clone())
+}
+
+/// Set the lyric syllable of a verse on a note (empty text removes it). `syllabic`: single|begin|middle|end.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_lyric(state: State<AppState>, part: usize, voice: usize, measure: usize, start: u32, verse: u8, text: String, syllabic: String) -> Res {
+    let syl = match syllabic.as_str() {
+        "single" => Syllabic::Single,
+        "begin" => Syllabic::Begin,
+        "middle" => Syllabic::Middle,
+        "end" => Syllabic::End,
+        _ => return Err("unknown syllabic".into()),
+    };
+    let mut doc = lock(&state);
+    doc.edit(|s| s.set_lyric(part, voice, measure, start, verse, &text, syl)).map_err(|e| e.to_string())?;
     Ok(doc.score.clone())
 }
 
@@ -513,7 +529,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_lyric, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, detect_chords, set_chord, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

@@ -1,6 +1,6 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
-import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, SP, staffIdx, STAFF_H } from "./layout";
+import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, staffIdx, STAFF_H } from "./layout";
 import { chordName, ChordMark, Cursor, JUMP_TEXT, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
@@ -314,6 +314,16 @@ export function ScoreView(props: Props) {
               </text>
             );
           }}
+        </For>
+        <For each={ev.lyrics ?? []}>
+          {(y) => (
+            <>
+              <text x={le.x + headW / 2} y={bottomY + 46 + y.verse * LYRIC_LINE} text-anchor="middle" font-family="serif" font-size="12.5" fill="var(--ink)">{y.text}</text>
+              <Show when={y.syllabic === "begin" || y.syllabic === "middle"}>
+                <text x={(le.x + headW / 2 + (y.text.length * LYRIC_CHAR_W) / 2 + le.slotX + le.slotW + 4) / 2} y={bottomY + 46 + y.verse * LYRIC_LINE} text-anchor="middle" font-family="serif" font-size="12.5" fill="var(--ink)">-</text>
+              </Show>
+            </>
+          )}
         </For>
         <Show when={ev.dynamic}>
           <text x={le.x - 2} y={bottomY + 31} font-family="Bravura" font-size={FONT} fill="var(--ink)">{dynamicText(ev.dynamic!)}</text>

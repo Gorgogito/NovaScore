@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Letra</work-title></work>
+  <part-list><score-part id="P1"><part-name>Voz</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>480</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><lyric number="1"><syllabic>begin</syllabic><text>Ca</text></lyric><lyric number="2"><syllabic>single</syllabic><text>Uno</text></lyric></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><lyric number="1"><syllabic>middle</syllabic><text>mi</text></lyric><lyric number="2"><syllabic>single</syllabic><text>dos</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><lyric number="1"><syllabic>end</syllabic><text>nan</text></lyric></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><lyric number="1"><syllabic>single</syllabic><text>do</text></lyric></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>5</octave></pitch><duration>960</duration><voice>1</voice><type>half</type><lyric number="1"><syllabic>single</syllabic><text>larguísima</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>960</duration><voice>1</voice><type>half</type><lyric number="1"><syllabic>single</syllabic><text>fin</text></lyric></note>
+    </measure>
+  </part>
+</score-partwise>

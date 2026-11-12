@@ -10,6 +10,12 @@ const PART_GAP = 56;
 const SYSTEM_GAP = 70;
 /** Extra space between systems when chord symbols are drawn above the first staff. */
 const CHORD_GAP = 30;
+/** Height of one verse line of lyrics, and the approximate width of one lyric character. */
+export const LYRIC_LINE = 14;
+export const LYRIC_CHAR_W = 6.2;
+
+/** Width a lyric syllable needs, with room for the hyphen that follows it. */
+export const lyricWidth = (text: string, syllabic: string) => text.length * LYRIC_CHAR_W + (syllabic === "begin" || syllabic === "middle" ? 8 : 4);
 
 export interface LAccidental {
   pitchIndex: number; // index in ev.pitches
@@ -241,9 +247,16 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
       const oi = onsets.indexOf(le.ev.start);
       accCols[oi] = Math.max(accCols[oi], le.accCols);
     }
+    // A syllable must fit under its note: widen the slot when the text is longer than the note.
+    const lyricW = onsets.map(() => 0);
+    for (const l of lanes) for (const le of l.events) {
+      const w = Math.max(0, ...(le.ev.lyrics ?? []).map((y) => lyricWidth(y.text, y.syllabic)));
+      const oi = onsets.indexOf(le.ev.start);
+      lyricW[oi] = Math.max(lyricW[oi], w);
+    }
     const slotW = onsets.map((o, i) => {
       const next = i + 1 < onsets.length ? onsets[i + 1] : mlen;
-      return slotWeight(next - o) + (accCols[i] ? 3 + 10 * accCols[i] : 0);
+      return Math.max(slotWeight(next - o) + (accCols[i] ? 3 + 10 * accCols[i] : 0), lyricW[i]);
     });
     prepared.push({ index: m, onsets, slotW, accCols, lanes, contentW: slotW.reduce((a, b) => a + b, 0), time: timeAt(score, m) });
   }
@@ -269,9 +282,13 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   if (cur.length) lines.push(cur);
 
   const nParts = score.parts.length;
-  const systemH = nParts * STAFF_H + (nParts - 1) * PART_GAP;
+  // Lyrics hang below each staff, one line per verse, so the gap grows with the verses in use.
+  const verses = score.parts.reduce((a, p) => Math.max(a, ...p.measures.flatMap((m) => [m.events, ...(m.voices ?? [])]).flatMap((evs) => evs.flatMap((e) => (e.lyrics ?? []).map((y) => y.verse + 1)))), 0);
+  const lyricGap = verses ? verses * LYRIC_LINE + 4 : 0;
+  const partGap = PART_GAP + lyricGap;
+  const systemH = nParts * STAFF_H + (nParts - 1) * partGap;
   const systems: LSystem[] = [];
-  const sysGap = SYSTEM_GAP + (score.chords?.length ? CHORD_GAP : 0);
+  const sysGap = SYSTEM_GAP + (score.chords?.length ? CHORD_GAP : 0) + lyricGap;
   lines.forEach((line, li) => {
     const top = TOP + li * (systemH + sysGap);
     const headers = line.map((p, i) => headerFor(i === 0, p.index));
@@ -319,6 +336,6 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
     width: pageWidth,
     height,
     systems,
-    staffTops: (s) => score.parts.map((_, i) => s.top + i * (STAFF_H + PART_GAP)),
+    staffTops: (s) => score.parts.map((_, i) => s.top + i * (STAFF_H + partGap)),
   };
 }

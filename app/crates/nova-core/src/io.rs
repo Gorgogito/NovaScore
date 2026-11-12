@@ -754,6 +754,17 @@ pub fn export_musicxml(score: &Score) -> String {
                                 s.push_str(&tup);
                                 s.push_str("</notations>");
                             }
+                            if k == 0 {
+                                for l in &e.lyrics {
+                                    let syl = match l.syllabic {
+                                        Syllabic::Single => "single",
+                                        Syllabic::Begin => "begin",
+                                        Syllabic::Middle => "middle",
+                                        Syllabic::End => "end",
+                                    };
+                                    let _ = write!(s, "<lyric number=\"{}\"><syllabic>{syl}</syllabic><text>{}</text></lyric>", l.verse as u32 + 1, esc(&l.text));
+                                }
+                            }
                             s.push_str("</note>");
                             x.push_str(&s);
                             x.push('\n');
@@ -836,6 +847,32 @@ fn snap(ticks: u32) -> u32 {
     best
 }
 
+/// Lyric syllables of a MusicXML `<note>`.
+fn xml_lyrics(el: &roxmltree::Node) -> Vec<Lyric> {
+    let mut out: Vec<Lyric> = Vec::new();
+    for (i, l) in el.children().filter(|c| c.has_tag_name("lyric")).enumerate() {
+        let verse = l
+            .attribute("number")
+            .and_then(|n| n.trim_start_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok())
+            .map(|n| n.saturating_sub(1))
+            .unwrap_or(i as u32)
+            .min(255) as u8;
+        let text: Vec<String> = l.children().filter(|c| c.has_tag_name("text")).map(|c| c.text().unwrap_or("").to_string()).collect();
+        let text = text.join(" ").trim().to_string();
+        if text.is_empty() || out.iter().any(|x| x.verse == verse) {
+            continue;
+        }
+        let syllabic = match l.children().find(|c| c.has_tag_name("syllabic")).and_then(|c| c.text()).map(str::trim) {
+            Some("begin") => Syllabic::Begin,
+            Some("middle") => Syllabic::Middle,
+            Some("end") => Syllabic::End,
+            _ => Syllabic::Single,
+        };
+        out.push(Lyric { verse, text, syllabic });
+    }
+    out
+}
+
 pub(crate) struct Raw {
     pub start: u32,
     pub ticks: u32,
@@ -847,6 +884,7 @@ pub(crate) struct Raw {
     pub extras: Vec<Extra>,
     pub dynamic: Option<Dynamic>,
     pub articulations: Vec<Artic>,
+    pub lyrics: Vec<Lyric>,
 }
 
 /// Turn raw per-voice events of one staff into measures: durations are snapped to standard
@@ -871,7 +909,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     let tuplet = r.tup.filter(|&(a, n, _)| tuplet_notated(r.ticks, a, n).map_or(false, valid_duration) && r.start + r.ticks <= mlen);
                     if let Some((a, n, gs)) = tuplet {
                         let content = if r.rest { Content::Rest } else { Content::note(r.pitches.clone(), r.tie) };
-                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone() });
+                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone() });
                         pos = r.start + r.ticks;
                         continue;
                     }
@@ -887,6 +925,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     ev.extras = r.extras.clone();
                     ev.dynamic = r.dynamic;
                     ev.articulations = r.articulations.clone();
+                    ev.lyrics = r.lyrics.clone();
                     events.push(ev);
                     pos = r.start + t;
                 }
@@ -1315,7 +1354,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 None
                             }
                         };
-                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations });
+                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics: xml_lyrics(&el) });
                         last_note = Some((si, vi, ms[mi].len() - 1, start));
                     }
                     _ => {}
@@ -1882,6 +1921,24 @@ mod tests {
         assert!(xml.contains("<mf/>") && xml.contains("<sfz/>") && xml.contains("<strong-accent/>") && xml.contains("<staccato/>"));
         let r = import_musicxml(&xml).unwrap();
         assert_eq!(r.score.parts[0].measures, s.parts[0].measures);
+    }
+
+    #[test]
+    fn lyrics_roundtrip_through_musicxml_and_musescore() {
+        let p = |step, octave| Pitch { step, alter: 0, octave };
+        let mut s = Score::new("l", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.put_note(0, 0, 0, 0, 960, vec![p(0, 5)]).unwrap();
+        s.put_note(0, 0, 0, 960, 960, vec![p(1, 5)]).unwrap();
+        s.set_lyric(0, 0, 0, 0, 0, "Ca & <fe>", Syllabic::Begin).unwrap();
+        s.set_lyric(0, 0, 0, 0, 1, "uno", Syllabic::Single).unwrap();
+        s.set_lyric(0, 0, 0, 960, 0, "sa", Syllabic::End).unwrap();
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<syllabic>begin</syllabic><text>Ca &amp; &lt;fe&gt;</text>") && xml.contains("<lyric number=\"2\">"));
+        let r = import_musicxml(&xml).unwrap();
+        assert_eq!(r.score.parts[0].measures, s.parts[0].measures);
+        let back = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap();
+        assert_eq!(back.score.parts[0].measures[0].events[0].lyrics, s.parts[0].measures[0].events[0].lyrics);
+        assert_eq!(back.score.parts[0].measures[0].events[1].lyrics, s.parts[0].measures[0].events[1].lyrics);
     }
 
     #[test]

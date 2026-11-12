@@ -172,6 +172,33 @@ fn dynamic_of(n: Node) -> Option<Dynamic> {
 }
 
 /// Articulation of a MuseScore `<Articulation>` element ("articStaccatoAbove", "staccato"...).
+/// A plain lyric syllable (`<Lyrics>` with only `<text>`, `<no>` and `<syllabic>`); anything
+/// fancier (melisma lengths, styles, rich text) stays in the literal extras.
+fn lyric_of(n: Node) -> Option<Lyric> {
+    if !n.has_tag_name("Lyrics") {
+        return None;
+    }
+    let mut text = None;
+    let mut verse = 0u8;
+    let mut syllabic = Syllabic::Single;
+    for c in n.children().filter(|c| c.is_element()) {
+        match c.tag_name().name() {
+            "text" if c.children().all(|k| k.is_text()) => text = c.text().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+            "no" => verse = c.text()?.trim().parse::<u8>().ok()?,
+            "syllabic" => {
+                syllabic = match c.text()?.trim() {
+                    "begin" => Syllabic::Begin,
+                    "middle" => Syllabic::Middle,
+                    "end" => Syllabic::End,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(Lyric { verse, text: text?, syllabic })
+}
+
 fn artic_of(n: Node) -> Option<Artic> {
     let s = text_of(n, "subtype")?.to_lowercase();
     let s = s.strip_prefix("artic").unwrap_or(&s);
@@ -255,7 +282,7 @@ fn ignored_features(score: Node, preserve: bool, first_staff: &str) -> (Vec<&'st
         }
         // Dynamics and articulations NovaScore understands are imported, not ignored; the
         // <Articulation> entries of instrument definitions have no subtype.
-        if marker_of(n).is_some() || jump_of(n).is_some() {
+        if marker_of(n).is_some() || jump_of(n).is_some() || lyric_of(n).is_some() {
             continue;
         }
         if (n.has_tag_name("Dynamic") && dynamic_of(n).is_some()) || (n.has_tag_name("Articulation") && (text_of(n, "subtype").is_none() || artic_of(n).is_some())) || (n.has_tag_name("Ornament") && artic_of(n).is_some()) {
@@ -703,7 +730,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                             let rest = !is_chord || pitches.is_empty();
                             let mut extras: Vec<Extra> = std::mem::take(&mut pending);
                             if preserve {
-                                for c in el.children().filter(|c| c.is_element() && !CHORD_SKIP.contains(&c.tag_name().name()) && !((c.has_tag_name("Articulation") || c.has_tag_name("Ornament")) && artic_of(*c).is_some())) {
+                                for c in el.children().filter(|c| c.is_element() && !CHORD_SKIP.contains(&c.tag_name().name()) && !((c.has_tag_name("Articulation") || c.has_tag_name("Ornament")) && artic_of(*c).is_some()) && lyric_of(*c).is_none()) {
                                     extras.push(Extra { place: ExtraPlace::Inside, xml: src(c) });
                                 }
                                 for note in el.children().filter(|c| c.is_element() && c.has_tag_name("Note")) {
@@ -751,7 +778,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                         }
                                     }
                                 }
-                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations });
+                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).collect() } });
                             }
                             pos += real;
                         }
@@ -1056,8 +1083,18 @@ mod tests {
     }
 
     #[test]
+    fn plain_lyrics_are_imported_into_the_model() {
+        let m = r#"<Measure><voice><Chord><durationType>half</durationType><Lyrics><syllabic>begin</syllabic><text>la</text></Lyrics><Lyrics><no>1</no><text>do</text></Lyrics><Note><pitch>60</pitch></Note></Chord><Chord><durationType>half</durationType><Lyrics><syllabic>end</syllabic><text>la</text></Lyrics><Note><pitch>62</pitch></Note></Chord></voice></Measure>"#;
+        let r = import_mscx(&mscx4(m)).unwrap();
+        let ev = &r.score.parts[0].measures[0].events;
+        assert_eq!(ev[0].lyrics, vec![Lyric { verse: 0, text: "la".into(), syllabic: Syllabic::Begin }, Lyric { verse: 1, text: "do".into(), syllabic: Syllabic::Single }]);
+        assert_eq!(ev[1].lyrics[0].syllabic, Syllabic::End);
+        assert!(ev.iter().all(|e| e.extras.is_empty()) && !r.warnings.join(" ").contains("letra"), "{:?}", r.warnings);
+    }
+
+    #[test]
     fn warns_about_unsupported_content_and_rejects_garbage() {
-        let m = r#"<Measure><voice><Dynamic><subtype>p</subtype></Dynamic><Chord><durationType>whole</durationType><Lyrics><text>la</text></Lyrics><Note><pitch>60</pitch></Note></Chord></voice></Measure>"#;
+        let m = r#"<Measure><voice><Dynamic><subtype>p</subtype></Dynamic><Chord><durationType>whole</durationType><Lyrics><ticks>480</ticks><text>la</text></Lyrics><Note><pitch>60</pitch></Note></Chord></voice></Measure>"#;
         let r = import_mscx(&mscx4(m)).unwrap();
         let w = r.warnings.join(" ");
         assert!(w.contains("letra") && !w.contains("dinámicas"), "{w}");
