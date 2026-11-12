@@ -1674,7 +1674,9 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
     let mut truncated = false;
     // Compound meters (6/8, 12/8...) divide the beat in three on their own: no tuplet detection there.
     let simple_meter = score.time.den != 8 && score.time_changes.iter().all(|c| c.time.den != 8);
-    let (mut tuplet_count, mut voice_extra, mut hand_splits, mut dropped) = ([0usize; 3], 0usize, 0usize, false);
+    // a constant meter in whole beats lets the importer look for septuplets that span two beats
+    let bar_beats = (score.time_changes.is_empty() && mlen % PPQ == 0).then_some(mlen / PPQ);
+    let (mut tuplet_count, mut voice_extra, mut hand_splits, mut dropped) = ([0usize; 4], 0usize, 0usize, false);
 
     for s in &streams {
         let mean = s.notes.iter().map(|n| n.2 as u32).sum::<u32>() / s.notes.len() as u32;
@@ -1708,11 +1710,13 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
         }
         // Groups of 3, 5 or 6 notes per beat are detected from the onsets and written as tuplets.
         let starts: Vec<f64> = s.notes.iter().map(|n| n.0 as f64).collect();
-        let tuplets = if simple_meter { crate::quantize::detect_tuplet_beats(&starts) } else { Default::default() };
+        let tuplets = if simple_meter { crate::quantize::detect_tuplet_beats_ext(&starts, true, bar_beats) } else { Default::default() };
         for &v in tuplets.values() {
             match v {
                 3 => tuplet_count[0] += 1,
                 5 => tuplet_count[1] += 1,
+                7 | 70 => tuplet_count[3] += 1,
+                71 => {}
                 _ => tuplet_count[2] += 1,
             }
         }
@@ -1773,7 +1777,7 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
     if dropped {
         warnings.push("Algunas notas no pudieron colocarse y se omitieron.".into());
     }
-    let kinds: Vec<String> = [(tuplet_count[0], "tresillos"), (tuplet_count[1], "quintillos"), (tuplet_count[2], "seisillos")]
+    let kinds: Vec<String> = [(tuplet_count[0], "tresillos"), (tuplet_count[1], "quintillos"), (tuplet_count[2], "seisillos"), (tuplet_count[3], "septillos")]
         .iter()
         .filter(|(n, _)| *n > 0)
         .map(|(n, name)| format!("{n} pulsos de {name}"))
@@ -1842,6 +1846,54 @@ mod tests {
         assert!(evs.iter().filter(|e| e.tuplet.is_some()).all(|e| e.ticks == 160 && e.tuplet.map_or(false, |t| t.actual == 3 && t.normal == 2)));
         assert!(r.score.parts[0].measures[2].events.iter().all(|e| e.tuplet.is_none()), "plain eighths stay plain");
         assert!(r.warnings.iter().any(|w| w.contains("tresillos")), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn midi_import_writes_septuplets_as_7_to_4_groups() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("s", TimeSig { num: 4, den: 4 }, 0, 1);
+        // the 7:4 group of a quarter note, eight times, then plain quarters
+        for b in 0..8u32 {
+            let items: Vec<(u32, u32, Vec<Pitch>, bool)> = (0..7).map(|k| (k, 1, vec![p(60 + ((b * 7 + k) % 12) as i32)], false)).collect();
+            s.put_tuplet_beat(0, 0, b * 480, 7, &items).unwrap();
+        }
+        for b in 8..12u32 {
+            s.put_abs(0, b * 480, 480, &[p(67)]).unwrap();
+        }
+        let r = import_midi(&export_midi(&s)).unwrap();
+        assert_eq!(flat(&r.score), flat(&s));
+        let evs = &r.score.parts[0].measures[0].events;
+        assert_eq!(evs.iter().filter(|e| e.tuplet.map_or(false, |t| t.actual == 7 && t.normal == 4)).count(), 28);
+        assert_eq!(evs[..7].iter().map(|e| e.start).collect::<Vec<_>>(), vec![0, 69, 137, 206, 274, 343, 411]);
+        assert!(r.warnings.iter().any(|w| w.contains("septillos")), "{:?}", r.warnings);
+        assert!(r.score.parts[0].measures[2].events.iter().all(|e| e.tuplet.is_none()));
+    }
+
+    #[test]
+    fn midi_import_writes_two_beat_septuplets() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("s", TimeSig { num: 4, den: 4 }, 0, 1);
+        // a 7:4 of eighths over two beats, three times, with plain quarters around them
+        for (i, b) in [0u32, 2, 4].iter().enumerate() {
+            let items: Vec<(u32, u32, Vec<Pitch>, bool)> = (0..7).map(|k| (k, 1, vec![p(60 + (i as u32 * 7 + k) as i32 % 12)], false)).collect();
+            s.put_tuplet_group(0, 0, b * 480, 2, 7, &items).unwrap();
+        }
+        for b in 6..12u32 {
+            s.put_abs(0, b * 480, 480, &[p(67)]).unwrap();
+        }
+        let r = import_midi(&export_midi(&s)).unwrap();
+        assert_eq!(flat(&r.score), flat(&s));
+        let evs = &r.score.parts[0].measures[0].events;
+        assert_eq!(evs.iter().filter(|e| e.tuplet.map_or(false, |t| t.actual == 7 && t.normal == 4)).count(), 14);
+        assert!(r.warnings.iter().any(|w| w.contains("septillos")), "{:?}", r.warnings);
+        assert!(r.score.parts[0].measures[2].events.iter().all(|e| e.tuplet.is_none()));
+        // straight sixteenths are never taken for a septuplet
+        let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        for k in 0..32u32 {
+            t.put_abs(0, k * 120, 120, &[p(60 + (k % 5) as i32)]).unwrap();
+        }
+        let r = import_midi(&export_midi(&t)).unwrap();
+        assert!(r.score.parts[0].measures.iter().flat_map(|m| &m.events).all(|e| e.tuplet.is_none()), "{:?}", r.warnings);
     }
 
     #[test]

@@ -272,8 +272,8 @@ const TUPLET_MIN_EVIDENCE: f64 = 4.0;
 /// seisillos son mucho menos frecuentes que los tresillos).
 /// Ranuras distintas mínimas ocupadas por inicios para aceptar cada tipo (un grupo real de
 /// cinco o seis notas deja varias): los grupos densos explican casi cualquier inicio suelto.
-const TUPLET_KINDS_MIN_SLOTS: [u32; 3] = [2, 4, 4];
-const TUPLET_KINDS: [(u32, f64); 3] = [(3, 0.0), (6, 1.5), (5, 2.5)];
+const TUPLET_KINDS_MIN_SLOTS: [u32; 4] = [2, 4, 4, 5];
+const TUPLET_KINDS: [(u32, f64); 4] = [(3, 0.0), (6, 1.5), (5, 2.5), (7, 0.5)];
 
 /// Pulsos (índices de negra) cuyos inicios encajan mejor en un grupo irregular (3, 5 o 6 por
 /// pulso) que en semicorcheas, con el número de ranuras del grupo. `ticks` son las posiciones
@@ -287,6 +287,64 @@ const TUPLET_KINDS: [(u32, f64); 3] = [(3, 0.0), (6, 1.5), (5, 2.5)];
 /// la evidencia del pulso con la mitad de la de sus vecinos, se resta la penalización a priori del
 /// tipo de grupo y debe superar `TUPLET_MIN_EVIDENCE`; se elige el tipo con más evidencia.
 pub fn detect_tuplet_beats(ticks: &[f64]) -> HashMap<u32, u8> {
+    detect_tuplet_beats_with(ticks, false)
+}
+
+/// Como [`detect_tuplet_beats`]; con `septuplets` también reconoce septillos (7 por pulso). Solo se pide con
+/// tiempos exactos (MIDI): en audio, 7 notas por pulso son demasiado cortas para el modelo y una rejilla tan
+/// densa explicaría inicios sueltos.
+pub fn detect_tuplet_beats_with(ticks: &[f64], septuplets: bool) -> HashMap<u32, u8> {
+    detect_tuplet_beats_ext(ticks, septuplets, None)
+}
+
+/// Como [`detect_tuplet_beats_with`]; con `bar_beats = Some(n)` (compás de `n` pulsos, constante) también reconoce el
+/// septillo de dos pulsos (7 corcheas en el tiempo de 4, que no cruza barras de compás): se marca con
+/// [`SEPTUPLET_2`] en su primer pulso y con 71 en el segundo.
+pub fn detect_tuplet_beats_ext(ticks: &[f64], septuplets: bool, bar_beats: Option<u32>) -> HashMap<u32, u8> {
+    let mut doubles: HashMap<u32, u8> = HashMap::new();
+    let mut ticks_owned: Vec<f64> = Vec::new();
+    let mut ticks = ticks;
+    if let (true, Some(bpb)) = (septuplets, bar_beats.filter(|&b| b >= 2)) {
+        const SIGMA: f64 = 0.012;
+        let mut cands: Vec<(f64, u32)> = Vec::new();
+        let last = ticks.iter().cloned().fold(0.0, f64::max) / PPQ as f64;
+        for b in 0..=(last as u32) {
+            if b % bpb > bpb - 2 {
+                continue;
+            }
+            let win: Vec<f64> = ticks.iter().copied().filter(|&t| t >= (b * PPQ) as f64 && t < ((b + 2) * PPQ) as f64).map(|t| (t - (b * PPQ) as f64) / (2 * PPQ) as f64).collect();
+            if win.len() < 5 {
+                continue;
+            }
+            let d = |phi: f64, h: f64| (phi * h - (phi * h).round()).abs() / h;
+            let fit = win.iter().filter(|&&f| d(f, 7.0) < 0.02).count();
+            let slots: std::collections::BTreeSet<i64> = win.iter().filter(|&&f| d(f, 7.0) < 0.02).map(|&f| ((f * 7.0).round() as i64) % 7).collect();
+            if fit * 10 < win.len() * 8 || slots.len() < 5 {
+                continue;
+            }
+            let ev: f64 = win.iter().map(|&f| (d(f, 8.0).powi(2) - d(f, 7.0).powi(2)) / (2.0 * SIGMA * SIGMA) + (8.0f64 / 7.0).ln()).sum();
+            if ev > 8.0 {
+                cands.push((ev, b));
+            }
+        }
+        cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        for (_, b) in cands {
+            if !doubles.contains_key(&b) && !doubles.contains_key(&(b + 1)) && !(b > 0 && doubles.get(&(b - 1)) == Some(&SEPTUPLET_2)) {
+                doubles.insert(b, SEPTUPLET_2);
+                doubles.insert(b + 1, SEPTUPLET_2_END);
+            }
+        }
+        if !doubles.is_empty() {
+            ticks_owned = ticks.iter().copied().filter(|&t| !doubles.contains_key(&((t.max(0.0) / PPQ as f64).floor() as u32))).collect();
+            ticks = &ticks_owned;
+        }
+    }
+    let mut out = detect_tuplet_beats_single(ticks, septuplets);
+    out.extend(doubles);
+    out
+}
+
+fn detect_tuplet_beats_single(ticks: &[f64], septuplets: bool) -> HashMap<u32, u8> {
     let phase = |t: f64| {
         let beat = (t / PPQ as f64).floor() as u32;
         (beat, t / PPQ as f64 - beat as f64)
@@ -306,15 +364,15 @@ pub fn detect_tuplet_beats(ticks: &[f64]) -> HashMap<u32, u8> {
     nearest.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let sigma = (1.4826 * nearest[nearest.len() / 2]).clamp(0.015, 0.045);
     // evidencia por pulso y por tipo de grupo
-    let mut score: BTreeMap<u32, [f64; 3]> = BTreeMap::new();
+    let mut score: BTreeMap<u32, [f64; 4]> = BTreeMap::new();
     // ranuras distintas de cada tipo de grupo que ocupan los inicios del pulso (máscara de bits)
-    let mut slots: BTreeMap<u32, [u32; 3]> = BTreeMap::new();
+    let mut slots: BTreeMap<u32, [u32; 4]> = BTreeMap::new();
     for &t in ticks.iter().filter(|&&t| t >= 0.0) {
         let (beat, phi) = phase(t);
         let d4 = dist(phi, 4);
-        let e = score.entry(beat).or_insert([0.0; 3]);
-        let m = slots.entry(beat).or_insert([0; 3]);
-        for (k, &(h, _)) in TUPLET_KINDS.iter().enumerate() {
+        let e = score.entry(beat).or_insert([0.0; 4]);
+        let m = slots.entry(beat).or_insert([0; 4]);
+        for (k, &(h, _)) in TUPLET_KINDS.iter().enumerate().take(if septuplets { 4 } else { 3 }) {
             let dh = dist(phi, h);
             if dh < (2.0 * sigma).max(0.05) {
                 m[k] |= 1 << (((phi * h as f64).round() as u32) % h);
@@ -328,7 +386,7 @@ pub fn detect_tuplet_beats(ticks: &[f64]) -> HashMap<u32, u8> {
     for (&b, s) in &score {
         let near = |b2: u32, k: usize| score.get(&b2).map_or(0.0, |v| v[k]);
         let mut best: Option<(f64, u8)> = None;
-        for (k, &(h, penalty)) in TUPLET_KINDS.iter().enumerate() {
+        for (k, &(h, penalty)) in TUPLET_KINDS.iter().enumerate().take(if septuplets { 4 } else { 3 }) {
             let window = s[k] + 0.5 * (near(b.wrapping_add(1), k) + if b > 0 { near(b - 1, k) } else { 0.0 });
             let value = window - penalty;
             let distinct = slots.get(&b).map_or(0, |m| m[k].count_ones());
@@ -347,15 +405,30 @@ pub fn detect_tuplet_beats(ticks: &[f64]) -> HashMap<u32, u8> {
     out
 }
 
+/// Valor del mapa de grupos para un septillo que ocupa dos pulsos: 70 en el primero y 71 en el segundo.
+pub(crate) const SEPTUPLET_2: u8 = 70;
+const SEPTUPLET_2_END: u8 = 71;
+
+/// Grupo irregular que contiene el pulso `beat`: (pulso de inicio, pulsos que ocupa, ranuras).
+pub(crate) fn group_of(beat: u32, tuplets: &HashMap<u32, u8>) -> Option<(u32, u32, u32)> {
+    match tuplets.get(&beat) {
+        Some(&SEPTUPLET_2) => Some((beat, 2, 7)),
+        Some(&SEPTUPLET_2_END) if beat > 0 => Some((beat - 1, 2, 7)),
+        Some(&n) => Some((beat, 1, n as u32)),
+        None => None,
+    }
+}
+
 /// Ajusta una posición (ticks) a la rejilla de su pulso: en un pulso con grupo irregular, a
-/// 1/3, 1/5 o 1/6 de negra; en los demás, a semicorcheas.
+/// 1/3, 1/5, 1/6 o 1/7 de negra (1/7 de dos negras en el septillo de dos pulsos); en los demás, a semicorcheas.
 pub(crate) fn snap(t: f64, tuplets: &HashMap<u32, u8>) -> u32 {
     let t = t.max(0.0);
     let beat = (t / PPQ as f64).floor() as u32;
-    match tuplets.get(&beat) {
-        Some(&n) => {
-            let slot = PPQ as f64 / n as f64;
-            beat * PPQ + (((t - (beat * PPQ) as f64) / slot).round() * slot).round() as u32
+    match group_of(beat, tuplets) {
+        Some((start, span, n)) => {
+            let slot = (span * PPQ) as f64 / n as f64;
+            let origin = (start * PPQ) as f64;
+            (origin + ((t - origin) / slot).round() * slot).round() as u32
         }
         None => (t / GRID as f64).round() as u32 * GRID,
     }
@@ -363,7 +436,7 @@ pub(crate) fn snap(t: f64, tuplets: &HashMap<u32, u8>) -> u32 {
 
 /// Ticks de una ranura en el pulso `beat` (una semicorchea si no hay grupo irregular).
 pub(crate) fn slot_ticks(beat: u32, tuplets: &HashMap<u32, u8>) -> u32 {
-    tuplets.get(&beat).map_or(GRID, |&n| PPQ / n as u32)
+    group_of(beat, tuplets).map_or(GRID, |(_, span, n)| span * PPQ / n)
 }
 
 /// ¿Toca el intervalo `[s, e)` algún pulso con grupo irregular?
@@ -468,10 +541,10 @@ pub(crate) fn place_staff(score: &mut Score, pi: usize, notes: Vec<Q>, max_voice
             let mut pos = g.s;
             while pos < g.e {
                 let beat = pos / PPQ;
-                if let Some(&slots) = tuplet_beats.get(&beat) {
-                    let unit = PPQ / slots as u32;
-                    let seg_end = g.e.min((beat + 1) * PPQ);
-                    let slot = ((pos - beat * PPQ) as f64 / unit as f64).round() as u32;
+                if let Some((gb, span, slots)) = group_of(beat, tuplet_beats) {
+                    let unit = (span * PPQ) as f64 / slots as f64;
+                    let seg_end = g.e.min((gb + span) * PPQ);
+                    let slot = ((pos - gb * PPQ) as f64 / unit).round() as u32;
                     let n = (((seg_end - pos) as f64 / unit as f64).round() as u32).max(1);
                     let tie = seg_end < g.e;
                     if n >= slots as u32 || slot + n > slots as u32 {
@@ -480,7 +553,7 @@ pub(crate) fn place_staff(score: &mut Score, pi: usize, notes: Vec<Q>, max_voice
                             dropped_voices = true;
                         }
                     } else {
-                        beats.entry(beat).or_default().push((slot, n, ps.clone(), tie));
+                        beats.entry(gb).or_default().push((slot, n, ps.clone(), tie));
                     }
                     pos = seg_end;
                 } else {
@@ -502,7 +575,8 @@ pub(crate) fn place_staff(score: &mut Score, pi: usize, notes: Vec<Q>, max_voice
             }
         }
         for (beat, items) in beats {
-            if score.put_tuplet_beat(pi, vi, beat * PPQ, tuplet_beats[&beat] as u32, &items).is_err() {
+            let (_, span, slots) = group_of(beat, tuplet_beats).unwrap_or((beat, 1, 3));
+            if score.put_tuplet_group(pi, vi, beat * PPQ, span, slots, &items).is_err() {
                 dropped_voices = true;
             }
         }
@@ -1409,6 +1483,21 @@ mod tests {
         assert!(detect_tuplet_beats(&group(3, 12)).values().all(|&v| v == 3));
         // cuatro por pulso (semicorcheas): ninguno
         assert!(detect_tuplet_beats(&group(4, 12)).is_empty());
+    }
+
+    #[test]
+    fn septuplets_are_detected_only_when_asked_and_with_exact_timing() {
+        let group = |n: u32, beats: u32| -> Vec<f64> { (0..beats).flat_map(|b| (0..n).map(move |k| b as f64 * 480.0 + (k as f64 * 480.0 / n as f64).round())).collect() };
+        let seven = group(7, 12);
+        assert!(detect_tuplet_beats(&seven).values().all(|&v| v != 7), "audio never gets septuplets");
+        let found = detect_tuplet_beats_with(&seven, true);
+        assert_eq!(found.len(), 12, "{found:?}");
+        assert!(found.values().all(|&v| v == 7));
+        // the other groups keep their kind when septuplets are allowed
+        for (n, want) in [(3u32, 3u8), (5, 5), (6, 6)] {
+            assert!(detect_tuplet_beats_with(&group(n, 12), true).values().all(|&v| v == want), "n={n}");
+        }
+        assert!(detect_tuplet_beats_with(&group(4, 12), true).is_empty());
     }
 
     #[test]

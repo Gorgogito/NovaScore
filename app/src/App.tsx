@@ -61,7 +61,7 @@ export default function App() {
   const [chordEdit, setChordEdit] = createSignal<{ measure: number; tick: number; text: string; x: number; y: number } | null>(null);
   const openChordEditor = (measure: number, tick: number, x = 260, y = 230) => {
     const cur = score()?.chords?.find((c) => c.measure === measure && c.tick === tick);
-    setChordEdit({ measure, tick, text: cur ? chordName(cur, score()!.fifths) : "", x, y });
+    setChordEdit({ measure, tick, text: cur ? chordName(cur, score()!.fifths, score()!.parts[0]?.transpose) : "", x, y });
   };
   const commitChord = async (text: string) => {
     const ed = chordEdit();
@@ -105,7 +105,7 @@ export default function App() {
     const here = notes.find((p) => p.m === c.m && p.start === c.start) ?? notes.find((p) => p.m > c.m || (p.m === c.m && p.start > c.start)) ?? notes[0];
     setCursor({ ...c, m: here.m, start: here.start });
     setLyricEdit({ verse, text: lyricOf(here.m, here.start, verse)?.text ?? "" });
-    setStatus("Letra: escribe la sílaba; Espacio = siguiente nota, «-» = sílaba con guion, «_» = alargar con línea de melisma, Retroceso (vacío) = nota anterior, Esc = terminar.");
+    setStatus("Letra: escribe la sílaba; Espacio = siguiente nota, «-» = sílaba con guion, «_» = alargar con línea de melisma, Supr (vacío) = quitarla, Retroceso (vacío) = nota anterior, Esc = terminar.");
   };
   const lyricCommit = async (text: string, hyphen: boolean) => {
     const ed = lyricEdit();
@@ -153,6 +153,26 @@ export default function App() {
     if (!next) { setLyricEdit(null); setStatus("Letra: fin de las notas."); return; }
     setCursor({ ...c, m: next.m, start: next.start });
     setLyricEdit({ verse: ed.verse, text: lyricOf(next.m, next.start, ed.verse)?.text ?? "" });
+  };
+  /** Supr con el campo vacío (o el botón): quita la línea de melisma que pasa por la nota actual o nace en ella. */
+  const lyricClearExtend = async () => {
+    const ed = lyricEdit();
+    if (!ed) return;
+    const c = cursor();
+    const notes = noteStarts();
+    const i = notes.findIndex((p) => p.m === c.m && p.start === c.start);
+    for (let j = i; j >= 0; j--) {
+      const l = lyricOf(notes[j].m, notes[j].start, ed.verse);
+      if (!l?.extend_to) continue;
+      const e = l.extend_to;
+      // the line reaches the current note when it ends after the note starts
+      if (j === i || e.measure > c.m || (e.measure === c.m && e.tick > c.start)) {
+        if (await run(api.setLyricExtend(c.part, c.voice, notes[j].m, notes[j].start, ed.verse, null, 0))) setStatus("Línea de melisma quitada.");
+        return;
+      }
+      break;
+    }
+    setStatus("No hay línea de melisma en esta nota.");
   };
   const lyricBack = () => {
     const ed = lyricEdit();
@@ -890,10 +910,12 @@ export default function App() {
                 if (e.key === " " || e.key === "Enter") { e.preventDefault(); void lyricCommit(e.currentTarget.value, false); }
                 else if (e.key === "-") { e.preventDefault(); void lyricCommit(e.currentTarget.value, true); }
                 else if (e.key === "_") { e.preventDefault(); void lyricUnderscore(e.currentTarget.value); }
+                else if (e.key === "Delete" && e.currentTarget.value === "") { e.preventDefault(); void lyricClearExtend(); }
                 else if (e.key === "Backspace" && e.currentTarget.value === "") { e.preventDefault(); lyricBack(); }
                 else if (e.key === "Escape") { e.preventDefault(); setLyricEdit(null); }
               }}
             />
+            <button onClick={() => void lyricClearExtend()} title="Quita la línea de melisma de esta nota (también Supr con el campo vacío)">Quitar línea</button>
             <button onClick={() => setLyricEdit(null)}>Terminar</button>
           </div>
         )}

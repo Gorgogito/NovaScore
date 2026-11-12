@@ -194,9 +194,11 @@ const SHARP_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A
 const FLAT_NAMES = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
 
 /** Chord symbol text (sharps or flats according to the key signature). */
-export const chordName = (c: ChordMark, fifths: number): string => {
-  const names = fifths >= 0 ? SHARP_NAMES : FLAT_NAMES;
-  return names[c.root % 12] + CHORD_SUFFIX[c.quality] + (c.bass !== c.root ? "/" + names[c.bass % 12] : "");
+/** Chord symbol text. Stored chords are at concert pitch; with `tr` (the first staff transposes) it is the written name. */
+export const chordName = (c: ChordMark, fifths: number, tr?: Transpose): string => {
+  const names = writtenFifths(fifths, tr) >= 0 ? SHARP_NAMES : FLAT_NAMES;
+  const pc = (n: number) => (((n - (tr?.chromatic ?? 0)) % 12) + 12) % 12;
+  return names[pc(c.root)] + CHORD_SUFFIX[c.quality] + (c.bass !== c.root ? "/" + names[pc(c.bass)] : "");
 };
 
 export interface Cursor {

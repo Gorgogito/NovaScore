@@ -1172,20 +1172,28 @@ impl Score {
     /// allows (e.g. 5 of 6 slots) is split into tied pieces. The beat must lie inside one
     /// measure. Used by importers.
     pub fn put_tuplet_beat(&mut self, part: usize, voice: usize, abs: u32, slots: u32, items: &[(u32, u32, Vec<Pitch>, bool)]) -> Result<(), EditError> {
+        self.put_tuplet_group(part, voice, abs, 1, slots, items)
+    }
+
+    /// Like `put_tuplet_beat` for a group that spans `beats` quarter notes: 3, 5, 6 or 7 notes in one beat,
+    /// or 7 notes in two beats (a 7:4 of eighths, the group of the sample `septillos`).
+    pub fn put_tuplet_group(&mut self, part: usize, voice: usize, abs: u32, beats: u32, slots: u32, items: &[(u32, u32, Vec<Pitch>, bool)]) -> Result<(), EditError> {
         // (actual, normal) of the group and the longest span (in slots) with a standard value
-        let (normal, max_n) = match slots {
-            3 => (2u8, 2u32),
-            5 => (4, 4),
-            6 => (4, 4),
+        let (normal, max_n) = match (beats, slots) {
+            (1, 3) => (2u8, 2u32),
+            (1, 5) | (1, 6) | (1, 7) => (4, 4),
+            (2, 7) => (4, 4),
             _ => return Err(EditError::BadDuration),
         };
-        let slot_ticks = PPQ / slots;
+        let span = PPQ * beats;
+        // written value of one slot: an eighth for triplets and the two-beat septuplet, a sixteenth for the others
+        let written = span / normal as u32;
         if part >= self.parts.len() || voice >= MAX_VOICES || items.is_empty() {
             return Err(EditError::OutOfRange);
         }
         let (m, start) = self.locate(abs);
         let len = self.measure_len(m);
-        if start + PPQ > len {
+        if start + span > len {
             return Err(EditError::OutOfRange);
         }
         let mut sorted: Vec<&(u32, u32, Vec<Pitch>, bool)> = items.iter().collect();
@@ -1203,8 +1211,8 @@ impl Score {
         }
         let t = Tuplet { actual: slots as u8, normal, start };
         let mk = |slot: u32, n: u32, content: Content| Event {
-            start: start + slot * slot_ticks,
-            ticks: n * slot_ticks,
+            start: t.tick_at(slot * written),
+            ticks: t.tick_at((slot + n) * written) - t.tick_at(slot * written),
             content,
             tuplet: Some(t),
             extras: Vec::new(),

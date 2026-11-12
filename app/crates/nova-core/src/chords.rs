@@ -264,7 +264,13 @@ impl Score {
             self.chords.retain(|c| (c.measure, c.tick) != (measure, tick));
             return Ok(());
         }
-        let (root, quality, bass) = ChordMark::parse(text).ok_or_else(|| format!("no entiendo el acorde «{}» (ejemplos: C, Am, G7, Fmaj7, Dm7, B°, C/E)", text.trim()))?;
+        let (mut root, quality, mut bass) = ChordMark::parse(text).ok_or_else(|| format!("no entiendo el acorde «{}» (ejemplos: C, Am, G7, Fmaj7, Dm7, B°, C/E)", text.trim()))?;
+        // The symbols are drawn above the first staff: if it transposes, the player typed written names.
+        if let Some(t) = self.parts.first().and_then(|p| p.transpose) {
+            let up = |pc: u8| (pc as i32 + t.chromatic as i32).rem_euclid(12) as u8;
+            root = up(root);
+            bass = up(bass);
+        }
         self.chords.retain(|c| (c.measure, c.tick) != (measure, tick));
         self.chords.push(ChordMark { measure, tick, root, quality, bass, manual: true });
         self.chords.sort_by_key(|c| (c.measure, c.tick));
@@ -420,6 +426,18 @@ fn detect_in_segments(notes: &[CNote], segs: &[(usize, u32, u32, u32)]) -> Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chord_names_typed_over_a_transposing_staff_are_stored_at_concert_pitch() {
+        let mut s = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 2);
+        s.parts[0].transpose = Some(crate::Transpose { diatonic: -1, chromatic: -2 }); // B♭ clarinet reads a tone higher
+        s.set_chord(0, 0, "D/F#").unwrap();
+        // written D over F♯ sounds C over E
+        assert_eq!((s.chords[0].root, s.chords[0].bass), (0, 4));
+        s.parts[0].transpose = None;
+        s.set_chord(1, 0, "D").unwrap();
+        assert_eq!(s.chords[1].root, 2, "no transposition: unchanged");
+    }
 
     #[test]
     fn parses_hand_written_chord_names() {
