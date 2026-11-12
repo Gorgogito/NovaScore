@@ -252,9 +252,44 @@ pub struct Tuplet {
     pub start: u32,
 }
 
-/// Ratios whose tick values stay whole numbers at 480 ticks per quarter.
+/// Supported ratios. Those that divide 480 ticks per quarter exactly (3:2, 5:4...) have equal slots;
+/// the others (7:4, 7:8) round each position to a whole tick, see [`Tuplet::tick_at`].
 pub fn tuplet_ratio_supported(actual: u8, normal: u8) -> bool {
-    matches!((actual, normal), (2, 3) | (3, 2) | (4, 3) | (5, 4) | (6, 4))
+    matches!((actual, normal), (2, 3) | (3, 2) | (4, 3) | (5, 4) | (6, 4) | (7, 4) | (7, 8))
+}
+
+impl Tuplet {
+    /// Tick of the point `off` written ticks after the start of the group. Positions are rounded
+    /// to a whole tick from the group start, so slots of a 7:4 differ by one tick but add up exactly.
+    pub fn tick_at(&self, off: u32) -> u32 {
+        self.start + (off * self.normal as u32 + self.actual as u32 / 2) / self.actual as u32
+    }
+
+    /// Written ticks since the start of the group at a tick of the group (inverse of `tick_at`).
+    /// Written positions are multiples of the smallest note value, which absorbs the rounding.
+    pub fn off_at(&self, tick: u32) -> u32 {
+        let off = (tick.saturating_sub(self.start) * self.actual as u32 + self.normal as u32 / 2) / self.normal as u32;
+        (off + MIN_TICKS / 2) / MIN_TICKS * MIN_TICKS
+    }
+}
+
+/// Written value of a tuplet event that sounds `ticks` (the standard value that sounds within a tick of it,
+/// which is the exact one when the ratio divides evenly).
+pub fn tuplet_notated(ticks: u32, actual: u8, normal: u8) -> Option<u32> {
+    let (a, n) = (actual as u32, normal as u32);
+    if (ticks * a) % n == 0 {
+        return Some(ticks * a / n);
+    }
+    let mut v = PPQ * 4;
+    while v >= MIN_TICKS {
+        for c in [v, v + v / 2] {
+            if valid_duration(c) && (c * n).abs_diff(ticks * a) <= a {
+                return Some(c);
+            }
+        }
+        v /= 2;
+    }
+    None
 }
 
 impl Event {
@@ -265,7 +300,7 @@ impl Event {
     /// Written (notated) duration: the sounding duration scaled back by the tuplet ratio.
     pub fn notated_ticks(&self) -> u32 {
         match self.tuplet {
-            Some(t) => self.ticks * t.actual as u32 / t.normal as u32,
+            Some(t) => tuplet_notated(self.ticks, t.actual, t.normal).unwrap_or(self.ticks * t.actual as u32 / t.normal as u32),
             None => self.ticks,
         }
     }
@@ -577,16 +612,13 @@ fn tuplet_rests(from: u32, to: u32, t: Tuplet) -> Result<Vec<Event>, EditError> 
     if to <= from {
         return Ok(Vec::new());
     }
-    let notated = (to - from) * t.actual as u32 / t.normal as u32;
+    let (o0, o1) = (t.off_at(from), t.off_at(to));
     let mut out = Vec::new();
-    let mut pos = from;
-    for piece in split_standard(notated) {
-        if (piece * t.normal as u32) % t.actual as u32 != 0 {
-            return Err(EditError::BadDuration);
-        }
-        let real = piece * t.normal as u32 / t.actual as u32;
-        out.push(Event { start: pos, ticks: real, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new() });
-        pos += real;
+    let mut off = o0;
+    for piece in split_standard(o1 - o0) {
+        let (a, b) = (t.tick_at(off), t.tick_at(off + piece));
+        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new() });
+        off += piece;
     }
     Ok(out)
 }
@@ -781,10 +813,10 @@ impl Score {
     /// Enter a note or rest of written value `notated` at a position inside a tuplet group.
     #[allow(clippy::too_many_arguments)]
     fn enter_in_tuplet(&mut self, part: usize, voice: usize, m: usize, start: u32, notated: u32, content: Content, t: Tuplet) -> Result<(usize, u32), EditError> {
-        if !valid_duration(notated) || (notated * t.normal as u32) % t.actual as u32 != 0 {
+        if !valid_duration(notated) || start < t.start {
             return Err(EditError::BadDuration);
         }
-        let real = notated * t.normal as u32 / t.actual as u32;
+        let real = t.tick_at(t.off_at(start) + notated) - start;
         let events = self.voice_events_mut(part, voice, m)?;
         let group: Vec<&Event> = events.iter().filter(|e| e.tuplet == Some(t)).collect();
         let (gs, ge) = (group.iter().map(|e| e.start).min().unwrap_or(0), group.iter().map(|e| e.start + e.ticks).max().unwrap_or(0));
@@ -840,13 +872,13 @@ impl Score {
             return Err(EditError::OutOfRange);
         }
         let span = e.ticks;
-        if span % actual as u32 != 0 || span % normal as u32 != 0 || !valid_duration(span / normal as u32) {
+        if span % normal as u32 != 0 || !valid_duration(span / normal as u32) {
             return Err(EditError::BadDuration);
         }
-        let each = span / actual as u32;
+        let each = span / normal as u32; // written value of one slot
         let t = Tuplet { actual, normal, start };
         let slots: Vec<Event> = (0..actual as u32)
-            .map(|i| Event { start: start + i * each, ticks: each, content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() } })
+            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() } })
             .collect();
         events.splice(idx..=idx, slots);
         Ok(())
@@ -1813,6 +1845,49 @@ mod tests {
         assert_eq!(serde_json::from_str::<Score>(&j).unwrap(), s);
         // plain events do not serialize a tuplet field (files stay compatible)
         assert!(!serde_json::to_string(&score()).unwrap().contains("tuplet"));
+    }
+
+    #[test]
+    fn septuplets_round_each_slot_but_add_up_exactly() {
+        let mut s = score();
+        // 7 eighths in the time of 4 (a half note): slots of 137 or 138 ticks, 960 in all
+        s.put_note(0, 0, 0, 0, 960, vec![p(0, 4)]).unwrap();
+        s.make_tuplet(0, 0, 0, 0, 7, 4).unwrap();
+        let ev = s.parts[0].measures[0].events.clone();
+        let g: Vec<_> = ev.iter().filter(|e| e.tuplet.is_some()).collect();
+        assert_eq!(g.len(), 7);
+        assert_eq!(g.iter().map(|e| e.ticks).sum::<u32>(), 960);
+        assert!(g.iter().all(|e| (137..=138).contains(&e.ticks) && e.notated_ticks() == 240), "{:?}", g.iter().map(|e| (e.ticks, e.notated_ticks())).collect::<Vec<_>>());
+        assert!(g.windows(2).all(|w| w[0].start + w[0].ticks == w[1].start));
+        assert_eq!(total(&s.parts[0].measures[0]), 1920);
+        // notes go into the slots; the cursor advances slot by slot
+        let mut at = g[2].start;
+        for i in 0..3 {
+            let (m, t) = s.put_note(0, 0, 0, at, 240, vec![p(i, 4)]).unwrap();
+            assert_eq!(m, 0);
+            at = t;
+        }
+        assert_eq!(at, g[5].start);
+        assert_eq!(total(&s.parts[0].measures[0]), 1920);
+        // a longer value spans two slots: 480 written = 274 or 275 ticks
+        let two = s.put_note(0, 0, 0, g[0].start, 480, vec![p(4, 4)]).unwrap();
+        assert_eq!(two.1, g[2].start);
+        let e0 = &s.parts[0].measures[0].events[0];
+        assert_eq!((e0.ticks, e0.notated_ticks()), (g[2].start, 480));
+        assert_eq!(total(&s.parts[0].measures[0]), 1920);
+        // and the group goes back to a half note
+        s.clear_tuplet(0, 0, 0, g[0].start).unwrap();
+        assert_eq!(s.parts[0].measures[0].events[0].ticks, 960);
+        // 7:8 over a half note: seven sixteenths in the time of eight
+        let mut s = score();
+        s.put_note(0, 0, 0, 0, 960, vec![p(0, 4)]).unwrap();
+        s.make_tuplet(0, 0, 0, 0, 7, 8).unwrap();
+        let ev = &s.parts[0].measures[0].events;
+        assert!(ev[..7].iter().all(|e| e.notated_ticks() == 120) && ev[..7].iter().map(|e| e.ticks).sum::<u32>() == 960);
+        // a span too short to write seven notes in it is refused
+        let mut s = score();
+        s.put_note(0, 0, 0, 0, 60, vec![p(0, 4)]).unwrap();
+        assert!(s.make_tuplet(0, 0, 0, 0, 7, 4).is_err());
     }
 
     #[test]

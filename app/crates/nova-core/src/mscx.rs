@@ -565,6 +565,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 }
                 let mut pos: i64 = 0;
                 let mut stack: Vec<(u8, u8, i64)> = Vec::new(); // MuseScore 4: <Tuplet> ... <endTuplet/>
+                let mut grp_acc: Option<(u32, f64)> = None; // written ticks so far in the current tuplet group
                 let mut raws: Vec<Raw> = Vec::new();
                 let mut pending: Vec<Extra> = Vec::new(); // voice-level markup waiting for the next chord
                 let mut pending_dyn: Option<Dynamic> = None;
@@ -665,7 +666,22 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                     tup = Some((stack[0].0, stack[0].1, stack[0].2.max(0) as u32));
                                 }
                             }
-                            let real = (written * n_prod / a_prod).round() as i64;
+                            // Inside a group positions are rounded from its start so that a 7:4 adds up exactly.
+                            let real = match tup {
+                                Some((a, n, gs)) if (v2_ref.is_some() || stack.len() == 1) && !measure_rest => {
+                                    let acc = match grp_acc {
+                                        Some((g, x)) if g == gs => x,
+                                        _ => 0.0,
+                                    };
+                                    grp_acc = Some((gs, acc + written));
+                                    let at = |x: f64| (x * n as f64 / a as f64 + 1e-9).round();
+                                    (at(acc + written) - at(acc)) as i64
+                                }
+                                _ => {
+                                    grp_acc = None;
+                                    (written * n_prod / a_prod).round() as i64
+                                }
+                            };
                             let mut pitches = Vec::new();
                             let mut tie = false;
                             if is_chord {

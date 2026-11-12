@@ -49,8 +49,16 @@ export const JUMP_TEXT: Record<Jump, string> = {
 export const MAX_VOICES = 4;
 
 /** Written duration: tuplet events sound shorter than they are notated. */
-export const notatedTicks = (e: { ticks: number; tuplet?: Tuplet }): number =>
-  e.tuplet ? Math.round((e.ticks * e.tuplet.actual) / e.tuplet.normal) : e.ticks;
+export const notatedTicks = (e: { ticks: number; tuplet?: Tuplet }): number => {
+  if (!e.tuplet) return e.ticks;
+  const { actual: a, normal: n } = e.tuplet;
+  if ((e.ticks * a) % n === 0) return (e.ticks * a) / n;
+  // ratios that do not divide 480 evenly (7:4): the standard value that sounds within a tick of it
+  for (let v = 1920; v >= 30; v /= 2) {
+    for (const c of v / 2 >= 30 ? [v, v + v / 2] : [v]) if (Math.abs(c * n - e.ticks * a) <= a) return c;
+  }
+  return Math.round((e.ticks * a) / n);
+};
 
 /** Events of a voice (0-based) in a measure, or null if the voice is absent. */
 export const voiceEvents = (m: Measure, v: number): EventData[] | null =>

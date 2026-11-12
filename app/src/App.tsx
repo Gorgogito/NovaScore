@@ -508,6 +508,7 @@ export default function App() {
       else if (k === "3") await makeTuplet(3, 2);
       else if (k === "5") await makeTuplet(5, 4);
       else if (k === "6") await makeTuplet(6, 4);
+      else if (k === "7") await makeTuplet(7, 4);
       else if (k === "0") await clearTuplet();
       else if (e.key === "ArrowUp") await transpose(12);
       else if (e.key === "ArrowDown") await transpose(-12);
@@ -634,6 +635,8 @@ export default function App() {
           <option value="3:2">Tresillo 3:2 (Ctrl+3)</option>
           <option value="5:4">Quintillo 5:4 (Ctrl+5)</option>
           <option value="6:4">Seisillo 6:4 (Ctrl+6)</option>
+          <option value="7:4">Septillo 7:4 (Ctrl+7)</option>
+          <option value="7:8">Septillo 7:8</option>
           <option value="2:3">Dosillo 2:3</option>
           <option value="4:3">Cuatrillo 4:3</option>
           <option value="clear">Quitar tuplet (Ctrl+0)</option>

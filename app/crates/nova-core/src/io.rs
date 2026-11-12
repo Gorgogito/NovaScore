@@ -868,7 +868,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                         continue;
                     }
                     // Tuplet notes keep their exact length when the written value is a standard one.
-                    let tuplet = r.tup.filter(|&(a, n, _)| (r.ticks * a as u32) % n as u32 == 0 && valid_duration(r.ticks * a as u32 / n as u32) && r.start + r.ticks <= mlen);
+                    let tuplet = r.tup.filter(|&(a, n, _)| tuplet_notated(r.ticks, a, n).map_or(false, valid_duration) && r.start + r.ticks <= mlen);
                     if let Some((a, n, gs)) = tuplet {
                         let content = if r.rest { Content::Rest } else { Content::note(r.pitches.clone(), r.tie) };
                         events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone() });
@@ -1085,6 +1085,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         }
                         // Segno, coda, fine and the D.C./D.S. jumps are `<sound>` attributes.
                         let words = el.descendants().filter(|n| n.has_tag_name("words")).filter_map(|n| n.text()).collect::<Vec<_>>().join(" ").to_lowercase();
+                        // MuseScore 4 writes `fine="yes"` on every marker and the signs as <symbol>; trust the text.
+                        let symbols = el.descendants().filter(|n| n.has_tag_name("symbol")).filter_map(|n| n.text()).collect::<Vec<_>>().join(" ").to_lowercase();
                         let mut sound_segno = false;
                         let mut sound_coda = false;
                         for snd in el.descendants().filter(|n| n.has_tag_name("sound")) {
@@ -1096,10 +1098,10 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 nav_marks.push((mi, Marker::Coda));
                                 sound_coda = true;
                             }
-                            if snd.attribute("tocoda").is_some() {
+                            if snd.attribute("tocoda").is_some() || words.contains("to coda") {
                                 nav_marks.push((mi, Marker::ToCoda));
                             }
-                            if snd.attribute("fine").is_some() {
+                            if snd.attribute("fine").is_some() && (words.contains("fine") || (words.trim().is_empty() && symbols.trim().is_empty())) {
                                 nav_marks.push((mi, Marker::Fine));
                             }
                             if snd.attribute("dacapo").map_or(false, |v| v == "yes") {
@@ -1109,10 +1111,10 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 nav_jumps.push((mi, true, words.clone()));
                             }
                         }
-                        if !sound_segno && el.descendants().any(|n| n.has_tag_name("segno")) {
+                        if !sound_segno && (el.descendants().any(|n| n.has_tag_name("segno")) || symbols.split_whitespace().any(|w| w == "segno")) {
                             nav_marks.push((mi, Marker::Segno));
                         }
-                        if !sound_coda && el.descendants().any(|n| n.has_tag_name("coda")) {
+                        if !sound_coda && (el.descendants().any(|n| n.has_tag_name("coda")) || symbols.split_whitespace().any(|w| w == "coda")) {
                             nav_marks.push((mi, Marker::Coda));
                         }
                         if !got_tempo {
@@ -1744,6 +1746,25 @@ mod tests {
         let r = import_musicxml(&xml).unwrap();
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         assert_eq!(r.score, s);
+    }
+
+    #[test]
+    fn septuplets_roundtrip_through_musicxml() {
+        let mut s = Score::new("sept", TimeSig { num: 4, den: 4 }, 0, 2);
+        s.put_note(0, 0, 0, 0, 960, vec![p(0, 0, 5)]).unwrap();
+        s.make_tuplet(0, 0, 0, 0, 7, 4).unwrap();
+        for i in 0..7u32 {
+            let start = s.parts[0].measures[0].events[i as usize].start;
+            s.put_note(0, 0, 0, start, 240, vec![p((i % 7) as u8, 0, 5)]).unwrap();
+        }
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<actual-notes>7</actual-notes><normal-notes>4</normal-notes>"));
+        let back = import_musicxml(&xml).unwrap().score;
+        assert_eq!(back.parts[0].measures[0].events, s.parts[0].measures[0].events);
+        // playing time: the group lasts exactly a half note
+        let snd = sounds(&s);
+        assert_eq!(snd.iter().filter(|x| x.start < 960).count(), 7);
+        assert_eq!(snd.iter().filter(|x| x.start < 960).map(|x| x.ticks).sum::<u32>(), 960);
     }
 
     #[test]

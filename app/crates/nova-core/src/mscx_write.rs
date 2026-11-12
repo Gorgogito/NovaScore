@@ -792,6 +792,21 @@ mod tests {
     }
 
     #[test]
+    fn septuplets_roundtrip_through_mscx() {
+        let mut s = Score::new("sept", TimeSig { num: 4, den: 4 }, 0, 2);
+        s.put_note(0, 0, 0, 0, 960, vec![p(0, 5)]).unwrap();
+        s.make_tuplet(0, 0, 0, 0, 7, 4).unwrap();
+        for i in 0..7u32 {
+            let start = s.parts[0].measures[0].events[i as usize].start;
+            s.put_note(0, 0, 0, start, 240, vec![p((i % 7) as u8, 5)]).unwrap();
+        }
+        let xml = export_mscx(&s);
+        assert!(xml.contains("<normalNotes>4</normalNotes>") && xml.contains("<actualNotes>7</actualNotes>"));
+        let back = import_mscx(&xml).unwrap().score;
+        assert_eq!(back.parts[0].measures[0].events, s.parts[0].measures[0].events);
+    }
+
+    #[test]
     fn octave_lines_shift_written_pitch_and_pedal_is_kept() {
         let mut s = Score::new("8va", TimeSig { num: 4, den: 4 }, 0, 2);
         s.put_note(0, 0, 0, 0, 960, vec![p(0, 6)]).unwrap(); // C6 sounding
