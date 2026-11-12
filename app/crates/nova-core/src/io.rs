@@ -935,7 +935,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                     harmony_part = Some(pid.clone());
                                     let bass = child_named(el, "bass").and_then(|b| xml_pc(&text_of(b, "bass-step")?, text_of(b, "bass-alter").and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0).round() as i64)).unwrap_or(root);
                                     let off = (num_of(el, "offset").unwrap_or(0) as f64 * PPQ as f64 / divisions).round() as i64;
-                                    harmony_chords.push(ChordMark { measure: mi, tick: (pos + off).max(0) as u32, root, quality, bass });
+                                    harmony_chords.push(ChordMark { measure: mi, tick: (pos + off).max(0) as u32, root, quality, bass, manual: true });
                                 }
                                 // «none» y los rótulos de texto no son acordes; el resto (sus, aug…) no se reconocen
                                 (Some(_), None) if kind_text.as_deref().map_or(false, |k| k != "none" && k != "other") => harmony_skipped += 1,

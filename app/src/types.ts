@@ -117,6 +117,8 @@ export interface ChordMark {
   quality: "major" | "minor" | "dominant7" | "major7" | "minor7" | "dim" | "dim7";
   /** Pitch class of the bass (equal to `root` without inversion). */
   bass: number;
+  /** Written by hand or read from a file: "Actualizar acordes" keeps it. */
+  manual?: boolean;
 }
 
 const CHORD_SUFFIX: Record<ChordMark["quality"], string> = { major: "", minor: "m", dominant7: "7", major7: "maj7", minor7: "m7", dim: "dim", dim7: "dim7" };

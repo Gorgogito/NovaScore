@@ -516,7 +516,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                     if native_harmony {
                         if let Some((root, quality, bass)) = harmony_of(el) {
                             let shift = if mi == 0 && measure_len < cur_len { cur_len - measure_len } else { 0 };
-                            harmony_chords.push(crate::chords::ChordMark { measure: mi, tick: (pos + shift).max(0) as u32, root, quality, bass });
+                            harmony_chords.push(crate::chords::ChordMark { measure: mi, tick: (pos + shift).max(0) as u32, root, quality, bass, manual: true });
                         }
                     }
                     if native_dyn {

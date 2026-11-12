@@ -699,7 +699,7 @@ export function ScoreView(props: Props) {
                   const idxTop = Math.max(-1e9, ...m.lanes.filter((l) => l.part === 0).flatMap((l) => l.events).map((le) => (le.ev.kind === "note" ? Math.max(...le.ev.pitches.map((q) => staffIdx(props.score.parts[0].percussion, q))) + 7 : -1e9)));
                   const lift = Math.min(30, Math.max(0, idxTop - (bottomLineIndex(clef()) + 8) + 1) * (SP / 2));
                   return (
-                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui" style={props.onChordClick ? { cursor: "pointer" } : undefined} onClick={(e) => props.onChordClick?.(c, e.clientX, e.clientY)}>{chordName(c, props.score.fifths)}</text>
+                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui" style={props.onChordClick ? { cursor: "pointer" } : undefined} onClick={(e) => props.onChordClick?.(c, e.clientX, e.clientY)}>{chordName(c, props.score.fifths)}<title>{c.manual ? "Fijado a mano (se conserva al actualizar)" : "Detectado (se recalcula al actualizar)"}</title></text>
                   );
                 }}
               </For>

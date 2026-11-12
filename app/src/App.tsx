@@ -80,6 +80,14 @@ export default function App() {
     }
   };
 
+  const refreshChords = async () => {
+    const kept = score()?.chords?.filter((c) => c.manual).length ?? 0;
+    if (await run(api.detectChords())) {
+      const n = score()?.chords?.length ?? 0;
+      setStatus(`Acordes actualizados con las notas actuales: ${n} en total${kept ? `, ${kept} fijados a mano conservados` : ""}.`);
+    }
+  };
+
   const run = async (p: Promise<Score>, markDirty = true) => {
     try {
       apply(await p, markDirty);
@@ -565,6 +573,9 @@ export default function App() {
         <button onClick={() => run(api.redo())} title="Rehacer (Ctrl+Y)">↷</button>
         <Show when={score()}>
           <button onClick={toggleChords} title="Detectar el cifrado de acordes a partir de las notas (borrador); si ya hay, lo quita">{score()!.chords?.length ? "Quitar acordes" : "Detectar acordes"}</button>
+          <Show when={score()!.chords?.length}>
+            <button onClick={refreshChords} title="Vuelve a detectar los acordes con las notas actuales; los que fijaste a mano (o leíste de un archivo) se conservan">Actualizar acordes</button>
+          </Show>
         </Show>
         <span class="sep" />
         <button class="play" classList={{ on: isPlaying() }} onClick={togglePlay} title="Reproducir (Espacio)">

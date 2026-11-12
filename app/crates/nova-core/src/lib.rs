@@ -1310,6 +1310,9 @@ impl Score {
                 }
             }
         }
+        // un acorde que queda fuera de su compás acortado ya no tiene dónde dibujarse
+        let lens: Vec<u32> = (0..self.parts.first().map_or(0, |p| p.measures.len())).map(|i| self.measure_len(i)).collect();
+        self.chords.retain(|c| lens.get(c.measure).map_or(false, |&l| c.tick < l));
     }
 }
 

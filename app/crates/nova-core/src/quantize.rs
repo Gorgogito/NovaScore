@@ -792,17 +792,6 @@ fn beat_jitter(beats: &[f64]) -> f64 {
     d.windows(2).filter(|x| (x[1] / x[0] - 1.0).abs() > 0.12).count() as f64 / (d.len() - 1) as f64
 }
 
-/// Desviación relativa mediana entre intervalos de pulso consecutivos (|d[i+1]/d[i] − 1|).
-fn beat_dev(beats: &[f64]) -> f64 {
-    let d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
-    let mut v: Vec<f64> = d.windows(2).map(|x| (x[1] / x[0] - 1.0).abs()).collect();
-    if v.is_empty() {
-        return 0.0;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    v[v.len() / 2]
-}
-
 /// Desajuste mediano (en pulsos) de los ataques respecto a la rejilla de semicorcheas y tresillos de corchea
 /// según un mapa de pulsos: cuanto menor, mejor explica el mapa el ritmo.
 fn grid_residual(map: &BeatMap, notes: &[RawNote]) -> f64 {

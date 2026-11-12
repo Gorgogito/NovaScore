@@ -66,6 +66,9 @@ pub struct ChordMark {
     pub quality: Quality,
     /// Clase de altura del bajo (igual a `root` si no hay inversión).
     pub bass: u8,
+    /// Escrito a mano o leído de un archivo: «Actualizar acordes» lo conserva; los detectados (`false`) se recalculan.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 /// Clase de altura → "tonal pitch class" de MuseScore (C = 14, G = 15, F = 13…, cada quinta suma 1),
@@ -263,14 +266,30 @@ impl Score {
         }
         let (root, quality, bass) = ChordMark::parse(text).ok_or_else(|| format!("no entiendo el acorde «{}» (ejemplos: C, Am, G7, Fmaj7, Dm7, B°, C/E)", text.trim()))?;
         self.chords.retain(|c| (c.measure, c.tick) != (measure, tick));
-        self.chords.push(ChordMark { measure, tick, root, quality, bass });
+        self.chords.push(ChordMark { measure, tick, root, quality, bass, manual: true });
         self.chords.sort_by_key(|c| (c.measure, c.tick));
         Ok(())
     }
 
-    /// Sustituye el cifrado de la partitura por el detectado en sus notas.
+    /// Recalcula el cifrado con las notas actuales. Los acordes fijados a mano (o leídos de un archivo) se conservan: un
+    /// acorde detectado se descarta si cae justo donde hay uno manual o repite el acorde vigente justo antes.
     pub fn detect_chord_symbols(&mut self) {
-        self.chords = detect_chords(self);
+        let mut out: Vec<ChordMark> = self.chords.iter().copied().filter(|c| c.manual).collect();
+        for c in detect_chords(self) {
+            out.push(c);
+        }
+        // a igual posición gana el manual (el sort es estable y los manuales van primero)
+        out.sort_by_key(|c| (c.measure, c.tick));
+        out.dedup_by_key(|c| (c.measure, c.tick));
+        let same = |a: &ChordMark, b: &ChordMark| (a.root, a.quality, a.bass) == (b.root, b.quality, b.bass);
+        let mut res: Vec<ChordMark> = Vec::new();
+        for c in out {
+            if !c.manual && res.last().map_or(false, |p| same(p, &c)) {
+                continue;
+            }
+            res.push(c);
+        }
+        self.chords = res;
     }
 }
 
@@ -392,7 +411,7 @@ fn detect_in_segments(notes: &[CNote], segs: &[(usize, u32, u32, u32)]) -> Vec<C
             let quality = Quality::ALL[path[i] % Quality::ALL.len()];
             // bajo del primer segmento donde suena este acorde
             let bass = basses[i].unwrap_or(root);
-            out.push(ChordMark { measure: segs[i].0, tick: segs[i].1, root, quality, bass });
+            out.push(ChordMark { measure: segs[i].0, tick: segs[i].1, root, quality, bass, manual: false });
         }
     }
     out
@@ -481,7 +500,7 @@ mod tests {
     #[test]
     fn chords_survive_json_and_old_files_without_them_open() {
         let mut sc = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 2);
-        sc.chords = vec![ChordMark { measure: 1, tick: 480, root: 9, quality: Quality::Minor7, bass: 4 }];
+        sc.chords = vec![ChordMark { measure: 1, tick: 480, root: 9, quality: Quality::Minor7, bass: 4, manual: true }];
         let json = serde_json::to_string(&sc).unwrap();
         assert!(json.contains("\"minor7\""));
         let back: Score = serde_json::from_str(&json).unwrap();
@@ -502,10 +521,10 @@ mod tests {
                 sc.put_note(0, 0, m, 0, PPQ * 4, vec![Pitch::from_midi(60, true)]).unwrap();
             }
             sc.chords = vec![
-                ChordMark { measure: 0, tick: 0, root: 0, quality: Quality::Major, bass: 0 },
-                ChordMark { measure: 0, tick: PPQ * 2, root: 9, quality: Quality::Minor7, bass: 4 }, // a mitad de una nota larga: desplazamiento
-                ChordMark { measure: 1, tick: 0, root: 3, quality: Quality::Dominant7, bass: 3 }, // Mi♭7 / Re♯7 según la tonalidad
-                ChordMark { measure: 2, tick: PPQ, root: 6, quality: Quality::Dim7, bass: 6 },
+                ChordMark { measure: 0, tick: 0, root: 0, quality: Quality::Major, bass: 0, manual: true },
+                ChordMark { measure: 0, tick: PPQ * 2, root: 9, quality: Quality::Minor7, bass: 4, manual: true }, // a mitad de una nota larga: desplazamiento
+                ChordMark { measure: 1, tick: 0, root: 3, quality: Quality::Dominant7, bass: 3, manual: true }, // Mi♭7 / Re♯7 según la tonalidad
+                ChordMark { measure: 2, tick: PPQ, root: 6, quality: Quality::Dim7, bass: 6, manual: true },
             ];
             let xml = crate::io::export_musicxml(&sc);
             assert!(xml.contains("<harmony>") && xml.contains("<offset>960</offset>"));
@@ -518,7 +537,7 @@ mod tests {
     fn unknown_harmony_kinds_are_skipped_with_a_warning() {
         let mut sc = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 1);
         sc.put_note(0, 0, 0, 0, PPQ * 4, vec![crate::Pitch::from_midi(60, true)]).unwrap();
-        sc.chords = vec![ChordMark { measure: 0, tick: 0, root: 0, quality: Quality::Major, bass: 0 }];
+        sc.chords = vec![ChordMark { measure: 0, tick: 0, root: 0, quality: Quality::Major, bass: 0, manual: true }];
         let xml = crate::io::export_musicxml(&sc).replace("<kind text=\"\">major</kind>", "<kind>suspended-fourth</kind>");
         let r = crate::io::import_musicxml(&xml).unwrap();
         assert!(r.score.chords.is_empty());
@@ -531,5 +550,42 @@ mod tests {
         let m = detect_in_segments(&n, &seg_grid(4));
         assert_eq!((m[0].root, m[0].bass), (0, 4));
         assert_eq!(m[0].name(0), "C/E");
+    }
+    #[test]
+    fn redetect_keeps_manual_chords_and_recomputes_the_rest() {
+        let mut sc = crate::io::import_musicxml(include_str!("../../../../samples/demo.musicxml")).unwrap().score;
+        sc.detect_chord_symbols();
+        let auto = sc.chords.clone();
+        assert!(auto.len() >= 2 && auto.iter().all(|c| !c.manual), "{auto:?}");
+        // el usuario corrige el primero (un acorde que el detector no habría puesto) y relee
+        let (m, t) = (auto[0].measure, auto[0].tick);
+        sc.set_chord(m, t, "F♯dim7").unwrap();
+        sc.detect_chord_symbols();
+        let first = *sc.chords.iter().find(|c| (c.measure, c.tick) == (m, t)).unwrap();
+        assert!(first.manual && first.quality == Quality::Dim7 && first.root == 6, "{first:?}");
+        // el resto sigue siendo lo detectado y no hay dos acordes iguales seguidos entre los detectados
+        assert_eq!(sc.chords.iter().filter(|c| c.manual).count(), 1);
+        for w in sc.chords.windows(2) {
+            assert!(w[1].manual || (w[0].root, w[0].quality, w[0].bass) != (w[1].root, w[1].quality, w[1].bass), "{w:?}");
+        }
+        // una segunda relectura no cambia nada
+        let again = sc.chords.clone();
+        sc.detect_chord_symbols();
+        assert_eq!(sc.chords, again);
+        // los detectados no llevan la marca en el JSON; un `.nova` antiguo sin el campo se abre como detectado
+        assert!(!serde_json::to_string(&auto[0]).unwrap().contains("manual"));
+        assert!(serde_json::to_string(&first).unwrap().contains("manual"));
+        let old: ChordMark = serde_json::from_str(r#"{"measure":0,"tick":0,"root":0,"quality":"major","bass":0}"#).unwrap();
+        assert!(!old.manual);
+    }
+
+    #[test]
+    fn shortening_a_measure_drops_chords_outside_it() {
+        let mut sc = Score::new("t", crate::TimeSig { num: 4, den: 4 }, 0, 4);
+        sc.set_chord(2, 0, "C").unwrap();
+        sc.set_chord(2, 1440, "G7").unwrap();
+        sc.set_time_at(2, crate::TimeSig { num: 3, den: 4 }); // 3/4 = 1440 ticks: el acorde en 1440 queda fuera
+        assert_eq!(sc.chords.len(), 1);
+        assert_eq!((sc.chords[0].measure, sc.chords[0].tick), (2, 0));
     }
 }
