@@ -663,6 +663,9 @@ pub fn export_musicxml(score: &Score) -> String {
                     }
                 }
                 x.push_str(&xm[ei].dir);
+                if let Some(t) = &e.text {
+                    let _ = writeln!(x, "      <direction placement=\"above\"><direction-type><words>{}</words></direction-type></direction>", esc(t));
+                }
                 if let Some(d) = e.dynamic {
                     let _ = writeln!(x, "      <direction placement=\"below\"><direction-type><dynamics><{}/></dynamics></direction-type></direction>", d.name());
                 }
@@ -885,6 +888,7 @@ pub(crate) struct Raw {
     pub dynamic: Option<Dynamic>,
     pub articulations: Vec<Artic>,
     pub lyrics: Vec<Lyric>,
+    pub text: Option<String>,
 }
 
 /// Turn raw per-voice events of one staff into measures: durations are snapped to standard
@@ -909,7 +913,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     let tuplet = r.tup.filter(|&(a, n, _)| tuplet_notated(r.ticks, a, n).map_or(false, valid_duration) && r.start + r.ticks <= mlen);
                     if let Some((a, n, gs)) = tuplet {
                         let content = if r.rest { Content::Rest } else { Content::note(r.pitches.clone(), r.tie) };
-                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone() });
+                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone(), text: r.text.clone() });
                         pos = r.start + r.ticks;
                         continue;
                     }
@@ -926,6 +930,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     ev.dynamic = r.dynamic;
                     ev.articulations = r.articulations.clone();
                     ev.lyrics = r.lyrics.clone();
+                    ev.text = r.text.clone();
                     events.push(ev);
                     pos = r.start + t;
                 }
@@ -1004,6 +1009,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         // (staff, voice, kind, start, end) of finished slurs/hairpins; staves are resolved after the part.
         let mut part_spans: Vec<(u32, usize, SpannerKind, SpPos, SpPos)> = Vec::new();
         let mut pending_dyn: std::collections::HashMap<u32, Dynamic> = Default::default();
+        let mut pending_text: std::collections::HashMap<u32, String> = Default::default();
         let mut trill_open: std::collections::HashMap<(u32, usize, String), (usize, i64)> = Default::default();
         let mut part_repeats: Vec<(usize, bool, u8)> = Vec::new();
         let mut volta_open: Option<(usize, u8)> = None;
@@ -1155,6 +1161,15 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         }
                         if !sound_coda && (el.descendants().any(|n| n.has_tag_name("coda")) || symbols.split_whitespace().any(|w| w == "coda")) {
                             nav_marks.push((mi, Marker::Coda));
+                        }
+                        // Free text (no navigation, tempo or other sign in the same direction) is staff text.
+                        let is_sign = el.descendants().any(|n| {
+                            matches!(n.tag_name().name(), "metronome" | "segno" | "coda" | "symbol" | "dynamics" | "wedge" | "octave-shift" | "pedal" | "bracket" | "dashes")
+                                || (n.has_tag_name("sound") && ["segno", "coda", "tocoda", "fine", "dacapo", "dalsegno"].iter().any(|a| n.attribute(*a).is_some()))
+                        });
+                        let raw_words = el.descendants().filter(|n| n.has_tag_name("words")).filter_map(|n| n.text()).collect::<Vec<_>>().join(" ");
+                        if !is_sign && !raw_words.trim().is_empty() {
+                            pending_text.insert(num_of(el, "staff").unwrap_or(1).max(1) as u32, raw_words.trim().to_string());
                         }
                         if !got_tempo {
                             let t = el
@@ -1354,7 +1369,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 None
                             }
                         };
-                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics: xml_lyrics(&el) });
+                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics: xml_lyrics(&el), text: pending_text.remove(&staff) });
                         last_note = Some((si, vi, ms[mi].len() - 1, start));
                     }
                     _ => {}
@@ -1939,6 +1954,26 @@ mod tests {
         let back = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap();
         assert_eq!(back.score.parts[0].measures[0].events[0].lyrics, s.parts[0].measures[0].events[0].lyrics);
         assert_eq!(back.score.parts[0].measures[0].events[1].lyrics, s.parts[0].measures[0].events[1].lyrics);
+    }
+
+    #[test]
+    fn staff_text_roundtrips_and_is_not_confused_with_jumps() {
+        let p = |step, octave| Pitch { step, alter: 0, octave };
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 2);
+        s.put_note(0, 0, 0, 0, 960, vec![p(0, 5)]).unwrap();
+        s.put_note(0, 0, 0, 960, 960, vec![p(1, 5)]).unwrap();
+        s.set_text(0, 0, 0, 0, "dolce & <suave>").unwrap();
+        s.set_text(0, 0, 0, 960, "pizz.").unwrap();
+        s.toggle_marker(1, Marker::Fine).unwrap();
+        s.set_jump(1, Some(Jump::DcAlFine)).unwrap();
+        let xml = export_musicxml(&s);
+        let r = import_musicxml(&xml).unwrap();
+        let texts = |sc: &Score| sc.parts[0].measures.iter().flat_map(|m| m.events.iter().map(|e| e.text.clone())).collect::<Vec<_>>();
+        assert_eq!(texts(&r.score), texts(&s));
+        assert_eq!(r.score.parts[0].measures[1].jump, Some(Jump::DcAlFine));
+        assert!(r.score.parts[0].measures[1].events.iter().all(|e| e.text.is_none()), "Fine / D.C. al Fine are not staff text");
+        let back = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap();
+        assert_eq!(texts(&back.score), texts(&s));
     }
 
     #[test]

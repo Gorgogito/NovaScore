@@ -158,11 +158,17 @@ export function ScoreView(props: Props) {
     const selected = () => inSelection() || (props.cursor.part === partIdx && props.cursor.voice === lane.voice && props.cursor.m === m.index && props.cursor.start === ev.start);
     const isPlaying = () => props.playing === `${m.index}:${ev.start}`;
     const color = () => (isPlaying() ? "var(--play)" : selected() ? "var(--accent)" : "var(--ink)");
+    // The highlight also carries the staff text above the staff, so notes and rests share it.
     const hl = (
-      <Show when={selected() || isPlaying()}>
-        <rect x={le.slotX - 2} y={top - 12} width={Math.max(le.slotW, 8)} height={STAFF_H + 24} rx={4}
-          fill={isPlaying() ? "var(--play)" : "var(--accent)"} opacity={0.14} pointer-events="none" />
-      </Show>
+      <>
+        <Show when={selected() || isPlaying()}>
+          <rect x={le.slotX - 2} y={top - 12} width={Math.max(le.slotW, 8)} height={STAFF_H + 24} rx={4}
+            fill={isPlaying() ? "var(--play)" : "var(--accent)"} opacity={0.14} pointer-events="none" />
+        </Show>
+        <Show when={ev.text}>
+          <text x={le.x - 2} y={top - 14} font-family="serif" font-style="italic" font-size="13" fill="var(--ink)">{ev.text}</text>
+        </Show>
+      </>
     );
 
     if (ev.kind === "rest") {

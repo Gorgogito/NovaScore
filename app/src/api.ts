@@ -60,6 +60,8 @@ export const api = {
   transpose: (part: number, voice: number, measure: number, start: number, semitones: number) =>
     invoke<Score>("transpose_event", { part, voice, measure, start, semitones }),
 
+  setText: (part: number, voice: number, measure: number, start: number, text: string) =>
+    invoke<Score>("set_text", { part, voice, measure, start, text }),
   setLyric: (part: number, voice: number, measure: number, start: number, verse: number, text: string, syllabic: string) =>
     invoke<Score>("set_lyric", { part, voice, measure, start, verse, text, syllabic }),
   setDynamic: (part: number, voice: number, measure: number, start: number, dynamic: string | null) =>

@@ -17,7 +17,7 @@ export const DYNAMICS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "fp", "
 export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato" | "mordent" | "shorttrill" | "turn" | "invertedturn";
 
 export type Lyric = { verse: number; text: string; syllabic: "single" | "begin" | "middle" | "end" };
-export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[] } & (
+export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[]; text?: string } & (
   | { kind: "note"; pitches: Pitch[]; tie: boolean }
   | { kind: "rest" }
 );

@@ -136,6 +136,22 @@ export default function App() {
     setLyricEdit({ verse: ed.verse, text: lyricOf(p.m, p.start, ed.verse)?.text ?? "" });
   };
 
+  /** Texto de pentagrama (tecla T): texto libre sobre el pentagrama en la posición del cursor. */
+  const [textEdit, setTextEdit] = createSignal<{ text: string } | null>(null);
+  const openTextEditor = () => {
+    const c = cursor();
+    const ev = voiceEvents(score()!.parts[c.part].measures[c.m], c.voice)?.find((e) => e.start === c.start);
+    if (!ev) { setStatus("Coloca el cursor sobre una nota o un silencio para poner texto."); return; }
+    setTextEdit({ text: ev.text ?? "" });
+  };
+  const commitText = async (text: string) => {
+    const c = cursor();
+    if (await run(api.setText(c.part, c.voice, c.m, c.start, text))) {
+      setTextEdit(null);
+      setStatus(text.trim() ? "Texto de pentagrama fijado." : "Texto de pentagrama borrado.");
+    }
+  };
+
   const run = async (p: Promise<Score>, markDirty = true) => {
     try {
       apply(await p, markDirty);
@@ -588,6 +604,7 @@ export default function App() {
     else if (k === "arrowdown") await transpose(-1);
     else if (k === "k") openChordEditor(cursor().m, cursor().start);
     else if (k === "l") { e.preventDefault(); startLyrics(); }
+    else if (k === "t") { e.preventDefault(); openTextEditor(); }
     else if (k === "delete") await run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start));
     else if (k === "backspace") {
       await run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start));
@@ -799,6 +816,26 @@ export default function App() {
         <span>Duración: {ticks()} ticks</span>
         <span class="grow">{status()}</span>
       </footer>
+
+      <Show when={textEdit()}>
+        {(ed) => (
+          <div class="text-editor" style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "48px", "z-index": 50, background: "var(--panel, #fff)", border: "1px solid var(--ink-dim, #888)", "border-radius": "6px", padding: "8px", display: "flex", gap: "6px", "align-items": "center", "box-shadow": "0 2px 10px rgba(0,0,0,.3)" }}>
+            <span>Texto sobre el pentagrama:</span>
+            <input
+              ref={(el) => setTimeout(() => { el.focus(); el.select(); })}
+              value={ed().text}
+              size={20}
+              placeholder="dolce, pizz., rit.…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); void commitText(e.currentTarget.value); }
+                else if (e.key === "Escape") { e.preventDefault(); setTextEdit(null); }
+              }}
+            />
+            <button onClick={() => void commitText("")} title="Borrar el texto">Borrar</button>
+            <button onClick={() => setTextEdit(null)}>Cancelar</button>
+          </div>
+        )}
+      </Show>
 
       <Show when={lyricEdit()}>
         {(ed) => (

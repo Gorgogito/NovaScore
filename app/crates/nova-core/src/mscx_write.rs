@@ -369,6 +369,11 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
     if let Some(d) = e.dynamic {
         let _ = writeln!(out, "{indent}<Dynamic>\n{indent}  <subtype>{}</subtype>\n{indent}  </Dynamic>", d.name());
     }
+    if let Some(t) = &e.text {
+        let _ = writeln!(out, "{indent}<StaffText>
+{indent}  <text>{}</text>
+{indent}  </StaffText>", t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+    }
     for x in e.extras.iter().filter(|x| x.place == ExtraPlace::Before) {
         let _ = writeln!(out, "{indent}{}", x.xml.trim());
     }

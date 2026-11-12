@@ -199,6 +199,22 @@ fn lyric_of(n: Node) -> Option<Lyric> {
     Some(Lyric { verse, text: text?, syllabic })
 }
 
+/// Plain staff text: `<StaffText>` holding only a `<text>` without markup. Styled text stays literal.
+fn staff_text_of(n: Node) -> Option<String> {
+    if !n.has_tag_name("StaffText") {
+        return None;
+    }
+    let mut text = None;
+    for c in n.children().filter(|c| c.is_element()) {
+        if c.has_tag_name("text") && c.children().all(|k| k.is_text()) {
+            text = c.text().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        } else {
+            return None;
+        }
+    }
+    text
+}
+
 fn artic_of(n: Node) -> Option<Artic> {
     let s = text_of(n, "subtype")?.to_lowercase();
     let s = s.strip_prefix("artic").unwrap_or(&s);
@@ -282,7 +298,7 @@ fn ignored_features(score: Node, preserve: bool, first_staff: &str) -> (Vec<&'st
         }
         // Dynamics and articulations NovaScore understands are imported, not ignored; the
         // <Articulation> entries of instrument definitions have no subtype.
-        if marker_of(n).is_some() || jump_of(n).is_some() || lyric_of(n).is_some() {
+        if marker_of(n).is_some() || jump_of(n).is_some() || lyric_of(n).is_some() || staff_text_of(n).is_some() {
             continue;
         }
         if (n.has_tag_name("Dynamic") && dynamic_of(n).is_some()) || (n.has_tag_name("Articulation") && (text_of(n, "subtype").is_none() || artic_of(n).is_some())) || (n.has_tag_name("Ornament") && artic_of(n).is_some()) {
@@ -596,6 +612,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 let mut raws: Vec<Raw> = Vec::new();
                 let mut pending: Vec<Extra> = Vec::new(); // voice-level markup waiting for the next chord
                 let mut pending_dyn: Option<Dynamic> = None;
+                let mut pending_text: Option<String> = None;
 
                 for el in container.children().filter(|c| c.is_element()) {
                     let native_dyn = el.has_tag_name("Dynamic") && dynamic_of(el).is_some();
@@ -606,10 +623,14 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                             harmony_chords.push(crate::chords::ChordMark { measure: mi, tick: (pos + shift).max(0) as u32, root, quality, bass, manual: true });
                         }
                     }
+                    let native_text = staff_text_of(el);
                     if native_dyn {
                         pending_dyn = dynamic_of(el);
                     }
-                    if preserve && !native_dyn && !native_harmony && !VOICE_SKIP.contains(&el.tag_name().name()) && !el.has_tag_name("voice") {
+                    if native_text.is_some() {
+                        pending_text = native_text.clone();
+                    }
+                    if preserve && !native_dyn && native_text.is_none() && !native_harmony && !VOICE_SKIP.contains(&el.tag_name().name()) && !el.has_tag_name("voice") {
                         pending.push(Extra { place: ExtraPlace::Before, xml: src(el) });
                     }
                     match el.tag_name().name() {
@@ -778,7 +799,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                         }
                                     }
                                 }
-                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).collect() } });
+                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, text: pending_text.take(), lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).collect() } });
                             }
                             pos += real;
                         }

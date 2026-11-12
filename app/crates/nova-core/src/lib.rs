@@ -86,6 +86,9 @@ pub struct Event {
     /// Lyric syllables sung on this event (one per verse).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lyrics: Vec<Lyric>,
+    /// Free text above the staff that starts at this event (staff text: "pizz.", "dolce"...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// How a lyric syllable joins the next one.
@@ -322,7 +325,7 @@ pub fn tuplet_notated(ticks: u32, actual: u8, normal: u8) -> Option<u32> {
 
 impl Event {
     pub fn new(start: u32, ticks: u32, content: Content) -> Event {
-        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new() }
+        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None }
     }
 
     /// Written (notated) duration: the sounding duration scaled back by the tuplet ratio.
@@ -645,7 +648,7 @@ fn tuplet_rests(from: u32, to: u32, t: Tuplet) -> Result<Vec<Event>, EditError> 
     let mut off = o0;
     for piece in split_standard(o1 - o0) {
         let (a, b) = (t.tick_at(off), t.tick_at(off + piece));
-        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new() });
+        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None });
         off += piece;
     }
     Ok(out)
@@ -859,7 +862,7 @@ impl Score {
         }
         let mut next: Vec<Event> = events.iter().filter(|e| e.tuplet != Some(t) || e.start + e.ticks <= lo || e.start >= hi).cloned().collect();
         next.extend(tuplet_rests(lo, start, t)?);
-        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new() });
+        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None });
         next.extend(tuplet_rests(end, hi, t)?);
         next.sort_by_key(|e| e.start);
         *events = next;
@@ -906,7 +909,7 @@ impl Score {
         let each = span / normal as u32; // written value of one slot
         let t = Tuplet { actual, normal, start };
         let slots: Vec<Event> = (0..actual as u32)
-            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() } })
+            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() }, text: if i == 0 { e.text.clone() } else { None } })
             .collect();
         events.splice(idx..=idx, slots);
         Ok(())
@@ -944,14 +947,15 @@ impl Score {
         // Merge adjacent plain rests back into standard values (tuplet events keep their slots).
         let mut merged: Vec<Event> = Vec::new();
         // A run of merged rests keeps the dynamic and markup of its first event.
-        let mut run: Option<(u32, u32, Option<Dynamic>, Vec<Extra>)> = None;
-        let flush = |merged: &mut Vec<Event>, (s, t, dynamic, extras): (u32, u32, Option<Dynamic>, Vec<Extra>)| {
+        let mut run: Option<(u32, u32, Option<Dynamic>, Vec<Extra>, Option<String>)> = None;
+        let flush = |merged: &mut Vec<Event>, (s, t, dynamic, extras, text): (u32, u32, Option<Dynamic>, Vec<Extra>, Option<String>)| {
             let mut p = s;
             for (i, v) in split_standard(t).into_iter().enumerate() {
                 let mut ev = Event::new(p, v, Content::Rest);
                 if i == 0 {
                     ev.dynamic = dynamic;
                     ev.extras = extras.clone();
+                    ev.text = text.clone();
                 }
                 merged.push(ev);
                 p += v;
@@ -960,8 +964,8 @@ impl Score {
         for e in events.drain(..) {
             if e.content == Content::Rest && e.tuplet.is_none() {
                 run = Some(match run {
-                    Some((s, t, d, x)) => (s, t + e.ticks, d.or(e.dynamic), x),
-                    None => (e.start, e.ticks, e.dynamic, e.extras.clone()),
+                    Some((s, t, d, x, tx)) => (s, t + e.ticks, d.or(e.dynamic), x, tx.or(e.text.clone())),
+                    None => (e.start, e.ticks, e.dynamic, e.extras.clone(), e.text.clone()),
                 });
             } else {
                 if let Some(r) = run.take() {
@@ -1134,6 +1138,7 @@ impl Score {
             dynamic: None,
             articulations: Vec::new(),
             lyrics: Vec::new(),
+            text: None,
         };
         let mut new_events: Vec<Event> = Vec::new();
         // pieces of at most `max_n` slots; a note keeps its tie on the last piece only
@@ -1196,6 +1201,15 @@ impl Score {
         let events = self.voice_events_mut(part, voice, m)?;
         let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
         e.dynamic = if e.dynamic == d { None } else { d };
+        Ok(())
+    }
+
+    /// Set (or clear with empty text) the staff text that starts at an event, note or rest.
+    pub fn set_text(&mut self, part: usize, voice: usize, m: usize, start: u32, text: &str) -> Result<(), EditError> {
+        let events = self.voice_events_mut(part, voice, m)?;
+        let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
+        let t = text.trim();
+        e.text = if t.is_empty() { None } else { Some(t.to_string()) };
         Ok(())
     }
 
@@ -2070,6 +2084,10 @@ mod tests {
         s.delete_event(0, 0, 0, 0).unwrap();
         assert!(s.parts[0].measures[0].events[0].lyrics.is_empty());
         assert!(s.set_lyric(0, 0, 0, 0, 0, "x", Syllabic::Single).is_err(), "rests carry no lyrics");
+        s.set_text(0, 0, 0, 0, " dolce ").unwrap(); // texts also go on rests
+        assert_eq!(s.parts[0].measures[0].events[0].text.as_deref(), Some("dolce"));
+        s.set_text(0, 0, 0, 0, "").unwrap();
+        assert_eq!(s.parts[0].measures[0].events[0].text, None);
     }
 
     #[test]
