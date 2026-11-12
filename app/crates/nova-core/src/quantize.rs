@@ -776,6 +776,13 @@ const LAX_GAIN: f64 = 0.7;
 /// alternas en BWV 847) solo se ajustan mejor porque siguen los ataques y producen quintillos falsos.
 const LAX_MAX_JITTER: f64 = 0.2;
 
+/// Recuento de ataques: el pulso seguido debe ser un número entero de unidades (tolerancia), la textura regular (≥ 90 %
+/// de intervalos), y el recuento debe sacar ≥ 5 puntos de ataques fuera de la rejilla o eliminar los saltos de pulso.
+const TATUM_UNITS_FIT: f64 = 0.15;
+const TATUM_MIN_SHARE: f64 = 0.9;
+const TATUM_TAIL_GAIN: f64 = 0.05;
+const TATUM_JITTER: f64 = 0.1;
+
 /// Fracción de intervalos entre pulsos consecutivos que cambian más de un 12 % respecto al anterior.
 fn beat_jitter(beats: &[f64]) -> f64 {
     let d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
@@ -783,6 +790,17 @@ fn beat_jitter(beats: &[f64]) -> f64 {
         return 0.0;
     }
     d.windows(2).filter(|x| (x[1] / x[0] - 1.0).abs() > 0.12).count() as f64 / (d.len() - 1) as f64
+}
+
+/// Desviación relativa mediana entre intervalos de pulso consecutivos (|d[i+1]/d[i] − 1|).
+fn beat_dev(beats: &[f64]) -> f64 {
+    let d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
+    let mut v: Vec<f64> = d.windows(2).map(|x| (x[1] / x[0] - 1.0).abs()).collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
 }
 
 /// Desajuste mediano (en pulsos) de los ataques respecto a la rejilla de semicorcheas y tresillos de corchea
@@ -802,6 +820,23 @@ fn grid_residual(map: &BeatMap, notes: &[RawNote]) -> f64 {
     }
     d.sort_by(|a, b| a.partial_cmp(b).unwrap());
     d[d.len() / 2]
+}
+
+/// Fracción de ataques que se alejan más de 0,06 pulsos de la rejilla (semicorcheas y tresillos de corchea).
+fn grid_tail(map: &BeatMap, notes: &[RawNote]) -> f64 {
+    const GRID: [f64; 7] = [0.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75, 1.0];
+    if notes.is_empty() {
+        return 0.0;
+    }
+    let bad = notes
+        .iter()
+        .filter(|n| {
+            let p = map.pos(n.start);
+            let f = p - p.floor();
+            GRID.iter().map(|g| (f - g).abs()).fold(f64::MAX, f64::min) > 0.06
+        })
+        .count();
+    bad as f64 / notes.len() as f64
 }
 
 pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportReport, String> {
@@ -888,6 +923,32 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
                 if loose < LAX_GAIN * rigid && beat_jitter(&lb) <= LAX_MAX_JITTER {
                     warnings.push(format!("Tempo con variaciones marcadas (rubato): seguimiento flexible (desajuste con la rejilla {:.3} → {:.3} pulsos).", rigid, loose));
                     beats = lb;
+                }
+            }
+        }
+        // Texturas regulares (arpegios de semicorcheas): cuando el DP del pulso salta (4 y 5 unidades alternas) o deja
+        // ataques fuera de la rejilla, se cuentan las unidades entre ataques en lugar de buscar el pulso.
+        if o.lax_tightness.is_some() && beats.len() > 4 {
+            if let Some(t) = crate::beats::tatum(&w) {
+                let mut d: Vec<f64> = beats.windows(2).map(|x| x[1] - x[0]).collect();
+                d.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let ratio = d[d.len() / 2] / t;
+                let units = ratio.round() as usize;
+                if (ratio - units as f64).abs() < TATUM_UNITS_FIT {
+                    if let Some((tb, share)) = crate::beats::tatum_beats(&w, units) {
+                        let (jc, ja) = (beat_jitter(&beats), beat_jitter(&tb));
+                        let tc = grid_tail(&BeatMap::from_beats(beats.clone(), seed.unwrap_or(0.6)), &track_notes);
+                        let ta = grid_tail(&BeatMap::from_beats(tb.clone(), seed.unwrap_or(0.6)), &track_notes);
+                        let better = tc - ta >= TATUM_TAIL_GAIN || (jc >= TATUM_JITTER && ja <= TATUM_JITTER / 2.0);
+                        if share >= TATUM_MIN_SHARE && better && ta <= tc + TATUM_TAIL_GAIN {
+                            warnings.push(format!(
+                                "Textura regular con tempo variable: pulsos contados sobre los ataques (ataques fuera de la rejilla {:.0} % → {:.0} %).",
+                                100.0 * tc,
+                                100.0 * ta
+                            ));
+                            beats = tb;
+                        }
+                    }
                 }
             }
         }

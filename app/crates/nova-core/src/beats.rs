@@ -207,6 +207,77 @@ pub fn tatum(onsets: &[(f64, f32)]) -> Option<f64> {
     (t >= 0.08 && share >= 0.35).then_some(t)
 }
 
+/// Seguimiento por la rejilla de ataques (texturas regulares de semicorcheas o corcheas, donde casi todos los
+/// intervalos entre ataques valen una unidad): cuenta cuántas unidades hay entre ataques sucesivos, adapta la unidad
+/// poco a poco y coloca un pulso cada `units` unidades ajustando una recta local a (posición, tiempo). Devuelve los pulsos
+/// y la fracción de intervalos regulares. `None` si no hay rejilla fiable.
+pub fn tatum_beats(onsets: &[(f64, f32)], units: usize) -> Option<(Vec<f64>, f64)> {
+    if units < 2 {
+        return None;
+    }
+    let t0 = tatum(onsets)?;
+    let mut s: Vec<(f64, f32)> = onsets.to_vec();
+    s.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut cl: Vec<(f64, f32)> = Vec::new();
+    for (t, a) in s {
+        match cl.last_mut() {
+            Some(l) if t - l.0 <= 0.04 => l.1 += a,
+            _ => cl.push((t, a)),
+        }
+    }
+    let mut near: Vec<f64> = cl.windows(2).map(|w| w[1].0 - w[0].0).filter(|g| (0.8 * t0..1.6 * t0).contains(g)).collect();
+    if near.len() < 12 {
+        return None;
+    }
+    near.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut tau = near[near.len() / 2];
+    let mut p = 0.0f64;
+    let mut pts: Vec<(f64, f64, f32)> = vec![(0.0, cl[0].0, cl[0].1)];
+    let mut regular = 0usize;
+    for w in cl.windows(2) {
+        let g = w[1].0 - w[0].0;
+        let n = (g / tau).round().max(1.0);
+        let r = g / n;
+        if (r / tau - 1.0).abs() < 0.2 {
+            regular += 1;
+            if n <= 2.0 {
+                tau = 0.85 * tau + 0.15 * r;
+            }
+        }
+        p += n;
+        pts.push((p, w[1].0, w[1].1));
+    }
+    let share = regular as f64 / (cl.len() - 1) as f64;
+    if share < 0.6 {
+        return None;
+    }
+    // fase del pulso: la posición módulo `units` con más amplitud acumulada
+    let mut acc = vec![0.0f64; units];
+    for q in &pts {
+        acc[(q.0.round() as i64).rem_euclid(units as i64) as usize] += q.2 as f64;
+    }
+    let phi = (0..units).max_by(|&a, &b| acc[a].partial_cmp(&acc[b]).unwrap())? as f64;
+    let half = 1.5 * units as f64;
+    let mut beats = Vec::new();
+    let mut q = phi - ((phi - pts[0].0) / units as f64).floor() * units as f64;
+    while q <= p {
+        let sel: Vec<&(f64, f64, f32)> = pts.iter().filter(|x| (x.0 - q).abs() <= half).collect();
+        if sel.len() < 4 {
+            return None;
+        }
+        let n = sel.len() as f64;
+        let (mx, my) = (sel.iter().map(|x| x.0).sum::<f64>() / n, sel.iter().map(|x| x.1).sum::<f64>() / n);
+        let sxx: f64 = sel.iter().map(|x| (x.0 - mx).powi(2)).sum();
+        let sxy: f64 = sel.iter().map(|x| (x.0 - mx) * (x.1 - my)).sum();
+        if sxx <= 0.0 {
+            return None;
+        }
+        beats.push(my + sxy / sxx * (q - mx));
+        q += units as f64;
+    }
+    (beats.len() > 8 && beats.windows(2).all(|w| w[1] > w[0])).then_some((beats, share))
+}
+
 /// Coincidencia mínima de intervalos para considerar que la textura se repite (las piezas de arpegios dan 0,33-0,35;
 /// las melodías y la música sin patrón, ≤ 0,18).
 pub const REP_MIN_STRENGTH: f64 = 0.25;
@@ -523,5 +594,27 @@ mod tests {
         let m = BeatMap::from_beats(b, 0.6);
         let bpm = m.median_bpm();
         assert!((95.0..125.0).contains(&bpm), "{bpm}");
+    }
+    #[test]
+    fn tatum_count_follows_rubato_in_a_sixteenth_texture() {
+        // semicorcheas uniformes a ~100/min con rubato sinusoidal del 10 % (periodo 16 pulsos), con un silencio de una unidad
+        let (mut t, mut onsets, mut truth) = (1.0f64, Vec::new(), Vec::new());
+        for k in 0..400usize {
+            let beat = k as f64 / 4.0;
+            if k % 4 == 0 {
+                truth.push(t);
+            }
+            if k % 37 != 36 {
+                onsets.push((t, if k % 4 == 0 { 1.0f32 } else { 0.6 }));
+            }
+            let bpm = 100.0 * (1.0 + 0.1 * (std::f64::consts::TAU * beat / 16.0).sin());
+            t += 60.0 / bpm / 4.0;
+        }
+        let (b, share) = tatum_beats(&onsets, 4).expect("rejilla fiable");
+        assert!(share > 0.9, "{share}");
+        // cada pulso detectado coincide (módulo fase global) con uno real a menos de 25 ms
+        let off = b.iter().map(|x| truth.iter().map(|y| (x - y).abs()).fold(f64::MAX, f64::min)).fold(0.0, f64::max);
+        assert!(off < 0.025, "desviación máxima {off}");
+        assert!(b.len() >= 95, "{}", b.len());
     }
 }

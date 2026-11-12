@@ -183,3 +183,10 @@ Prueba en la app real (exe de depuración, motor de piano, tempo y compás en au
 - Rubato real: el banco usa rubato sinusoidal sintético (hasta ~10 % se sigue; 20 % no); falta rubato de intérprete real (ritardandi, fermatas) y rubato en el que solo oscila la mano derecha.
 - Compases distintos de 4/4 y anacrusas reales: el banco apenas tiene (Für Elise 3/8, Chopin 12/8).
 - Instrumentos que no son piano: solo Canon Rock (0,30 con Basic Pitch).
+
+## Rubato en texturas regulares: recuento de ataques (2026-11-11)
+Diagnóstico: en BWV 846/847 y Moonlight 3.º con rubato 0,1 el DP del pulso ya dejaba los ataques sobre la rejilla (desajuste mediano 0,006-0,010) y aun así el F1 era 0,24-0,33: el pulso saltaba entre 4 y 5 unidades (o iba un 6-10 % rápido). La mediana del desajuste no lo ve; sí lo ven la fracción de ataques a más de 0,06 pulsos de la rejilla y el salto de intervalos entre pulsos.
+- Nuevo `beats::tatum_beats`: agrupa ataques (≤ 40 ms), cuenta cuántas unidades (tatum) hay entre ataques sucesivos, adapta la unidad (15 %) y coloca un pulso cada `units` unidades con una recta local por mínimos cuadrados; la fase es la posición módulo `units` con más amplitud.
+- Se acepta en `notes_to_score` solo si: el pulso seguido es entero en unidades (tolerancia 0,15; descarta tresillos como Moonlight 1.º, donde daba −23 %), ≥ 90 % de intervalos regulares y (ataques fuera de rejilla bajan ≥ 5 puntos **o** el seguimiento actual salta ≥ 10 % y el recuento ≤ 5 %).
+- Resultado (piano, caché, 18 piezas con rubato 0,1): tempo 12/18 → **15/18**, F1 medio 0,595 → **0,694**; BWV 846 0,24 → 0,94, BWV 847 0,33 → 0,98, Moonlight 3.º 0,22 → 0,64. Con rubato 0 (38 piezas) no cambia ninguna (35/38, F1 0,900). El criterio salió de mirar estas mismas piezas: hay riesgo de ajuste a este conjunto; no hay verdad con rubato de intérprete real.
+- Sigue fallando con rubato 0,1: Clair de Lune v1/v2, La Campanella, Moonlight 1.º (tresillos), Ballade (texturas no regulares: melodía + acompañamiento, donde no hay una unidad común).
