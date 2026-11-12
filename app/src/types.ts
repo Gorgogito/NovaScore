@@ -16,7 +16,7 @@ export interface Tuplet {
 export const DYNAMICS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "fp", "sf", "sfz", "rfz"] as const;
 export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato" | "mordent" | "shorttrill" | "turn" | "invertedturn";
 
-export type Lyric = { verse: number; text: string; syllabic: "single" | "begin" | "middle" | "end" };
+export type Lyric = { verse: number; text: string; syllabic: "single" | "begin" | "middle" | "end"; extend_to?: { measure: number; tick: number } };
 export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[]; text?: string } & (
   | { kind: "note"; pitches: Pitch[]; tie: boolean }
   | { kind: "rest" }
@@ -220,3 +220,46 @@ export const measureStarts = (s: Score, n: number): number[] => {
 
 export const pitchMidi = (p: Pitch) =>
   (p.octave + 1) * 12 + [0, 2, 4, 5, 7, 9, 11][p.step] + p.alter;
+
+/** Notes under a melisma line: `m:start` -> [verse, is the last covered note]; `origins` holds `m:start:verse` of syllables with a line. */
+export interface LyricCovers {
+  covered: Map<string, [number, boolean][]>;
+  origins: Set<string>;
+}
+
+const coverCache = new WeakMap<Score, Map<string, LyricCovers>>();
+
+export const lyricCovers = (score: Score, part: number, voice: number): LyricCovers => {
+  let perScore = coverCache.get(score);
+  if (!perScore) coverCache.set(score, (perScore = new Map()));
+  const key = `${part}:${voice}`;
+  const hit = perScore.get(key);
+  if (hit) return hit;
+  const out: LyricCovers = { covered: new Map(), origins: new Set() };
+  const all = score.parts[part].measures.flatMap((m, mi) => (voiceEvents(m, voice) ?? []).map((e) => ({ mi, e })));
+  all.forEach(({ mi, e }, i) => {
+    for (const l of e.lyrics ?? []) {
+      const end = l.extend_to;
+      if (!end) continue;
+      let last: string | null = null;
+      for (const { mi: m2, e: e2 } of all.slice(i + 1)) {
+        if (m2 > end.measure || (m2 === end.measure && e2.start >= end.tick)) break;
+        if (e2.kind !== "note") continue;
+        last = `${m2}:${e2.start}`;
+        out.covered.set(last, [...(out.covered.get(last) ?? []), [l.verse, false]]);
+      }
+      if (last) {
+        out.origins.add(`${mi}:${e.start}:${l.verse}`);
+        const list = out.covered.get(last)!;
+        for (let k = list.length - 1; k >= 0; k--) {
+          if (list[k][0] === l.verse) {
+            list[k] = [l.verse, true];
+            break;
+          }
+        }
+      }
+    }
+  });
+  perScore.set(key, out);
+  return out;
+};

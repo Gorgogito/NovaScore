@@ -160,6 +160,8 @@ struct Marks {
     hp_end: Vec<(SpannerKind, i32, i64)>,
     /// Octaves between sounding and written pitch of this event (octave lines).
     oct: i32,
+    /// Melisma lengths in ticks past the end of this event, per verse.
+    lyric_ext: Vec<(u8, u32)>,
 }
 
 /// Move a spanner's ends onto real event boundaries of its voice. Slurs need notes at both
@@ -205,6 +207,17 @@ fn compute_marks(score: &Score, part: &Part, voice: usize, mi: usize, evs: &[Eve
             let pos = SpPos { measure: mi, tick: e.start };
             if pos >= sp.start && pos < sp.end {
                 marks[i].oct += sp.kind.octaves();
+            }
+        }
+    }
+    for (i, e) in evs.iter().enumerate() {
+        for l in &e.lyrics {
+            if let Some(end) = l.extend_to {
+                let starts = score.measure_starts(end.measure.max(mi) + 1);
+                let (from, to) = (starts[mi] + e.start + e.ticks, starts[end.measure] + end.tick);
+                if to > from {
+                    marks[i].lyric_ext.push((l.verse, to - from));
+                }
             }
         }
     }
@@ -418,6 +431,15 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
                     Syllabic::End => {
                         let _ = writeln!(out, "{indent}    <syllabic>end</syllabic>");
                     }
+                }
+                if let Some(&(_, t)) = mk.lyric_ext.iter().find(|x| x.0 == l.verse) {
+                    let g = {
+                        fn gcd(a: u32, b: u32) -> u32 {
+                            if b == 0 { a } else { gcd(b, a % b) }
+                        }
+                        gcd(t, PPQ * 4)
+                    };
+                    let _ = writeln!(out, "{indent}    <ticks_f>{}/{}</ticks_f>", t / g, PPQ * 4 / g);
                 }
                 let _ = writeln!(out, "{indent}    <text>{}</text>
 {indent}    </Lyrics>", l.text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
@@ -769,7 +791,7 @@ mod tests {
         let ev = &s.parts[0].measures[0].events;
         assert_eq!(ev[0].dynamic, Some(Dynamic::Mf));
         assert_eq!(ev[0].articulations, vec![Artic::Staccato]);
-        assert_eq!(ev[0].lyrics, vec![Lyric { verse: 0, text: "la".into(), syllabic: Syllabic::Single }]);
+        assert_eq!(ev[0].lyrics, vec![Lyric { verse: 0, text: "la".into(), syllabic: Syllabic::Single, extend_to: None }]);
         assert!(ev[0].extras.iter().any(|x| x.place == ExtraPlace::Note(72) && x.xml.contains("Fingering")));
         assert!(ev[1].extras.iter().all(|x| !x.xml.contains("Slur")), "slurs become real spanners, not copied markup");
         assert_eq!(s.parts[0].spanners, vec![Spanner { kind: SpannerKind::Slur, voice: 0, start: SpPos { measure: 0, tick: 0 }, end: SpPos { measure: 0, tick: 960 }, endings: 0 }]);

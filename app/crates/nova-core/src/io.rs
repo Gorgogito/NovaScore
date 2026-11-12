@@ -594,6 +594,7 @@ pub fn export_musicxml(score: &Score) -> String {
     }
     x.push_str("  </part-list>\n");
 
+    let mut melismas: std::collections::HashMap<(usize, usize), LyricCovers> = Default::default();
     for (pi, part) in score.parts.iter().enumerate() {
         let _ = writeln!(x, "  <part id=\"P{}\">", pi + 1);
         for (mi, m) in part.measures.iter().enumerate() {
@@ -655,6 +656,7 @@ pub fn export_musicxml(score: &Score) -> String {
             let prev_last = if mi > 0 { part.measures[mi - 1].voice(v).and_then(|e| e.last()) } else { None };
             let next_first = part.measures.get(mi + 1).and_then(|n| n.voice(v)).and_then(|e| e.first());
             let (xm, xm_tail) = xml_marks(score, part, v, mi, evs);
+            let mel = melismas.entry((pi, v)).or_insert_with(|| score.lyric_covers(pi, v));
             for (ei, e) in evs.iter().enumerate() {
                 if pi == 0 && v == 0 {
                     // el acorde se escribe antes del evento que suena en su tick, con desplazamiento si cae a mitad
@@ -765,7 +767,12 @@ pub fn export_musicxml(score: &Score) -> String {
                                         Syllabic::Middle => "middle",
                                         Syllabic::End => "end",
                                     };
-                                    let _ = write!(s, "<lyric number=\"{}\"><syllabic>{syl}</syllabic><text>{}</text></lyric>", l.verse as u32 + 1, esc(&l.text));
+                                    let origin_ext = if mel.origins.contains(&(mi, e.start, l.verse)) { "<extend type=\"start\"/>" } else { "" };
+                                    let _ = write!(s, "<lyric number=\"{}\"><syllabic>{syl}</syllabic><text>{}</text>{origin_ext}</lyric>", l.verse as u32 + 1, esc(&l.text));
+                                }
+                                // Notes under a melisma line carry only the extender.
+                                for &(verse, last) in mel.covered.get(&(mi, e.start)).into_iter().flatten() {
+                                    let _ = write!(s, "<lyric number=\"{}\"><extend type=\"{}\"/></lyric>", verse as u32 + 1, if last { "stop" } else { "continue" });
                                 }
                             }
                             s.push_str("</note>");
@@ -850,9 +857,10 @@ fn snap(ticks: u32) -> u32 {
     best
 }
 
-/// Lyric syllables of a MusicXML `<note>`.
-fn xml_lyrics(el: &roxmltree::Node) -> Vec<Lyric> {
+/// Lyric syllables of a MusicXML `<note>`, and its melisma marks `(verse, "start"|"continue"|"stop")`.
+fn xml_lyrics(el: &roxmltree::Node) -> (Vec<Lyric>, Vec<(u8, String)>) {
     let mut out: Vec<Lyric> = Vec::new();
+    let mut exts: Vec<(u8, String)> = Vec::new();
     for (i, l) in el.children().filter(|c| c.has_tag_name("lyric")).enumerate() {
         let verse = l
             .attribute("number")
@@ -860,6 +868,9 @@ fn xml_lyrics(el: &roxmltree::Node) -> Vec<Lyric> {
             .map(|n| n.saturating_sub(1))
             .unwrap_or(i as u32)
             .min(255) as u8;
+        if let Some(x) = l.children().find(|c| c.has_tag_name("extend")) {
+            exts.push((verse, x.attribute("type").unwrap_or("start").to_string()));
+        }
         let text: Vec<String> = l.children().filter(|c| c.has_tag_name("text")).map(|c| c.text().unwrap_or("").to_string()).collect();
         let text = text.join(" ").trim().to_string();
         if text.is_empty() || out.iter().any(|x| x.verse == verse) {
@@ -871,9 +882,9 @@ fn xml_lyrics(el: &roxmltree::Node) -> Vec<Lyric> {
             Some("end") => Syllabic::End,
             _ => Syllabic::Single,
         };
-        out.push(Lyric { verse, text, syllabic });
+        out.push(Lyric { verse, text, syllabic, extend_to: None });
     }
-    out
+    (out, exts)
 }
 
 pub(crate) struct Raw {
@@ -1010,6 +1021,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut part_spans: Vec<(u32, usize, SpannerKind, SpPos, SpPos)> = Vec::new();
         let mut pending_dyn: std::collections::HashMap<u32, Dynamic> = Default::default();
         let mut pending_text: std::collections::HashMap<u32, String> = Default::default();
+        let mut lyric_open: std::collections::HashMap<(u32, usize, u8), (usize, usize)> = Default::default();
         let mut trill_open: std::collections::HashMap<(u32, usize, String), (usize, i64)> = Default::default();
         let mut part_repeats: Vec<(usize, bool, u8)> = Vec::new();
         let mut volta_open: Option<(usize, u8)> = None;
@@ -1369,7 +1381,22 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 None
                             }
                         };
-                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics: xml_lyrics(&el), text: pending_text.remove(&staff) });
+                        let (lyrics, lyric_exts) = xml_lyrics(&el);
+                        let raw_idx = ms[mi].len();
+                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics, text: pending_text.remove(&staff) });
+                        for (verse, kind) in lyric_exts {
+                            let key = (staff, vi, verse);
+                            if kind == "start" {
+                                lyric_open.insert(key, (mi, raw_idx));
+                            } else if let Some(&(om, oi)) = lyric_open.get(&key) {
+                                if let Some(l) = ms[om][oi].lyrics.iter_mut().find(|l| l.verse == verse) {
+                                    l.extend_to = Some(SpPos { measure: mi, tick: (start + dur).max(0) as u32 });
+                                }
+                                if kind == "stop" {
+                                    lyric_open.remove(&key);
+                                }
+                            }
+                        }
                         last_note = Some((si, vi, ms[mi].len() - 1, start));
                     }
                     _ => {}
@@ -1954,6 +1981,31 @@ mod tests {
         let back = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap();
         assert_eq!(back.score.parts[0].measures[0].events[0].lyrics, s.parts[0].measures[0].events[0].lyrics);
         assert_eq!(back.score.parts[0].measures[0].events[1].lyrics, s.parts[0].measures[0].events[1].lyrics);
+    }
+
+    #[test]
+    fn melisma_lines_roundtrip_through_musicxml_and_musescore() {
+        let p = |step, octave| Pitch { step, alter: 0, octave };
+        let mut s = Score::new("m", TimeSig { num: 4, den: 4 }, 0, 2);
+        for (m, t, st) in [(0, 0, 0u8), (0, 480, 1), (0, 960, 2), (0, 1440, 3), (1, 0, 4)] {
+            s.put_note(0, 0, m, t, 480, vec![p(st, 5)]).unwrap();
+        }
+        s.set_lyric(0, 0, 0, 0, 0, "la", Syllabic::Single).unwrap();
+        s.set_lyric(0, 0, 0, 1440, 0, "si", Syllabic::Begin).unwrap();
+        // the first line covers two notes, the second crosses the barline
+        s.set_lyric_extend(0, 0, 0, 0, 0, Some(SpPos { measure: 0, tick: 1440 })).unwrap();
+        s.set_lyric_extend(0, 0, 0, 1440, 0, Some(SpPos { measure: 1, tick: 480 })).unwrap();
+        let c = s.lyric_covers(0, 0);
+        assert_eq!(c.covered.get(&(0, 480)), Some(&vec![(0, false)]));
+        assert_eq!(c.covered.get(&(0, 960)), Some(&vec![(0, true)]));
+        assert_eq!(c.covered.get(&(1, 0)), Some(&vec![(0, true)]));
+        assert!(c.origins.contains(&(0, 0, 0)) && c.origins.contains(&(0, 1440, 0)));
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<extend type=\"start\"/>") && xml.contains("<extend type=\"continue\"/>") && xml.contains("<extend type=\"stop\"/>"));
+        let ext = |sc: &Score| sc.parts[0].measures.iter().flat_map(|m| m.events.iter().flat_map(|e| e.lyrics.iter().map(|l| l.extend_to))).collect::<Vec<_>>();
+        assert_eq!(ext(&import_musicxml(&xml).unwrap().score), ext(&s));
+        let back = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap();
+        assert_eq!(ext(&back.score), ext(&s));
     }
 
     #[test]

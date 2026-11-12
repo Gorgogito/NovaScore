@@ -105,7 +105,7 @@ export default function App() {
     const here = notes.find((p) => p.m === c.m && p.start === c.start) ?? notes.find((p) => p.m > c.m || (p.m === c.m && p.start > c.start)) ?? notes[0];
     setCursor({ ...c, m: here.m, start: here.start });
     setLyricEdit({ verse, text: lyricOf(here.m, here.start, verse)?.text ?? "" });
-    setStatus("Letra: escribe la sílaba; Espacio = siguiente nota, «-» = sílaba con guion, Retroceso (vacío) = nota anterior, Esc = terminar.");
+    setStatus("Letra: escribe la sílaba; Espacio = siguiente nota, «-» = sílaba con guion, «_» = alargar con línea de melisma, Retroceso (vacío) = nota anterior, Esc = terminar.");
   };
   const lyricCommit = async (text: string, hyphen: boolean) => {
     const ed = lyricEdit();
@@ -121,6 +121,35 @@ export default function App() {
       if (!(await run(api.setLyric(c.part, c.voice, c.m, c.start, ed.verse, t, syl)))) return;
     }
     const next = notes[i + 1];
+    if (!next) { setLyricEdit(null); setStatus("Letra: fin de las notas."); return; }
+    setCursor({ ...c, m: next.m, start: next.start });
+    setLyricEdit({ verse: ed.verse, text: lyricOf(next.m, next.start, ed.verse)?.text ?? "" });
+  };
+  /** «_»: la sílaba escrita (o la anterior, si el campo está vacío) se alarga con una línea de melisma sobre la nota siguiente (o la actual). */
+  const lyricUnderscore = async (text: string) => {
+    const ed = lyricEdit();
+    if (!ed) return;
+    const c = cursor();
+    const notes = noteStarts();
+    const i = notes.findIndex((p) => p.m === c.m && p.start === c.start);
+    const t = text.trim();
+    let origin = -1;
+    let target = i + 1;
+    if (t) {
+      const prev = i > 0 ? lyricOf(notes[i - 1].m, notes[i - 1].start, ed.verse) : undefined;
+      const syl = prev?.syllabic === "begin" || prev?.syllabic === "middle" ? "end" : "single";
+      if (!(await run(api.setLyric(c.part, c.voice, c.m, c.start, ed.verse, t, syl)))) return;
+      origin = i;
+    } else {
+      for (let j = i - 1; j >= 0 && origin < 0; j--) if (lyricOf(notes[j].m, notes[j].start, ed.verse)) origin = j;
+      target = i;
+    }
+    if (origin < 0 || target >= notes.length) { setStatus("No hay sílaba que alargar o no hay más notas."); return; }
+    const tn = notes[target];
+    const tev = voiceEvents(score()!.parts[c.part].measures[tn.m], c.voice)!.find((e) => e.start === tn.start)!;
+    const o = notes[origin];
+    if (!(await run(api.setLyricExtend(c.part, c.voice, o.m, o.start, ed.verse, tn.m, tn.start + tev.ticks)))) return;
+    const next = notes[target + 1];
     if (!next) { setLyricEdit(null); setStatus("Letra: fin de las notas."); return; }
     setCursor({ ...c, m: next.m, start: next.start });
     setLyricEdit({ verse: ed.verse, text: lyricOf(next.m, next.start, ed.verse)?.text ?? "" });
@@ -853,6 +882,7 @@ export default function App() {
               onKeyDown={(e) => {
                 if (e.key === " " || e.key === "Enter") { e.preventDefault(); void lyricCommit(e.currentTarget.value, false); }
                 else if (e.key === "-") { e.preventDefault(); void lyricCommit(e.currentTarget.value, true); }
+                else if (e.key === "_") { e.preventDefault(); void lyricUnderscore(e.currentTarget.value); }
                 else if (e.key === "Backspace" && e.currentTarget.value === "") { e.preventDefault(); lyricBack(); }
                 else if (e.key === "Escape") { e.preventDefault(); setLyricEdit(null); }
               }}

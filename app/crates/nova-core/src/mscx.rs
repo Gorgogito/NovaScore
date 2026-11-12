@@ -172,19 +172,32 @@ fn dynamic_of(n: Node) -> Option<Dynamic> {
 }
 
 /// Articulation of a MuseScore `<Articulation>` element ("articStaccatoAbove", "staccato"...).
-/// A plain lyric syllable (`<Lyrics>` with only `<text>`, `<no>` and `<syllabic>`); anything
-/// fancier (melisma lengths, styles, rich text) stays in the literal extras.
-fn lyric_of(n: Node) -> Option<Lyric> {
+/// A plain lyric syllable (`<Lyrics>` with only `<text>`, `<no>`, `<syllabic>`, melisma length and `<eid>`),
+/// with the length of its melisma line in ticks (0 = none); anything fancier (styles, rich text) stays in
+/// the literal extras. MuseScore 4.4+ writes the length as `<ticks_f>` (fraction of a whole note), older
+/// versions as `<ticks>` (480 per quarter).
+fn lyric_of(n: Node) -> Option<(Lyric, u32)> {
     if !n.has_tag_name("Lyrics") {
         return None;
     }
     let mut text = None;
     let mut verse = 0u8;
     let mut syllabic = Syllabic::Single;
+    let mut ext = 0u32;
     for c in n.children().filter(|c| c.is_element()) {
         match c.tag_name().name() {
             "text" if c.children().all(|k| k.is_text()) => text = c.text().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
             "no" => verse = c.text()?.trim().parse::<u8>().ok()?,
+            "eid" => {}
+            "ticks" => ext = c.text()?.trim().parse::<u32>().ok()?,
+            "ticks_f" => {
+                let (a, b) = c.text()?.trim().split_once('/')?;
+                let (a, b) = (a.trim().parse::<i64>().ok()?, b.trim().parse::<i64>().ok()?);
+                if b == 0 || a < 0 {
+                    return None;
+                }
+                ext = (a * 4 * PPQ as i64 / b) as u32;
+            }
             "syllabic" => {
                 syllabic = match c.text()?.trim() {
                     "begin" => Syllabic::Begin,
@@ -196,7 +209,7 @@ fn lyric_of(n: Node) -> Option<Lyric> {
             _ => return None,
         }
     }
-    Some(Lyric { verse, text: text?, syllabic })
+    Some((Lyric { verse, text: text?, syllabic, extend_to: None }, ext))
 }
 
 /// Plain staff text: `<StaffText>` holding only a `<text>` without markup. Styled text stays literal.
@@ -799,7 +812,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                         }
                                     }
                                 }
-                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, text: pending_text.take(), lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).collect() } });
+                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, text: pending_text.take(), lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
                             }
                             pos += real;
                         }
@@ -961,6 +974,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
         warnings.push(format!("Se perderán al guardar como MuseScore: {}.", lost.join(", ")));
     }
     warnings.insert(0, format!("Archivo de MuseScore versión {version}."));
+    score.normalize_lyric_extends();
     Ok(ImportReport { score, warnings })
 }
 
@@ -1108,14 +1122,34 @@ mod tests {
         let m = r#"<Measure><voice><Chord><durationType>half</durationType><Lyrics><syllabic>begin</syllabic><text>la</text></Lyrics><Lyrics><no>1</no><text>do</text></Lyrics><Note><pitch>60</pitch></Note></Chord><Chord><durationType>half</durationType><Lyrics><syllabic>end</syllabic><text>la</text></Lyrics><Note><pitch>62</pitch></Note></Chord></voice></Measure>"#;
         let r = import_mscx(&mscx4(m)).unwrap();
         let ev = &r.score.parts[0].measures[0].events;
-        assert_eq!(ev[0].lyrics, vec![Lyric { verse: 0, text: "la".into(), syllabic: Syllabic::Begin }, Lyric { verse: 1, text: "do".into(), syllabic: Syllabic::Single }]);
+        assert_eq!(ev[0].lyrics, vec![Lyric { verse: 0, text: "la".into(), syllabic: Syllabic::Begin, extend_to: None }, Lyric { verse: 1, text: "do".into(), syllabic: Syllabic::Single, extend_to: None }]);
         assert_eq!(ev[1].lyrics[0].syllabic, Syllabic::End);
         assert!(ev.iter().all(|e| e.extras.is_empty()) && !r.warnings.join(" ").contains("letra"), "{:?}", r.warnings);
     }
 
     #[test]
+    fn melisma_lengths_from_musescore_are_imported() {
+        // MuseScore 4.7 writes <eid> and the line length as a fraction of a whole note
+        let q = |l: &str| format!("<Chord><durationType>quarter</durationType>{l}<Note><pitch>60</pitch></Note></Chord>");
+        let m = format!(
+            "<Measure><voice>{}{}{}{}</voice></Measure><Measure><voice>{}</voice></Measure>",
+            q("<Lyrics><ticks_f>2/4</ticks_f><eid>abc</eid><text>la</text></Lyrics>"),
+            q(""),
+            q(""),
+            q("<Lyrics><ticks>960</ticks><text>si</text></Lyrics>"),
+            q("")
+        );
+        let r = import_mscx(&mscx4(&m)).unwrap();
+        let ms = &r.score.parts[0].measures;
+        assert_eq!(ms[0].events[0].lyrics[0].extend_to, Some(SpPos { measure: 0, tick: 1440 }));
+        // the second line starts at the last beat: 480 of its note + 960 more reach beat 3 of the next measure
+        assert_eq!(ms[0].events[3].lyrics[0].extend_to, Some(SpPos { measure: 1, tick: 960 }));
+        assert!(ms[0].events[0].extras.is_empty() && !r.warnings.join(" ").contains("letra"), "{:?}", r.warnings);
+    }
+
+    #[test]
     fn warns_about_unsupported_content_and_rejects_garbage() {
-        let m = r#"<Measure><voice><Dynamic><subtype>p</subtype></Dynamic><Chord><durationType>whole</durationType><Lyrics><ticks>480</ticks><text>la</text></Lyrics><Note><pitch>60</pitch></Note></Chord></voice></Measure>"#;
+        let m = r#"<Measure><voice><Dynamic><subtype>p</subtype></Dynamic><Chord><durationType>whole</durationType><Lyrics><offset x="1" y="2"/><text>la</text></Lyrics><Note><pitch>60</pitch></Note></Chord></voice></Measure>"#;
         let r = import_mscx(&mscx4(m)).unwrap();
         let w = r.warnings.join(" ");
         assert!(w.contains("letra") && !w.contains("dinámicas"), "{w}");

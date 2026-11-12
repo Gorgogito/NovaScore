@@ -62,6 +62,8 @@ export const api = {
 
   setText: (part: number, voice: number, measure: number, start: number, text: string) =>
     invoke<Score>("set_text", { part, voice, measure, start, text }),
+  setLyricExtend: (part: number, voice: number, measure: number, start: number, verse: number, endMeasure: number | null, endTick: number) =>
+    invoke<Score>("set_lyric_extend", { part, voice, measure, start, verse, endMeasure, endTick }),
   setLyric: (part: number, voice: number, measure: number, start: number, verse: number, text: string, syllabic: string) =>
     invoke<Score>("set_lyric", { part, voice, measure, start, verse, text, syllabic }),
   setDynamic: (part: number, voice: number, measure: number, start: number, dynamic: string | null) =>

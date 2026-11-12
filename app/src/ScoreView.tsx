@@ -1,7 +1,7 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
 import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, staffIdx, STAFF_H } from "./layout";
-import { chordName, ChordMark, Cursor, JUMP_TEXT, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
+import { chordName, ChordMark, Cursor, JUMP_TEXT, lyricCovers, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
 const g2 = g;
@@ -321,9 +321,17 @@ export function ScoreView(props: Props) {
             );
           }}
         </For>
+        <For each={lyricCovers(props.score, partIdx, lane.voice).covered.get(`${m.index}:${ev.start}`) ?? []}>
+          {([verse, last]) => (
+            <line x1={le.slotX} x2={last ? le.x + headW + 2 : le.slotX + le.slotW} y1={bottomY + 47.5 + verse * LYRIC_LINE} y2={bottomY + 47.5 + verse * LYRIC_LINE} stroke="var(--ink)" stroke-width={0.8} />
+          )}
+        </For>
         <For each={ev.lyrics ?? []}>
           {(y) => (
             <>
+              <Show when={lyricCovers(props.score, partIdx, lane.voice).origins.has(`${m.index}:${ev.start}:${y.verse}`)}>
+                <line x1={le.x + headW / 2 + (y.text.length * LYRIC_CHAR_W) / 2 + 2} x2={le.slotX + le.slotW} y1={bottomY + 47.5 + y.verse * LYRIC_LINE} y2={bottomY + 47.5 + y.verse * LYRIC_LINE} stroke="var(--ink)" stroke-width={0.8} />
+              </Show>
               <text x={le.x + headW / 2} y={bottomY + 46 + y.verse * LYRIC_LINE} text-anchor="middle" font-family="serif" font-size="12.5" fill="var(--ink)">{y.text}</text>
               <Show when={y.syllabic === "begin" || y.syllabic === "middle"}>
                 <text x={(le.x + headW / 2 + (y.text.length * LYRIC_CHAR_W) / 2 + le.slotX + le.slotW + 4) / 2} y={bottomY + 46 + y.verse * LYRIC_LINE} text-anchor="middle" font-family="serif" font-size="12.5" fill="var(--ink)">-</text>

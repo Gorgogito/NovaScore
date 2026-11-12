@@ -114,6 +114,18 @@ pub struct Lyric {
     pub text: String,
     #[serde(default)]
     pub syllabic: Syllabic,
+    /// Melisma: the extender line runs from the syllable to this position (the end of the last
+    /// note it covers), anchored to time like a spanner. Notes starting before it are covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extend_to: Option<SpPos>,
+}
+
+/// Notes covered by melisma lines, keyed by `(measure, start tick)`: `(verse, is the last covered note)`.
+#[derive(Debug, Default)]
+pub struct LyricCovers {
+    pub covered: std::collections::HashMap<(usize, u32), Vec<(u8, bool)>>,
+    /// Syllables `(measure, start tick, verse)` whose line covers at least one note.
+    pub origins: std::collections::HashSet<(usize, u32, u8)>,
 }
 
 /// Dynamic markings, with the MIDI velocity MuseScore uses for them.
@@ -1213,6 +1225,64 @@ impl Score {
         Ok(())
     }
 
+    /// Set (or clear with `None`) the end of the melisma line of a verse's syllable.
+    pub fn set_lyric_extend(&mut self, part: usize, voice: usize, m: usize, start: u32, verse: u8, end: Option<SpPos>) -> Result<(), EditError> {
+        let events = self.voice_events_mut(part, voice, m)?;
+        let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
+        let l = e.lyrics.iter_mut().find(|l| l.verse == verse).ok_or(EditError::OutOfRange)?;
+        l.extend_to = end;
+        Ok(())
+    }
+
+    /// Roll melisma ends that overflow their measure (importers add durations to the start tick)
+    /// into the following measures.
+    pub fn normalize_lyric_extends(&mut self) {
+        let lens: Vec<u32> = (0..self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0)).map(|m| self.measure_len(m)).collect();
+        for p in &mut self.parts {
+            for m in &mut p.measures {
+                for e in m.events.iter_mut().chain(m.voices.iter_mut().flatten()) {
+                    for l in &mut e.lyrics {
+                        if let Some(end) = &mut l.extend_to {
+                            while lens.get(end.measure).map_or(false, |&len| len > 0 && end.tick >= len) {
+                                end.tick -= lens[end.measure];
+                                end.measure += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Notes of a voice that lie under a melisma line. The last covered note of each line is marked.
+    pub fn lyric_covers(&self, part: usize, voice: usize) -> LyricCovers {
+        let mut out = LyricCovers::default();
+        let Some(p) = self.parts.get(part) else { return out };
+        let all: Vec<(usize, &Event)> = p.measures.iter().enumerate().flat_map(|(mi, m)| m.voice(voice).into_iter().flatten().map(move |e| (mi, e))).collect();
+        for (i, (mi, e)) in all.iter().enumerate() {
+            for l in &e.lyrics {
+                let Some(end) = l.extend_to else { continue };
+                let mut last: Option<(usize, u32)> = None;
+                for (m2, e2) in &all[i + 1..] {
+                    if (SpPos { measure: *m2, tick: e2.start }) >= end {
+                        break;
+                    }
+                    if matches!(e2.content, Content::Note { .. }) {
+                        out.covered.entry((*m2, e2.start)).or_default().push((l.verse, false));
+                        last = Some((*m2, e2.start));
+                    }
+                }
+                if let Some(k) = last {
+                    out.origins.insert((*mi, e.start, l.verse));
+                    if let Some(v) = out.covered.get_mut(&k).and_then(|v| v.iter_mut().rev().find(|x| x.0 == l.verse)) {
+                        v.1 = true;
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Set the syllable of a verse on a note (an empty text removes it).
     pub fn set_lyric(&mut self, part: usize, voice: usize, m: usize, start: u32, verse: u8, text: &str, syllabic: Syllabic) -> Result<(), EditError> {
         let events = self.voice_events_mut(part, voice, m)?;
@@ -1220,10 +1290,11 @@ impl Score {
         if !matches!(e.content, Content::Note { .. }) {
             return Err(EditError::OutOfRange);
         }
+        let extend_to = e.lyrics.iter().find(|l| l.verse == verse).and_then(|l| l.extend_to);
         e.lyrics.retain(|l| l.verse != verse);
         let text = text.trim();
         if !text.is_empty() {
-            e.lyrics.push(Lyric { verse, text: text.to_string(), syllabic });
+            e.lyrics.push(Lyric { verse, text: text.to_string(), syllabic, extend_to });
             e.lyrics.sort_by_key(|l| l.verse);
         }
         Ok(())
