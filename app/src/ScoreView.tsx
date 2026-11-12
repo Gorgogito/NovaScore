@@ -25,6 +25,8 @@ const ARTIC_GLYPH: Record<string, [number, number]> = {
   marcato: [0xe4ac, 0xe4ad],
   portato: [0xe4b2, 0xe4b3],
 };
+// Ornaments are always drawn above the staff.
+const ORNAMENT_GLYPH: Record<string, number> = { mordent: 0xe56d, shorttrill: 0xe56c, turn: 0xe567, invertedturn: 0xe568 };
 const HEAD_W = 11.8;
 
 const flagsOf = (base: number) => (base <= 240 ? Math.min(4, Math.round(Math.log2(480 / base))) : 0);
@@ -293,7 +295,14 @@ export function ScoreView(props: Props) {
         </Show>
         <For each={leadTies}>{(d) => <path d={d} fill="none" stroke={color()} stroke-width={1.5} stroke-linecap="round" />}</For>
         <For each={ties}>{(d) => <path d={d} fill="none" stroke={color()} stroke-width={1.5} stroke-linecap="round" />}</For>
-        <For each={ev.articulations ?? []}>
+        <For each={(ev.articulations ?? []).filter((a) => ORNAMENT_GLYPH[a])}>
+          {(a) => (
+            <text x={le.x + headW / 2} y={Math.min(topY, bottomY - STAFF_H) - 8} text-anchor="middle" font-family="Bravura" font-size={FONT} fill={color()}>
+              {g(ORNAMENT_GLYPH[a])}
+            </text>
+          )}
+        </For>
+        <For each={(ev.articulations ?? []).filter((a) => !ORNAMENT_GLYPH[a])}>
           {(a, ai) => {
             // Articulations sit on the side opposite to the stem, stacked outwards.
             const above = !up;

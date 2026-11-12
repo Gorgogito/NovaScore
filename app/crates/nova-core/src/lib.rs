@@ -155,7 +155,29 @@ pub enum Artic {
     Marcato,
     /// Tenuto with staccato (louré).
     Portato,
+    /// Mordent: main note, the note below, main note.
+    Mordent,
+    /// Upper mordent (pralltriller): main note, the note above, main note.
+    ShortTrill,
+    /// Turn: the note above, main, the note below, main.
+    Turn,
+    /// Inverted turn: the note below, main, the note above, main.
+    InvertedTurn,
 }
+
+/// Every articulation and ornament, in the order the toolbar shows them.
+pub const ALL_ARTICS: [Artic; 10] = [
+    Artic::Staccato,
+    Artic::Staccatissimo,
+    Artic::Tenuto,
+    Artic::Accent,
+    Artic::Marcato,
+    Artic::Portato,
+    Artic::Mordent,
+    Artic::ShortTrill,
+    Artic::Turn,
+    Artic::InvertedTurn,
+];
 
 impl Artic {
     pub fn name(self) -> &'static str {
@@ -166,11 +188,20 @@ impl Artic {
             Artic::Accent => "accent",
             Artic::Marcato => "marcato",
             Artic::Portato => "portato",
+            Artic::Mordent => "mordent",
+            Artic::ShortTrill => "shorttrill",
+            Artic::Turn => "turn",
+            Artic::InvertedTurn => "invertedturn",
         }
     }
 
     pub fn from_name(s: &str) -> Option<Artic> {
-        [Artic::Staccato, Artic::Staccatissimo, Artic::Tenuto, Artic::Accent, Artic::Marcato, Artic::Portato].into_iter().find(|a| a.name() == s.trim())
+        ALL_ARTICS.into_iter().find(|a| a.name() == s.trim())
+    }
+
+    /// Ornaments change the notes that sound; the other signs only shape one note.
+    pub fn is_ornament(self) -> bool {
+        matches!(self, Artic::Mordent | Artic::ShortTrill | Artic::Turn | Artic::InvertedTurn)
     }
 
     /// Share of the written length that sounds.

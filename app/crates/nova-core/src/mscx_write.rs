@@ -82,6 +82,10 @@ fn artic_subtype(a: Artic) -> &'static str {
         Artic::Accent => "articAccentAbove",
         Artic::Marcato => "articMarcatoAbove",
         Artic::Portato => "articTenutoStaccatoAbove",
+        Artic::Mordent => "ornamentMordent",
+        Artic::ShortTrill => "ornamentShortTrill",
+        Artic::Turn => "ornamentTurn",
+        Artic::InvertedTurn => "ornamentTurnInverted",
     }
 }
 
@@ -389,7 +393,8 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
             let _ = writeln!(out, "{indent}<Chord>");
             let _ = write!(out, "{dots_xml}{indent}  <durationType>{dtype}</durationType>\n");
             for a in &e.articulations {
-                let _ = writeln!(out, "{indent}  <Articulation>\n{indent}    <subtype>{}</subtype>\n{indent}    </Articulation>", artic_subtype(*a));
+                let tag = if a.is_ornament() { "Ornament" } else { "Articulation" };
+                let _ = writeln!(out, "{indent}  <{tag}>\n{indent}    <subtype>{}</subtype>\n{indent}    </{tag}>", artic_subtype(*a));
             }
             for &loc in &mk.slur_end {
                 write_slur_marker(out, &format!("{indent}  "), false, loc);
@@ -770,6 +775,20 @@ mod tests {
         // changing the instrument stops reusing the stored definition
         e.parts[0].program = 40;
         assert!(export_mscx(&e).contains("<program value=\"40\"/>") && !export_mscx(&e).contains("<program value=\"68\"/>"));
+    }
+
+    #[test]
+    fn ornaments_roundtrip_through_mscx() {
+        let mut s = Score::new("orn", TimeSig { num: 4, den: 4 }, 0, 1);
+        for (i, a) in [Artic::Mordent, Artic::ShortTrill, Artic::Turn, Artic::InvertedTurn].into_iter().enumerate() {
+            let t = i as u32 * 480;
+            s.put_note(0, 0, 0, t, 480, vec![p(2, 5)]).unwrap();
+            s.toggle_articulation(0, 0, SpPos { measure: 0, tick: t }, SpPos { measure: 0, tick: t }, a).unwrap();
+        }
+        let xml = export_mscx(&s);
+        assert!(xml.contains("<subtype>ornamentMordent</subtype>") && xml.contains("<subtype>ornamentTurnInverted</subtype>"));
+        let back = import_mscx(&xml).unwrap().score;
+        assert_eq!(back.parts[0].measures[0].events.iter().map(|e| e.articulations.clone()).collect::<Vec<_>>(), s.parts[0].measures[0].events.iter().map(|e| e.articulations.clone()).collect::<Vec<_>>());
     }
 
     #[test]

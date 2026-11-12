@@ -666,6 +666,10 @@ export default function App() {
         <button title="Acento" onClick={() => toggleArtic("accent")}>&gt;</button>
         <button title="Marcato (Mayús+M)" onClick={() => toggleArtic("marcato")}>^</button>
         <button title="Portato (tenuto con staccato)" onClick={() => toggleArtic("portato")}>–•</button>
+        <button title="Mordente: nota, la de abajo, nota" onClick={() => toggleArtic("mordent")}>mord</button>
+        <button title="Mordente superior (pralltriller): nota, la de arriba, nota" onClick={() => toggleArtic("shorttrill")}>prall</button>
+        <button title="Grupeto: arriba, nota, abajo, nota" onClick={() => toggleArtic("turn")}>grup</button>
+        <button title="Grupeto invertido: abajo, nota, arriba, nota" onClick={() => toggleArtic("invertedturn")}>grup↺</button>
         <span class="sep" />
         <span class="label">Líneas</span>
         <button title="8va: suena una octava más alta que lo escrito" onClick={() => addSpanner("ottava8va")}>8va</button>

@@ -14,7 +14,7 @@ export interface Tuplet {
 }
 
 export const DYNAMICS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "fp", "sf", "sfz", "rfz"] as const;
-export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato";
+export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato" | "mordent" | "shorttrill" | "turn" | "invertedturn";
 
 export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[] } & (
   | { kind: "note"; pitches: Pitch[]; tie: boolean }

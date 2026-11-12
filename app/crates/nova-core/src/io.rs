@@ -84,6 +84,34 @@ fn trill_upper(midi: i32, fifths: i8) -> i32 {
     (1..=2).map(|d| midi + d).find(|&m| in_scale(m)).unwrap_or(midi + 2)
 }
 
+/// Pitch a step below `midi` in the major scale of the key.
+fn scale_lower(midi: i32, fifths: i8) -> i32 {
+    let tonic = (fifths as i32 * 7).rem_euclid(12);
+    let in_scale = |m: i32| [0, 2, 4, 5, 7, 9, 11].contains(&(m - tonic).rem_euclid(12));
+    (1..=2).map(|d| midi - d).find(|&m| in_scale(m)).unwrap_or(midi - 2)
+}
+
+/// An ornament written out as the notes it plays inside the note's length: (pitch, ticks) pairs.
+/// `None` when the note is too short to hold it.
+fn ornament_notes(a: Artic, s: &Sound, fifths: i8) -> Option<Vec<(i32, u32)>> {
+    let (up, down) = (trill_upper(s.midi, fifths), scale_lower(s.midi, fifths));
+    let t = s.ticks;
+    match a {
+        Artic::Mordent | Artic::ShortTrill => {
+            let len = 60;
+            (t >= 3 * len).then(|| vec![(s.midi, len), (if a == Artic::Mordent { down } else { up }, len), (s.midi, t - 2 * len)])
+        }
+        Artic::Turn | Artic::InvertedTurn => {
+            let len = (t / 4).min(90);
+            (len >= 40).then(|| {
+                let (first, third) = if a == Artic::Turn { (up, down) } else { (down, up) };
+                vec![(first, len), (s.midi, len), (third, len), (s.midi, t - 3 * len)]
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The notes of the score as they play: repeats and voltas are unfolded, tied notes are merged,
 /// dynamics, articulations and trills shape velocity and length. `start` is playing time.
 pub fn sounds(score: &Score) -> Vec<Sound> {
@@ -95,6 +123,7 @@ pub fn sounds(score: &Score) -> Vec<Sound> {
     let mut written_at: Vec<(u32, usize)> = Vec::new();
     let chans = score.midi_channels();
     let mut gates: Vec<(usize, u32, f64)> = Vec::new(); // sound index, written ticks, gate
+    let mut ornaments: std::collections::HashMap<usize, Artic> = Default::default(); // sound index -> ornament
     for (pi, part) in score.parts.iter().enumerate() {
       let velocity = Velocity::new(part, &starts);
       for voice in 0..MAX_VOICES {
@@ -133,6 +162,9 @@ pub fn sounds(score: &Score) -> Vec<Sound> {
                                     if gate < 1.0 {
                                         gates.push((out.len() - 1, e.ticks, gate));
                                     }
+                                    if let Some(o) = e.articulations.iter().find(|a| a.is_ornament()) {
+                                        ornaments.insert(out.len() - 1, *o);
+                                    }
                                     out.len() - 1
                                 }
                             };
@@ -155,12 +187,23 @@ pub fn sounds(score: &Score) -> Vec<Sound> {
     }
     // Trills: the note alternates with its upper neighbour in 32nd notes.
     let any_trill = score.parts.iter().any(|p| p.spanners.iter().any(|s| s.kind == SpannerKind::Trill));
-    if !any_trill {
+    if !any_trill && ornaments.is_empty() {
         return out;
     }
     let mut result = Vec::with_capacity(out.len());
-    for (s, (abs, voice)) in out.into_iter().zip(written_at) {
+    for (i, (s, (abs, voice))) in out.into_iter().zip(written_at).enumerate() {
         let part = &score.parts[s.part];
+        // Mordents and turns are written out as the notes they play.
+        if let (Some(&o), false) = (ornaments.get(&i), part.percussion) {
+            if let Some(notes) = ornament_notes(o, &s, score.fifths) {
+                let mut t = 0;
+                for (midi, len) in notes {
+                    result.push(Sound { start: s.start + t, ticks: len, midi, ..s.clone() });
+                    t += len;
+                }
+                continue;
+            }
+        }
         let trilled = !part.percussion
             && part.spanners.iter().any(|sp| {
                 let at = |p: SpPos| starts.get(p.measure).copied().unwrap_or(0) + p.tick;
@@ -672,10 +715,11 @@ pub fn export_musicxml(score: &Score) -> String {
                                 s.push_str("<tie type=\"start\"/>");
                             }
                             let _ = write!(s, "<voice>{}</voice><type>{}</type>{}{}", v + 1, type_name(base), if dot { "<dot/>" } else { "" }, tmod);
-                            let artics: String = if k == 0 && !e.articulations.is_empty() {
+                            let artics: String = if k == 0 && e.articulations.iter().any(|a| !a.is_ornament()) {
                                 let inner: String = e
                                     .articulations
                                     .iter()
+                                    .filter(|a| !a.is_ornament())
                                     .map(|a| match a {
                                         Artic::Marcato => "<strong-accent/>".to_string(),
                                         Artic::Portato => "<detached-legato/>".to_string(),
@@ -686,7 +730,18 @@ pub fn export_musicxml(score: &Score) -> String {
                             } else {
                                 String::new()
                             };
-                            let orn = if k == 0 && !xm[ei].orn.is_empty() { format!("<ornaments>{}</ornaments>", xm[ei].orn) } else { String::new() };
+                            let signs: String = e
+                                .articulations
+                                .iter()
+                                .map(|a| match a {
+                                    Artic::Mordent => "<mordent/>",
+                                    Artic::ShortTrill => "<inverted-mordent/>",
+                                    Artic::Turn => "<turn/>",
+                                    Artic::InvertedTurn => "<inverted-turn/>",
+                                    _ => "",
+                                })
+                                .collect();
+                            let orn = if k == 0 && (!xm[ei].orn.is_empty() || !signs.is_empty()) { format!("<ornaments>{}{signs}</ornaments>", xm[ei].orn) } else { String::new() };
                             let tup = if k == 0 { format!("{tnot}{}{orn}{artics}", xm[ei].slur) } else { String::new() };
                             if tie_stop || tie_start || !tup.is_empty() {
                                 s.push_str("<notations>");
@@ -1148,6 +1203,20 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 "strong-accent" => Some(Artic::Marcato),
                                 "detached-legato" => Some(Artic::Portato),
                                 other => Artic::from_name(other),
+                            };
+                            if let Some(art) = art {
+                                if !articulations.contains(&art) {
+                                    articulations.push(art);
+                                }
+                            }
+                        }
+                        for o in el.descendants().filter(|c| c.has_tag_name("ornaments")).flat_map(|c| c.children().filter(|x| x.is_element())) {
+                            let art = match o.tag_name().name() {
+                                "mordent" => Some(Artic::Mordent),
+                                "inverted-mordent" => Some(Artic::ShortTrill),
+                                "turn" => Some(Artic::Turn),
+                                "inverted-turn" => Some(Artic::InvertedTurn),
+                                _ => None,
                             };
                             if let Some(art) = art {
                                 if !articulations.contains(&art) {
@@ -1880,6 +1949,31 @@ mod tests {
         let flags = |s: &Score| s.parts[0].measures.iter().map(|m| (m.start_repeat, m.end_repeat)).collect::<Vec<_>>();
         assert_eq!(flags(&r), flags(&s));
         assert_eq!(r.playback_order(), s.playback_order());
+    }
+
+    #[test]
+    fn mordents_and_turns_play_their_notes_and_roundtrip_through_musicxml() {
+        let mut s = Score::new("orn", TimeSig { num: 4, den: 4 }, 0, 2);
+        let at = |t: u32| SpPos { measure: 0, tick: t };
+        for (i, (a, step)) in [(Artic::Mordent, 4u8), (Artic::ShortTrill, 4), (Artic::Turn, 4), (Artic::InvertedTurn, 4)].into_iter().enumerate() {
+            s.put_note(0, 0, 0, (i as u32) * 480, 480, vec![p(step, 0, 5)]).unwrap(); // G5
+            s.toggle_articulation(0, 0, at(i as u32 * 480), at(i as u32 * 480), a).unwrap();
+        }
+        s.put_note(0, 0, 1, 0, 60, vec![p(4, 0, 5)]).unwrap(); // too short to hold a mordent
+        s.toggle_articulation(0, 0, SpPos { measure: 1, tick: 0 }, SpPos { measure: 1, tick: 0 }, Artic::Mordent).unwrap();
+        let sounds = sounds(&s);
+        let of = |from: u32, to: u32| sounds.iter().filter(|x| x.start >= from && x.start < to).map(|x| (x.midi, x.ticks)).collect::<Vec<_>>();
+        let g = 79; // G5; the scale of C has A above (81) and F below (77)
+        assert_eq!(of(0, 480), vec![(g, 60), (77, 60), (g, 360)]); // mordent: lower neighbour
+        assert_eq!(of(480, 960), vec![(g, 60), (81, 60), (g, 360)]); // upper mordent
+        assert_eq!(of(960, 1440), vec![(81, 90), (g, 90), (77, 90), (g, 210)]); // turn
+        assert_eq!(of(1440, 1920), vec![(77, 90), (g, 90), (81, 90), (g, 210)]); // inverted turn
+        assert_eq!(of(1920, 2400), vec![(g, 60)]); // too short: plain note
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<mordent/>") && xml.contains("<inverted-mordent/>") && xml.contains("<turn/>") && xml.contains("<inverted-turn/>"));
+        let back = import_musicxml(&xml).unwrap().score;
+        let arts = |s: &Score| s.parts[0].measures.iter().flat_map(|m| m.events.iter().map(|e| e.articulations.clone())).collect::<Vec<_>>();
+        assert_eq!(arts(&back), arts(&s));
     }
 
     #[test]

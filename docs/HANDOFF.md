@@ -15,7 +15,7 @@ Decisiones acordadas con el usuario: licencia GPL-3 (se puede reutilizar código
 | Sonido | SpessaSynth (Apache-2.0) + SoundFont MuseScore_General (MIT); velocidad por dinámicas/hairpins/articulaciones, pedal (CC64), trinos, repeticiones desplegadas; mezclador (volumen, mute, solo), 25 instrumentos GM |
 | Formatos | `.nova` (JSON propio) · MusicXML in/out · MIDI in/out (import cuantizado a semicorcheas) · PDF vectorial multipágina (svg2pdf) · **MuseScore `.mscz/.mscx` lectura v2–v4 y escritura v4.60** |
 
-Pendiente conocido (backlog sin IA): mordentes/grupetos, MIDI import sin tresillos ni varias voces, 7:4 y otros tuplets, vista/edición de letra y texto, acordes en grabaciones reales con verdad (la detección, también al importar audio, el dibujo, la edición manual —clic o tecla K—, `<harmony>` de MusicXML y `Harmony` de MuseScore ya existen: botón «Detectar acordes», `Score.chords`), partes/extractos, transposición de instrumentos (se muestran en altura real), ligadura entre >2 sistemas, tablatura, plugins.
+Pendiente conocido (backlog sin IA): MIDI import sin tresillos ni varias voces, 7:4 y otros tuplets, vista/edición de letra y texto, acordes en grabaciones reales con verdad (la detección, también al importar audio, el dibujo, la edición manual —clic o tecla K—, `<harmony>` de MusicXML y `Harmony` de MuseScore ya existen: botón «Detectar acordes», `Score.chords`), partes/extractos, transposición de instrumentos (se muestran en altura real), ligadura entre >2 sistemas, tablatura, plugins.
 
 ## 3. Arquitectura
 ```
@@ -108,6 +108,9 @@ Objetivo del plan original: transcribir audio a partitura, reconocer partituras 
 
 ### Saltos D.C./D.S./segno/coda (2026-11-12)
 `Measure.markers` (Segno, Coda, ToCoda, Fine) y `Measure.jump` (Dc, DcAlFine, DcAlCoda, Ds, DsAlFine, DsAlCoda); `Score::toggle_marker`/`set_jump`; `playback_order` los despliega (cada salto una vez, tras él se ignoran las repeticiones y solo suena la última casilla; un salto sin destino se ignora). MusicXML in/out (`<segno/>`, `<coda/>`, `<sound dacapo|dalsegno|tocoda|fine>`), `.mscx` in/out (`<Marker>`/`<Jump>` por `label`/`jumpTo`/`playUntil`/`continueAt`; los no reconocidos siguen copiándose literales), botones «Saltos» en la barra y dibujo sobre el primer pentagrama (`samples/saltos.musicxml`). 112 tests del núcleo. **No verificado contra MuseScore real** (no estaba instalado en este equipo): el XML que escribimos sigue el formato recordado de MuseScore 3/4; ejecutar `ms_roundtrip` con un archivo con D.S./coda cuando haya MuseScore. Botones de la UI sin probar a mano; con notas altas la coda del dibujo puede rozar la nota.
+
+### Mordentes y grupetos (2026-11-12)
+Cuatro variantes nuevas de `Artic` (se alternan igual que las articulaciones, con los botones «mord», «prall», «grup», «grup↺»): `Mordent` (nota, la de abajo, nota), `ShortTrill` (pralltriller, la de arriba), `Turn` y `InvertedTurn`. Suenan escritos como notas (vecinas de la escala de la tonalidad; mordentes 32avos, grupetos 4 notas de ≤90 ticks; si la nota es demasiado corta suena sin adorno). MusicXML `<ornaments>` (`mordent`, `inverted-mordent`, `turn`, `inverted-turn`) y `.mscx` (`<Ornament>`/`<Articulation>` con subtipos `ornamentMordent`, `ornamentShortTrill`, `ornamentTurn`, `ornamentTurnInverted`), dibujo siempre sobre el pentagrama (`samples/ornamentos.musicxml`). 114 tests del núcleo. **Sin accidentales en el adorno** y **no verificado contra MuseScore real** (el escritor usa `<Ornament>` de MuseScore 4 según lo recordado). Botones de la UI sin probar a mano.
 
 ### Requisitos de hardware orientativos
 Basic Pitch: CPU, ~1–2 GB RAM. Demucs/MT3/piano de alta precisión: GPU NVIDIA con ≥6–8 GB VRAM recomendable. Audiveris: Java 17+, ~2 GB RAM.

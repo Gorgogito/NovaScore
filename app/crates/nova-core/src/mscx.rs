@@ -183,6 +183,10 @@ fn artic_of(n: Node) -> Option<Artic> {
         "accent" | "sforzato" => Some(Artic::Accent),
         "marcato" => Some(Artic::Marcato),
         "tenutostaccato" | "portato" => Some(Artic::Portato),
+        "ornamentmordent" => Some(Artic::Mordent),
+        "ornamentshorttrill" | "ornamentprall" => Some(Artic::ShortTrill),
+        "ornamentturn" => Some(Artic::Turn),
+        "ornamentturninverted" => Some(Artic::InvertedTurn),
         _ => None,
     }
 }
@@ -254,7 +258,7 @@ fn ignored_features(score: Node, preserve: bool, first_staff: &str) -> (Vec<&'st
         if marker_of(n).is_some() || jump_of(n).is_some() {
             continue;
         }
-        if (n.has_tag_name("Dynamic") && dynamic_of(n).is_some()) || (n.has_tag_name("Articulation") && (text_of(n, "subtype").is_none() || artic_of(n).is_some())) {
+        if (n.has_tag_name("Dynamic") && dynamic_of(n).is_some()) || (n.has_tag_name("Articulation") && (text_of(n, "subtype").is_none() || artic_of(n).is_some())) || (n.has_tag_name("Ornament") && artic_of(n).is_some()) {
             continue;
         }
         let label = match n.tag_name().name() {
@@ -683,7 +687,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                             let rest = !is_chord || pitches.is_empty();
                             let mut extras: Vec<Extra> = std::mem::take(&mut pending);
                             if preserve {
-                                for c in el.children().filter(|c| c.is_element() && !CHORD_SKIP.contains(&c.tag_name().name()) && !(c.has_tag_name("Articulation") && artic_of(*c).is_some())) {
+                                for c in el.children().filter(|c| c.is_element() && !CHORD_SKIP.contains(&c.tag_name().name()) && !((c.has_tag_name("Articulation") || c.has_tag_name("Ornament")) && artic_of(*c).is_some())) {
                                     extras.push(Extra { place: ExtraPlace::Inside, xml: src(c) });
                                 }
                                 for note in el.children().filter(|c| c.is_element() && c.has_tag_name("Note")) {
@@ -724,7 +728,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                             }
                             if !measure_rest || real > 0 {
                                 let mut articulations: Vec<Artic> = Vec::new();
-                                for c in el.children().filter(|c| c.is_element() && c.has_tag_name("Articulation")) {
+                                for c in el.children().filter(|c| c.is_element() && (c.has_tag_name("Articulation") || c.has_tag_name("Ornament"))) {
                                     if let Some(a) = artic_of(c) {
                                         if !articulations.contains(&a) {
                                             articulations.push(a);
