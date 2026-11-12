@@ -1,8 +1,9 @@
 mod audio;
+mod omr;
 mod pdf;
 
 use nova_core::io::{self, PedalEvent, Sound};
-use nova_core::{Artic, Clef, Content, Document, Dynamic, Jump, Marker, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, Syllabic, TimeSig};
+use nova_core::{Artic, Clef, Document, Dynamic, Jump, Marker, PartUpdate, Pitch, Score, SpPos, Spanner, SpannerKind, Syllabic, TimeSig};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
@@ -361,10 +362,42 @@ async fn import_audio(app: tauri::AppHandle, state: State<'_, AppState>, path: S
     Ok(Imported { score: doc.score.clone(), warnings: r.warnings })
 }
 
+/// Estado de Audiveris (el motor de OMR, que se instala aparte).
+#[tauri::command]
+fn omr_status(app: tauri::AppHandle) -> omr::OmrStatus {
+    omr::status(&models_dir(&app))
+}
+
+/// Fija (o con `None` olvida) la ruta de Audiveris elegida por el usuario.
+#[tauri::command]
+fn set_omr_path(app: tauri::AppHandle, path: Option<String>) -> Result<omr::OmrStatus, String> {
+    let dir = models_dir(&app);
+    omr::set_audiveris_path(&dir, path)?;
+    Ok(omr::status(&dir))
+}
+
+/// Reconoce una partitura impresa (PDF o imagen) con Audiveris y la abre. Puede tardar minutos.
+#[tauri::command]
+async fn import_omr(app: tauri::AppHandle, state: State<'_, AppState>, path: String) -> Result<Imported, String> {
+    let dir = models_dir(&app);
+    let r = tauri::async_runtime::spawn_blocking(move || omr::recognize(&dir, &path, None))
+        .await
+        .map_err(|e| format!("El reconocimiento se interrumpió: {e}"))??;
+    let mut doc = lock(&state);
+    doc.replace(r.score);
+    Ok(Imported { score: doc.score.clone(), warnings: r.warnings })
+}
+
+#[tauri::command]
+fn cancel_omr() {
+    omr::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[tauri::command]
 fn import_musicxml(state: State<AppState>, path: String) -> Result<Imported, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let r = io::import_musicxml(&text)?;
+    // plain MusicXML or compressed (.mxl)
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let r = io::import_musicxml_bytes(&bytes)?;
     let mut doc = lock(&state);
     doc.replace(r.score);
     Ok(Imported { score: doc.score.clone(), warnings: r.warnings })
@@ -564,7 +597,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState(Mutex::new(Document::new(initial_score()))))
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_time, set_fifths, set_tempo, detect_chords, set_chord, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

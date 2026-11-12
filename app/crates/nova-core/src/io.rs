@@ -1631,6 +1631,34 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
 
 // --------------------------------------------------------- MIDI import
 
+/// Import MusicXML given as bytes: plain text or compressed (`.mxl`, a zip whose `META-INF/container.xml`
+/// names the score file; this is what Audiveris writes).
+pub fn import_musicxml_bytes(bytes: &[u8]) -> Result<ImportReport, String> {
+    use std::io::Read;
+    if !bytes.starts_with(b"PK") {
+        return import_musicxml(&String::from_utf8_lossy(bytes));
+    }
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("Archivo .mxl inválido: {e}"))?;
+    let names: Vec<String> = zip.file_names().filter_map(|n| n.ok().map(|c| c.into_owned())).collect();
+    let mut root: Option<String> = None;
+    if let Ok(mut f) = zip.by_name("META-INF/container.xml") {
+        let mut s = String::new();
+        if f.read_to_string(&mut s).is_ok() {
+            if let Ok(doc) = roxmltree::Document::parse(&s) {
+                root = doc.descendants().filter(|n| n.has_tag_name("rootfile")).filter_map(|n| n.attribute("full-path")).next().map(str::to_string);
+            }
+        }
+    }
+    let is_score = |n: &&String| {
+        let l = n.to_lowercase();
+        !l.starts_with("meta-inf/") && (l.ends_with(".xml") || l.ends_with(".musicxml"))
+    };
+    let name = root.filter(|r| names.contains(r)).or_else(|| names.iter().find(is_score).cloned()).ok_or("El .mxl no contiene ninguna partitura")?;
+    let mut text = String::new();
+    zip.by_name(&name).map_err(|e| e.to_string())?.read_to_string(&mut text).map_err(|e| format!("No se pudo leer {name}: {e}"))?;
+    import_musicxml(&text)
+}
+
 /// Import a Standard MIDI File. Notes are quantized to 16th notes; each (track, channel)
 /// becomes one part with a single voice (overlapping notes are cut at the next onset).
 pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
@@ -1914,6 +1942,28 @@ mod tests {
         let mut v: Vec<_> = sounds(s).iter().map(|x| (x.start, x.ticks, x.midi)).collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn compressed_musicxml_mxl_is_read() {
+        use std::io::Write;
+        let xml = include_str!("../../../../samples/demo.musicxml");
+        let mut buf = Vec::new();
+        {
+            let mut z = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            z.start_file("META-INF/container.xml", o).unwrap();
+            z.write_all(b"<?xml version=\"1.0\"?><container><rootfiles><rootfile full-path=\"obra/demo.xml\"/></rootfiles></container>").unwrap();
+            z.start_file("obra/demo.xml", o).unwrap();
+            z.write_all(xml.as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        let a = import_musicxml_bytes(&buf).unwrap().score;
+        let b = import_musicxml(xml).unwrap().score;
+        assert_eq!(a.parts[0].measures, b.parts[0].measures);
+        // plain text goes through the same function, and garbage is an error
+        assert_eq!(import_musicxml_bytes(xml.as_bytes()).unwrap().score.parts.len(), b.parts.len());
+        assert!(import_musicxml_bytes(b"PK nope").is_err());
     }
 
     #[test]

@@ -38,6 +38,9 @@ export default function App() {
   const [status, setStatus] = createSignal("Pulsa N para entrar en modo de entrada de notas.");
   const [showNew, setShowNew] = createSignal(false);
   const [audioFile, setAudioFile] = createSignal<string | null>(null);
+  /** Reconocimiento óptico (Audiveris): diálogo de instalación y reconocimiento en curso. */
+  const [omrSetup, setOmrSetup] = createSignal(false);
+  const [omrBusy, setOmrBusy] = createSignal<string | null>(null);
   const [dirty, setDirty] = createSignal(false);
   const player = new Player();
 
@@ -569,7 +572,7 @@ export default function App() {
   };
   const doImport = async (kind: "xml" | "midi" | "mscz") => {
     const filters = {
-      xml: [{ name: "MusicXML", extensions: ["musicxml", "xml"] }],
+      xml: [{ name: "MusicXML", extensions: ["musicxml", "xml", "mxl"] }],
       midi: [{ name: "MIDI", extensions: ["mid", "midi"] }],
       mscz: [{ name: "MuseScore", extensions: ["mscz", "mscx"] }],
     }[kind];
@@ -582,6 +585,42 @@ export default function App() {
       apply(r.score, false);
       setDirty(true);
       setStatus(r.warnings.length ? `Importado. ${r.warnings.join(" ")}` : `Importado: ${path}`);
+    } catch (e) {
+      setStatus(String(e));
+    }
+  };
+  const startOmr = async () => {
+    const st = await api.omrStatus();
+    if (!st.found) {
+      setOmrSetup(true);
+      return;
+    }
+    const path = await open({ filters: [{ name: "Partitura impresa (PDF o imagen)", extensions: ["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif"] }], multiple: false });
+    if (typeof path !== "string") return;
+    const name = path.split(/[\/]/).pop() ?? path;
+    setOmrBusy(name);
+    setStatus("Reconociendo la partitura con Audiveris… (puede tardar varios minutos)");
+    try {
+      const r = await api.importOmr(path);
+      setCursor({ part: 0, voice: 0, m: 0, start: 0 });
+      apply(r.score, false);
+      setDirty(true);
+      setStatus(r.warnings.join(" "));
+    } catch (e) {
+      setStatus(`No se pudo reconocer la partitura: ${e}`);
+    } finally {
+      setOmrBusy(null);
+    }
+  };
+  const chooseAudiveris = async () => {
+    const path = await open({ multiple: false, title: "Ejecutable de Audiveris" });
+    if (typeof path !== "string") return;
+    try {
+      const st = await api.setOmrPath(path);
+      if (st.found) {
+        setOmrSetup(false);
+        setStatus(`Audiveris configurado: ${st.path}. Pulsa de nuevo «Importar partitura impresa».`);
+      }
     } catch (e) {
       setStatus(String(e));
     }
@@ -625,7 +664,7 @@ export default function App() {
 
   // ---- keyboard ----------------------------------------------------------
   const onKey = async (e: KeyboardEvent) => {
-    if (!score() || showNew() || audioFile()) return;
+    if (!score() || showNew() || audioFile() || omrSetup() || omrBusy()) return;
     const tag = (e.target as HTMLElement).tagName;
     if (tag === "INPUT" || tag === "SELECT") return;
     const k = e.key.toLowerCase();
@@ -708,6 +747,7 @@ export default function App() {
         <button onClick={() => doImport("xml")} title="Importar MusicXML">Importar XML</button>
         <button onClick={() => doImport("mscz")} title="Importar MuseScore (.mscz / .mscx)">Importar MuseScore</button>
         <button onClick={() => doImport("midi")} title="Importar MIDI">Importar MIDI</button>
+        <button onClick={startOmr} title="Reconocer una partitura impresa (PDF o imagen) con Audiveris">Importar partitura impresa</button>
         <button onClick={pickAudio} title="Transcribir un archivo de audio (wav, mp3, flac, ogg, m4a) a partitura">Importar audio</button>
         <button onClick={doExportMuseScore} title="Guardar como MuseScore 4 (.mscz)">Exportar MuseScore</button>
         <button onClick={() => doExport("xml")} title="Exportar MusicXML">Exportar XML</button>
@@ -979,6 +1019,42 @@ export default function App() {
             }
           }}
         />
+      </Show>
+
+      <Show when={omrSetup()}>
+        <div class="modal" onClick={() => setOmrSetup(false)}>
+          <div class="dialog" onClick={(e) => e.stopPropagation()}>
+            <h2>Importar partitura impresa</h2>
+            <p>
+              NovaScore reconoce partituras escaneadas o en PDF con <b>Audiveris</b>, un programa libre (AGPL-3) que se instala aparte y trabaja en tu equipo, sin enviar nada a internet.
+            </p>
+            <ol>
+              <li>Descarga Audiveris para tu sistema en <b>github.com/Audiveris/audiveris/releases</b> (el instalador de Windows incluye Java; en Linux y macOS hace falta Java 17 o superior).</li>
+              <li>Instálalo y vuelve a pulsar «Importar partitura impresa»: se detecta solo en las carpetas habituales.</li>
+              <li>Si lo instalaste en otro sitio, elige su ejecutable.</li>
+            </ol>
+            <p>El resultado es un borrador: revisa las notas, los ritmos y las alteraciones frente a la partitura original.</p>
+            <div class="actions">
+              <button type="button" onClick={() => setOmrSetup(false)}>Cerrar</button>
+              <button type="button" class="primary" onClick={chooseAudiveris}>Elegir ejecutable de Audiveris…</button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={omrBusy()}>
+        {(name) => (
+          <div class="modal">
+            <div class="dialog">
+              <h2>Reconociendo partitura…</h2>
+              <p title={name()}>{name()}</p>
+              <p>Audiveris está leyendo la partitura. Puede tardar varios minutos según el número de páginas.</p>
+              <div class="actions">
+                <button type="button" onClick={() => api.cancelOmr()}>Cancelar</button>
+              </div>
+            </div>
+          </div>
+        )}
       </Show>
 
       <Show when={audioFile()}>
