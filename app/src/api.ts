@@ -113,6 +113,7 @@ export const api = {
   save: (path: string) => invoke<void>("save_score", { path }),
   load: (path: string) => invoke<Score>("load_score", { path }),
   exportPdf: (path: string, svgs: string[]) => invoke<void>("export_pdf", { path, svgs }),
+  startupExportPart: () => invoke<number | null>("startup_export_part"),
   startupExport: () => invoke<string | null>("startup_export"),
   quit: () => invoke<void>("quit"),
   exportMscz: (path: string) => invoke<void>("export_mscz", { path }),

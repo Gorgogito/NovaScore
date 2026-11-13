@@ -244,6 +244,13 @@ fn startup_export() -> Option<String> {
     std::env::var("NOVASCORE_EXPORT_PDF").ok().filter(|s| !s.is_empty())
 }
 
+/// Part from `NOVASCORE_EXPORT_PART` (an index from 0): with `NOVASCORE_EXPORT_PDF`, export only that part, as the part
+/// is printed (runs of rests grouped). Used to check the drawing without interaction.
+#[tauri::command]
+fn startup_export_part() -> Option<usize> {
+    std::env::var("NOVASCORE_EXPORT_PART").ok().and_then(|s| s.trim().parse().ok())
+}
+
 #[tauri::command]
 fn quit(app: tauri::AppHandle) {
     app.exit(0);
@@ -766,7 +773,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
+            get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, startup_export_part, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
             set_tech, set_time, set_fifths, set_key, transpose_range, set_tempo, detect_chords, set_chord, add_accompaniment, continue_phrase, harmonize, review_score, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())

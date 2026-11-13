@@ -223,6 +223,16 @@ export interface Cursor {
   start: number;
 }
 
+/**
+ * An extract of the score with only some of its parts (in the given order): the same key, time signatures, tempo and
+ * chord symbols, the parts untouched. Used to print the part of each player.
+ */
+export const extractParts = (s: Score, indices: number[]): Score => ({
+  ...s,
+  title: indices.length === 1 ? `${s.title} — ${s.parts[indices[0]].name}` : s.title,
+  parts: indices.map((i) => s.parts[i]),
+});
+
 /** Key signature (concert) in force at measure `m`. */
 export const keyAt = (s: Score, m: number): number => {
   let f = s.fifths;

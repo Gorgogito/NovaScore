@@ -946,6 +946,12 @@ export function ScoreView(props: Props) {
                                   );
                                 }}
                               </For>
+                              <Show when={(m.restSpan ?? 0) > 1 && !part.tab_only}>
+                                <line x1={m.x + m.headerW + 8} x2={m.x + m.width - 8} y1={top + 2 * SP} y2={top + 2 * SP} stroke="var(--ink)" stroke-width={SP * 0.5} />
+                                <line x1={m.x + m.headerW + 8} x2={m.x + m.headerW + 8} y1={top + 1.2 * SP} y2={top + 2.8 * SP} stroke="var(--ink)" stroke-width={1.6} />
+                                <line x1={m.x + m.width - 8} x2={m.x + m.width - 8} y1={top + 1.2 * SP} y2={top + 2.8 * SP} stroke="var(--ink)" stroke-width={1.6} />
+                                <text x={m.x + (m.headerW + m.width) / 2} y={top - 6} text-anchor="middle" font-family="Georgia, serif" font-size="17" font-weight="600" fill="var(--ink)">{m.restSpan}</text>
+                              </Show>
                               <Show when={m.showKey && !part.percussion && !part.tab_only && partKeyAt(props.score, part, m.index) !== partKeyAt(props.score, part, m.index - 1)}>
                                 {keySig(top, m.x + 6, partKeyAt(props.score, part, m.index), partKeyAt(props.score, part, m.index - 1))}
                               </Show>

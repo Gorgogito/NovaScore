@@ -9,7 +9,7 @@ import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
 import { ScoreView } from "./ScoreView";
-import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, keyAt, ottavaShiftAt, partKeyAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, Tech, timeAt, voiceEvents } from "./types";
+import { ArticKind, chordName, extractParts, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, keyAt, ottavaShiftAt, partKeyAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, Tech, timeAt, voiceEvents } from "./types";
 import "./styles.css";
 
 const BASE: Record<number, number> = { 3: 120, 4: 240, 5: 480, 6: 960, 7: 1920 };
@@ -262,7 +262,9 @@ export default function App() {
       try {
         await new Promise((r) => setTimeout(r, 400)); // let the music font load
         await document.fonts.load("40px Bravura");
-        await api.exportPdf(out, scoreToSvgPages(score()!));
+        const part = await api.startupExportPart();
+        const s = score()!;
+        await api.exportPdf(out, part != null && part < s.parts.length ? scoreToSvgPages(extractParts(s, [part]), { multiRests: true }) : scoreToSvgPages(s));
       } finally {
         await api.quit();
       }
@@ -699,6 +701,33 @@ export default function App() {
       setStatus(`No se pudo exportar el PDF: ${e}`);
     }
   };
+  /** Parts for the players: one PDF with the part under the cursor, or one PDF per part in a folder. Runs of rests are grouped. */
+  const doExportParts = async (kind: "one" | "all") => {
+    const s = score()!;
+    const safe = (t: string) => t.replace(/[\\/:*?"<>|]/g, "_");
+    try {
+      if (kind === "one") {
+        const i = cursor().part;
+        const path = await save({ filters: [{ name: "PDF", extensions: ["pdf"] }], defaultPath: `${s.title} - ${s.parts[i].name}.pdf` });
+        if (!path) return;
+        setStatus("Generando la parte…");
+        await api.exportPdf(path, scoreToSvgPages(extractParts(s, [i]), { multiRests: true }));
+        setStatus(`Parte «${s.parts[i].name}» exportada: ${path}`);
+      } else {
+        const dir = await open({ directory: true, title: "Carpeta para los PDF de las partes" });
+        if (!dir || Array.isArray(dir)) return;
+        setStatus("Generando las partes…");
+        for (const [i, p] of s.parts.entries()) {
+          // two parts with the same name must not overwrite each other
+          const dup = s.parts.filter((q) => q.name === p.name).length > 1 ? ` (${i + 1})` : "";
+          await api.exportPdf(`${dir}/${safe(s.title)} - ${safe(p.name)}${dup}.pdf`, scoreToSvgPages(extractParts(s, [i]), { multiRests: true }));
+        }
+        setStatus(`${s.parts.length} partes exportadas en ${dir}`);
+      }
+    } catch (e) {
+      setStatus(`No se pudo exportar las partes: ${e}`);
+    }
+  };
   const doImport = async (kind: "xml" | "midi" | "mscz") => {
     const filters = {
       xml: [{ name: "MusicXML", extensions: ["musicxml", "xml", "mxl"] }],
@@ -961,6 +990,16 @@ export default function App() {
         <button onClick={() => doExport("xml")} title="Exportar MusicXML">Exportar XML</button>
         <button onClick={() => doExport("midi")} title="Exportar MIDI">Exportar MIDI</button>
         <button onClick={doExportPdf} title="Exportar PDF">Exportar PDF</button>
+        <select
+          class="assist-select"
+          title="Partes para los intérpretes: un PDF con la parte seleccionada, o un PDF por parte en una carpeta. Cada parte lleva su título, su paginación y los compases de silencio seguidos agrupados con su número"
+          value=""
+          onChange={(e) => { const v = e.currentTarget.value as "one" | "all" | ""; e.currentTarget.value = ""; if (v) void doExportParts(v); }}
+        >
+          <option value="">Partes en PDF…</option>
+          <option value="one">La parte seleccionada</option>
+          <option value="all">Todas, un PDF por parte</option>
+        </select>
         <span class="sep" />
         <button onClick={() => run(api.undo())} title="Deshacer (Ctrl+Z)">↶</button>
         <button onClick={() => run(api.redo())} title="Rehacer (Ctrl+Y)">↷</button>

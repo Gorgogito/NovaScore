@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { layoutScore, LayoutResult, LSystem } from "./layout";
+import { layoutScore, LayoutOptions, LayoutResult, LSystem } from "./layout";
 import { ScoreView } from "./ScoreView";
 import { displayScore, type Score } from "./types";
 
@@ -37,9 +37,9 @@ export function paginate(layout: LayoutResult): LayoutResult[] {
 }
 
 /** Render each page offscreen with the real score view and return standalone SVG strings. */
-export function scoreToSvgPages(realScore: Score): string[] {
+export function scoreToSvgPages(realScore: Score, opts: LayoutOptions = {}): string[] {
   const score = displayScore(realScore);
-  const pages = paginate(layoutScore(score, PAGE_W));
+  const pages = paginate(layoutScore(score, PAGE_W, opts));
   const host = document.createElement("div");
   host.style.cssText = "position:fixed;left:-99999px;top:0;visibility:hidden";
   document.body.appendChild(host);

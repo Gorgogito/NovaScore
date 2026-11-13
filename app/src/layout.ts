@@ -60,6 +60,8 @@ export interface LMeasure {
   showTime: boolean;
   /** A key change is drawn at the start of the measure (not for the first measure of a system, which has the full key signature). */
   showKey: boolean;
+  /** More than one measure of rests in a row drawn as one block: how many (the measure then has no lanes). */
+  restSpan?: number;
   /** Time signature in force (drawn when `showTime`). */
   time: TimeSig;
   headerW: number;
@@ -158,7 +160,13 @@ function applyVoiceOffsets(lanes: LLane[], percussion: boolean[]) {
   }
 }
 
-export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
+/** Options of `layoutScore`. */
+export interface LayoutOptions {
+  /** Draw runs of two or more measures of rests as one block with a number (as parts are printed). */
+  multiRests?: boolean;
+}
+
+export function layoutScore(score: Score, pageWidth = PAGE_W, opts: LayoutOptions = {}): LayoutResult {
   const nMeasures = Math.max(...score.parts.map((p) => p.measures.length));
   // Transposing staves read their own key; the header is as wide as the widest one.
   const partKey = (p: { transpose?: Transpose; key?: PartKey }, m: number) => partKeyAt(score, p, m);
@@ -181,6 +189,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
     lanes: LLane[];
     contentW: number;
     time: TimeSig;
+    restSpan?: number;
   }
 
   const prepared: Prepared[] = [];
@@ -285,6 +294,28 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
     prepared.push({ index: m, onsets, slotW, accCols, lanes, contentW: slotW.reduce((a, b) => a + b, 0), time: timeAt(score, m) });
   }
 
+  // Runs of empty measures become one block: only measures that are rests in every part, with nothing written in them
+  // (no text, dynamics, lyrics, articulations, repeats, markers, chord symbols or spanners) and no signature change inside.
+  const plainRest = (m: number) =>
+    score.parts.every((p) => {
+      const me = p.measures[m];
+      if (!me) return true;
+      if (me.start_repeat || me.end_repeat || me.markers?.length || me.jump) return false;
+      return [me.events, ...(me.voices ?? [])].every((evs) => evs.every((e) => e.kind === "rest" && !e.text && !e.dynamic && !e.lyrics?.length && !e.articulations?.length));
+    }) &&
+    !(score.chords ?? []).some((c) => c.measure === m) &&
+    !score.parts.some((p) => (p.spanners ?? []).some((sp) => sp.start.measure <= m && m <= sp.end.measure));
+  const REST_BLOCK_W = 90;
+  const blocks: Prepared[] = [];
+  for (let i = 0; i < prepared.length; i++) {
+    let j = i;
+    if (opts.multiRests && plainRest(prepared[i].index)) {
+      while (j + 1 < prepared.length && plainRest(prepared[j + 1].index) && !hasTime(prepared[j + 1].index) && !isKeyChange(prepared[j + 1].index)) j++;
+    }
+    blocks.push(j > i ? { ...prepared[i], onsets: [0], slotW: [REST_BLOCK_W], accCols: [0], lanes: [], contentW: REST_BLOCK_W, restSpan: j - i + 1 } : prepared[i]);
+    i = j;
+  }
+
   // Greedy line breaking.
   const usable = pageWidth - 2 * MARGIN_X;
   const lines: Prepared[][] = [];
@@ -293,7 +324,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const headerFor = (first: boolean, idx: number) => (first ? clefW + sysKeyW(idx) : changeW(idx)) + (hasTime(idx) ? timeW : 0);
   // A repeat sign at the start of a measure needs room before the first note.
   const extraL = (idx: number) => (score.parts[0].measures[idx]?.start_repeat ? 12 : 0);
-  for (const p of prepared) {
+  for (const p of blocks) {
     const w = p.contentW + 22 + extraL(p.index) + headerFor(cur.length === 0, p.index);
     if (cur.length > 0 && used + w > usable) {
       lines.push(cur);
@@ -349,6 +380,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
         firstInSystem: i === 0,
         showTime: hasTime(p.index),
         showKey: i > 0 && isKeyChange(p.index),
+        restSpan: p.restSpan,
         time: p.time,
         headerW: headers[i],
         lanes,
