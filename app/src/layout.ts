@@ -69,6 +69,8 @@ export interface LMeasure {
 }
 
 export interface LSystem {
+  /** Laid out but not on this page: it only keeps the geometry of what crosses to and from the visible systems. */
+  hidden?: boolean;
   top: number; // y of first part's top staff line
   measures: LMeasure[];
 }

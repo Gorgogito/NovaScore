@@ -29,8 +29,13 @@ export function paginate(layout: LayoutResult): LayoutResult[] {
   while (i < sys.length || pages.length === 0) {
     const top = pages.length === 0 ? FIRST_TOP : NEXT_TOP;
     const n = perPage(top);
-    const slice: LSystem[] = sys.slice(i, i + n).map((s, j) => ({ ...s, top: top + j * pitch }));
-    pages.push({ width: PAGE_W, height: PAGE_H, systems: slice, staffTops: layout.staffTops, tabDy: layout.tabDy });
+    // Every page keeps all the systems, so a slur, hairpin, octave line or tie that starts on one page and ends on
+    // another still knows where its ends are; the systems of other pages are hidden and sit far outside the page.
+    const from = i;
+    const all: LSystem[] = sys.map((s, idx) =>
+      idx >= from && idx < from + n ? { ...s, top: top + (idx - from) * pitch } : { ...s, hidden: true, top: (idx < from ? -1 : 1) * 100000 + idx * pitch },
+    );
+    pages.push({ width: PAGE_W, height: PAGE_H, systems: all, staffTops: layout.staffTops, tabDy: layout.tabDy });
     i += n;
   }
   return pages;

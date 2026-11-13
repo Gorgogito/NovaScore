@@ -462,6 +462,9 @@ export function ScoreView(props: Props) {
     return d;
   };
 
+  /** Indices of the systems strictly between two systems (what a spanner crosses without starting or ending in). */
+  const between = (a: number, b: number) => Array.from({ length: Math.max(0, b - a - 1) }, (_, i) => a + 1 + i);
+
   const arc = (x1: number, y1: number, x2: number, y2: number, below: boolean) => {
     const dx = Math.max(x2 - x1, 8);
     const h = (below ? 1 : -1) * Math.max(6, Math.min(dx * 0.1, 16)) * 1.3;
@@ -533,6 +536,7 @@ export function ScoreView(props: Props) {
         ? [{ x1: a.x - 2, x2: endX, y: yLine(a.sys), label: true, hook: true }]
         : [
             { x1: a.x - 2, x2: sysEdges(a.sys).right, y: yLine(a.sys), label: true, hook: false },
+            ...between(a.sys, endSys).map((si) => ({ x1: sysEdges(si).left, x2: sysEdges(si).right, y: yLine(si), label: false, hook: false })),
             { x1: sysEdges(endSys).left, x2: endX, y: yLine(endSys), label: false, hook: true },
           ];
     return (
@@ -566,10 +570,15 @@ export function ScoreView(props: Props) {
       const yb = below ? b.yBot + 5 : b.yTop - 5;
       const x1 = a.x + HEAD_W / 2;
       const x2 = b.x + HEAD_W / 2;
+      const midY = (si: number) => props.layout.staffTops(props.layout.systems[si])[pi] + (below ? STAFF_H + 8 : -8);
       const paths =
         a.sys === b.sys
           ? [arc(x1, ya, x2, yb, below)]
-          : [arc(x1, ya, sysEdges(a.sys).right, ya, below), arc(sysEdges(b.sys).left, yb, x2, yb, below)];
+          : [
+              arc(x1, ya, sysEdges(a.sys).right, ya, below),
+              ...between(a.sys, b.sys).map((si) => arc(sysEdges(si).left, midY(si), sysEdges(si).right, midY(si), below)),
+              arc(sysEdges(b.sys).left, yb, x2, yb, below),
+            ];
       // the tablature staff shows the slur above its own lines (alone when the standard staff is hidden)
       const part = props.score.parts[pi];
       const tabTop = (si: number) => {
@@ -580,7 +589,11 @@ export function ScoreView(props: Props) {
         part.tuning && !part.percussion
           ? a.sys === b.sys
             ? [arc(a.x + 5, tabTop(a.sys) - 6, b.x + 5, tabTop(b.sys) - 6, false)]
-            : [arc(a.x + 5, tabTop(a.sys) - 6, sysEdges(a.sys).right, tabTop(a.sys) - 6, false), arc(sysEdges(b.sys).left, tabTop(b.sys) - 6, b.x + 5, tabTop(b.sys) - 6, false)]
+            : [
+                arc(a.x + 5, tabTop(a.sys) - 6, sysEdges(a.sys).right, tabTop(a.sys) - 6, false),
+                ...between(a.sys, b.sys).map((si) => arc(sysEdges(si).left, tabTop(si) - 6, sysEdges(si).right, tabTop(si) - 6, false)),
+                arc(sysEdges(b.sys).left, tabTop(b.sys) - 6, b.x + 5, tabTop(b.sys) - 6, false),
+              ]
           : [];
       return (
         <>
@@ -616,13 +629,16 @@ export function ScoreView(props: Props) {
     const grow = sp.kind === "crescendo";
     const [h0, h1] = grow ? [0, half] : [half, 0];
     const x1 = a.x;
+    // over several systems the opening is spread evenly over them
+    const nSys = endSys - a.sys + 1;
+    const hAt = (t: number) => h0 + (h1 - h0) * t;
     const segs =
       a.sys === endSys
         ? wedge(x1, endX, ySys(a.sys), h0, h1)
-        : [
-            ...wedge(x1, sysEdges(a.sys).right, ySys(a.sys), h0, (h0 + h1) / 2),
-            ...wedge(sysEdges(endSys).left, endX, ySys(endSys), (h0 + h1) / 2, h1),
-          ];
+        : Array.from({ length: nSys }, (_, i) => {
+            const si = a.sys + i;
+            return wedge(i === 0 ? x1 : sysEdges(si).left, i === nSys - 1 ? endX : sysEdges(si).right, ySys(si), hAt(i / nSys), hAt((i + 1) / nSys));
+          }).flat();
     return <For each={segs}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.1} />}</For>;
   };
 
@@ -755,6 +771,21 @@ export function ScoreView(props: Props) {
     const nFrets = nEv ? (positions.get(`${nIdx}:${nEv.start}`) ?? []) : [];
     const x1 = le.x + 5;
     const x2 = nle ? nle.x + 5 : x1 + 22;
+    // a note that ends the system and the one that continues it on the next: ties and slurs cross the system break
+    const sysIdx = props.layout.systems.indexOf(sys);
+    const sameLane = (l: LLane) => l.part === pi && l.voice === lane.voice;
+    const nextSys = props.layout.systems[sysIdx + 1];
+    const acrossLe = !nle && nextSys && nextSys.measures[0].index === m.index + 1 ? (nextSys.measures[0].lanes.find(sameLane)?.events[0] ?? null) : null;
+    const acrossEv = acrossLe && acrossLe.ev.kind === "note" ? acrossLe.ev : null;
+    const prevSys = props.layout.systems[sysIdx - 1];
+    const prevLe =
+      k === 0 && m === sys.measures[0] && prevSys
+        ? (() => {
+            const lm = prevSys.measures[prevSys.measures.length - 1];
+            return lm.index === m.index - 1 ? lm.lanes.find(sameLane)?.events.slice(-1)[0] : undefined;
+          })()
+        : undefined;
+    const prevEv = prevLe && prevLe.ev.kind === "note" ? prevLe.ev : null;
     const top = placed[placed.length - 1]; // the highest pitch carries the technique
     const yMine = lineY(top.f.string);
     const nTop = nFrets.flatMap((f) => (f ? [f] : [])).slice(-1)[0];
@@ -771,6 +802,27 @@ export function ScoreView(props: Props) {
         if (!nm.includes(m0[p.i])) continue;
         const y = lineY(p.f.string) - 5;
         out.push(<path d={`M ${x1 + 5} ${y} Q ${(x1 + x2) / 2 + 2} ${y - 7} ${x2 - 3} ${y}`} fill="none" stroke="var(--ink)" stroke-width={1.1} stroke-linecap="round" />);
+      }
+    }
+    // tie leaving the system: an arc to its end; tie arriving from the previous one: an arc from its start
+    if (ev.tie && acrossEv) {
+      const nm = mids(acrossEv);
+      const m0 = mids(ev);
+      for (const p of placed) {
+        if (!nm.includes(m0[p.i])) continue;
+        const y = lineY(p.f.string) - 5;
+        const xe = m.x + m.width - 4;
+        out.push(<path d={`M ${x1 + 5} ${y} Q ${(x1 + xe) / 2 + 2} ${y - 7} ${xe} ${y}`} fill="none" stroke="var(--ink)" stroke-width={1.1} stroke-linecap="round" />);
+      }
+    }
+    if (prevEv && prevEv.tie) {
+      const pm = mids(prevEv);
+      const m0 = mids(ev);
+      for (const p of placed) {
+        if (!pm.includes(m0[p.i])) continue;
+        const y = lineY(p.f.string) - 5;
+        const xs = m.x + m.headerW + 2;
+        out.push(<path d={`M ${xs} ${y} Q ${(xs + x1) / 2 + 2} ${y - 7} ${x1 - 1} ${y}`} fill="none" stroke="var(--ink)" stroke-width={1.1} stroke-linecap="round" />);
       }
     }
     const tech = ev.tech;
@@ -903,6 +955,7 @@ export function ScoreView(props: Props) {
       </Show>
       <For each={props.layout.systems}>
         {(sys) => {
+          if (sys.hidden) return null;
           const tops = props.layout.staffTops(sys);
           const first = sys.measures[0];
           const last = sys.measures[sys.measures.length - 1];
