@@ -1,4 +1,5 @@
 mod audio;
+mod deskew;
 mod omr;
 mod pdf;
 

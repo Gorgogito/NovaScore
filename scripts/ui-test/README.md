@@ -9,6 +9,8 @@ Herramientas para manejar el `.exe` de depuración sin pulsar a mano. Solo para 
    `node scripts/ui-test/cdp.js shot salida.png` hace una captura.
 4. El selector de archivos nativo («Abrir») no se ve desde CDP: `scripts/ui-test/pick.ps1 -Path <archivo> -ProcId <PID>`
    (ejecutar con PowerShell 7, `pwsh`) escribe la ruta y confirma, o con `-Cancel` lo cancela. Solo toca el diálogo del proceso indicado.
+   Con `-Title` maneja otros diálogos nativos de la ventana: `-Title 'Guardar como'` (guardar) o el título de un selector de carpeta
+   (p. ej. `-Title 'Carpeta para los PDF de las partes'`, con `-Path` = la carpeta).
 5. Cerrar la app al terminar (solo el PID lanzado).
 
 Se usó para probar «Importar audio»: selector, diálogo, mensaje «Transcribiendo…», resultado, segundo audio con otras opciones,

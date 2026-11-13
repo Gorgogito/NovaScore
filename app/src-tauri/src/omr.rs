@@ -243,8 +243,26 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
 
     let out_dir = std::env::temp_dir().join(format!("novascore-omr-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    // the engine may still hold files for a moment after it is stopped: try again a few times
     let cleanup = |d: &Path| {
-        let _ = std::fs::remove_dir_all(d);
+        for _ in 0..12 {
+            if std::fs::remove_dir_all(d).is_ok() || !d.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    };
+    // Audiveris.exe launches a Java process: stopping the launcher alone can leave Java running, so the whole tree goes
+    let stop = |child: &mut std::process::Child| {
+        #[cfg(windows)]
+        {
+            let mut k = std::process::Command::new("taskkill");
+            k.args(["/PID", &child.id().to_string(), "/T", "/F"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            no_window(&mut k);
+            let _ = k.status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     };
 
     let mut cmd = if exe.extension().map_or(false, |e| e.eq_ignore_ascii_case("bat") || e.eq_ignore_ascii_case("cmd")) {
@@ -254,7 +272,12 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
     } else {
         std::process::Command::new(&exe)
     };
-    cmd.args(["-batch", "-export", "-output"]).arg(&out_dir).arg(input).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+    // a scanned or photographed page that is tilted is straightened first (see deskew.rs)
+    let (engine_input, tilt) = match crate::deskew::deskew_file(Path::new(input), &out_dir) {
+        Some((p, a)) => (p, Some(a)),
+        None => (PathBuf::from(input), None),
+    };
+    cmd.args(["-batch", "-export", "-output"]).arg(&out_dir).arg(&engine_input).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
     let log_path = out_dir.join("audiveris-stderr.log");
     if let Ok(f) = std::fs::File::create(&log_path) {
         cmd.stderr(f);
@@ -270,8 +293,7 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
     let started = Instant::now();
     let status = loop {
         if CANCEL.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             cleanup(&out_dir);
             return Err("Reconocimiento cancelado.".into());
         }
@@ -284,8 +306,7 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
             }
         }
         if started.elapsed() > Duration::from_secs(MAX_SECONDS) {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             cleanup(&out_dir);
             return Err(format!("Audiveris tardó más de {} minutos y se detuvo.", MAX_SECONDS / 60));
         }
@@ -321,6 +342,9 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
             r.score.title = name;
         }
         r.warnings.insert(0, "Reconocimiento óptico (Audiveris): es un borrador, revisa notas, ritmos, alteraciones y letra frente a la partitura original.".into());
+        if let Some(a) = tilt {
+            r.warnings.push(format!("La imagen estaba girada {a:.1}° y se enderezó antes de reconocerla."));
+        }
         if let Some(w) = ocr_problem(&out_dir) {
             r.warnings.push(w);
         }

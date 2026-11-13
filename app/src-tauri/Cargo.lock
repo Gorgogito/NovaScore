@@ -2483,6 +2483,7 @@ dependencies = [
 name = "novascore"
 version = "0.1.0"
 dependencies = [
+ "image",
  "nova-audio",
  "nova-core",
  "pdf-writer",

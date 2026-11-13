@@ -1,12 +1,13 @@
-param([string]$Path, [int]$ProcId, [switch]$Cancel)
-# Maneja SOLO el diálogo nativo "Abrir" de la ventana NovaScore del proceso $ProcId.
+param([string]$Path, [int]$ProcId, [switch]$Cancel, [string]$Title = 'Abrir')
+# Maneja SOLO el diálogo nativo de la ventana NovaScore del proceso $ProcId: "Abrir" por defecto; con -Title otro (p. ej. el
+# título del selector de carpeta, o 'Guardar como' para guardar: el botón de aceptar es el mismo, de id 1).
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $dlg = $null
 for ($i = 0; $i -lt 30 -and -not $dlg; $i++) {
   $main = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) | Where-Object { $_.Current.ProcessId -eq $ProcId -and $_.Current.Name -eq 'NovaScore' } | Select-Object -First 1
-  if ($main) { $dlg = $main.FindFirst([System.Windows.Automation.TreeScope]::Children, (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Abrir'))) }
+  if ($main) { $dlg = $main.FindFirst([System.Windows.Automation.TreeScope]::Children, (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $Title))) }
   if (-not $dlg) { Start-Sleep -Milliseconds 300 }
 }
 if (-not $dlg) { "no apareció el diálogo"; exit 1 }
@@ -17,7 +18,8 @@ if ($Cancel) {
   $c.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   "diálogo cancelado"; exit 0
 }
-$edit = $all | Where-Object { $_.Current.AutomationId -eq '1148' -and $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' } | Select-Object -First 1
+# el campo de nombre es 1148 en «Abrir», 1001 en «Guardar como» y 1152 en el selector de carpeta
+$edit = $all | Where-Object { $_.Current.AutomationId -in '1148', '1001', '1152' -and ($_.Current.ControlType.ProgrammaticName -eq 'ControlType.Edit' -or $_.Current.ClassName -eq 'Edit') } | Select-Object -First 1
 if (-not $edit) { "no encuentro el campo Nombre"; exit 2 }
 $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Path)
 $btns = @($all | Where-Object { $_.Current.AutomationId -eq '1' -and $_.Current.ClassName -eq 'Button' })
