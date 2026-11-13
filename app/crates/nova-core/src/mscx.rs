@@ -513,6 +513,8 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     let mut got_key = false;
     let mut got_tempo = false;
     let mut key_map: std::collections::BTreeMap<usize, i8> = Default::default();
+    // key signature of each staff (concert key) by measure
+    let mut staff_keys: Vec<std::collections::BTreeMap<usize, i8>> = vec![Default::default(); staves.len()];
     let (mut clef_changes, mut irregular, mut dropped_voices) = (0usize, 0usize, 0usize);
     let mut max_measures = 0usize;
     let mut harmony_chords: Vec<crate::chords::ChordMark> = Vec::new();
@@ -561,9 +563,8 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                             if mi == 0 && !got_key {
                                 score.fifths = f;
                                 got_key = true;
-                            } else if mi > 0 {
-                                key_map.entry(mi).or_insert(f);
                             }
+                            staff_keys[si].entry(mi).or_insert(f);
                         }
                     }
                     "Clef" => {
@@ -913,6 +914,16 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     }
 
     // ---- build our model
+    // the key changes of the score come from the staves that start in its key; a staff in another key keeps its own
+    for km in &staff_keys {
+        if km.get(&0).map_or(true, |&k| k == score.fifths) {
+            for (&mi, &f) in km {
+                if mi > 0 {
+                    key_map.entry(mi).or_insert(f);
+                }
+            }
+        }
+    }
     let mut prev_key = score.fifths;
     for (&mi, &f) in &key_map {
         if f != prev_key {
@@ -996,6 +1007,17 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
             }
         }
         let mut part = Part::new(info.name.clone(), info.clef, info.program, measures);
+        if let Some(&k0) = staff_keys[si].get(&0).filter(|&&k| k != score.fifths) {
+            let mut prev = k0;
+            let mut changes = Vec::new();
+            for (&mi, &f) in staff_keys[si].iter().filter(|(&mi, _)| mi > 0) {
+                if f != prev {
+                    changes.push(KeyChange { measure: mi, fifths: f });
+                    prev = f;
+                }
+            }
+            part.key = Some(PartKey { fifths: k0, changes });
+        }
         part.spanners = staff_spanners[si]
             .iter()
             .filter_map(|&(kind, vi, start, mut end, endings)| {

@@ -753,13 +753,15 @@ export default function App() {
     }
   };
   /** Asistente: escribe el cifrado de acordes de la parte del cursor (analizando su melodía) o una progresión de números romanos. */
-  const doHarmonize = async (minor: boolean, progression?: string) => {
+  const doHarmonize = async (minor: boolean, progression?: string, variant = 0) => {
     const perBar = chordsPerBar();
     try {
-      const r = await api.harmonize(cursor().part, minor, progression, perBar, { sevenths: sevenths(), inversions: inversions(), secondary: secondary() });
+      const r = await api.harmonize(cursor().part, minor, progression, perBar, { sevenths: sevenths(), inversions: inversions(), secondary: secondary(), variant });
+      setLastHarm({ minor, progression });
+      setHarmVariant(variant);
       apply(r.score, true);
       setDirty(true);
-      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, ${perBar === 4 ? "hasta uno por pulso (un pulso sin nota nueva se une al anterior)" : perBar === 2 ? "hasta dos por compás (se parte el compás solo donde la música se mueve en su segunda mitad; los compases de 3 tiempos no se parten)" : "uno por compás"}. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
+      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"}${variant > 0 ? `, propuesta ${variant + 1}` : ""})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, ${perBar === 4 ? "hasta uno por pulso (un pulso sin nota nueva se une al anterior)" : perBar === 2 ? "hasta dos por compás (se parte el compás solo donde la música se mueve en su segunda mitad; los compases de 3 tiempos no se parten)" : "uno por compás"}. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
     } catch (e) {
       setStatus(String(e));
     }
@@ -767,6 +769,8 @@ export default function App() {
   /** Armonizar: acordes por compás (1 o 2). */
   const [chordsPerBar, setChordsPerBar] = createSignal(1);
   const [sevenths, setSevenths] = createSignal(false);
+  const [harmVariant, setHarmVariant] = createSignal(0);
+  const [lastHarm, setLastHarm] = createSignal<{ minor: boolean; progression?: string } | null>(null);
   const [inversions, setInversions] = createSignal(false);
   const [secondary, setSecondary] = createSignal(false);
   const doReview = async () => {
@@ -1008,6 +1012,7 @@ export default function App() {
             <option value="7">Con séptimas</option>
           </select>
           <label class="field" title="«Armonizar…» puede usar primeras inversiones cuando hacen que el bajo se mueva por grados conjuntos (nunca en el primer ni el último acorde)"><input type="checkbox" checked={inversions()} onChange={(e) => setInversions(e.currentTarget.checked)} /> Inversiones</label>
+          <button disabled={!lastHarm() || !!lastHarm()!.progression} title="Otra armonización válida de la misma melodía con las mismas opciones (la propuesta 1 es la mejor que se encontró; el primer y el último acorde no cambian). Repite para ver más; Ctrl+Z vuelve a la anterior" onClick={() => { const l = lastHarm(); if (l) void doHarmonize(l.minor, l.progression, harmVariant() + 1); }}>Otra armonización</button>
           <label class="field" title="«Armonizar…» puede usar dominantes de otros grados (V/vi, V/V…) donde la melodía tiene su sensible; siempre resuelven al grado que anuncian"><input type="checkbox" checked={secondary()} onChange={(e) => setSecondary(e.currentTarget.checked)} /> Dom. secundarias</label>
           <select
             class="assist-select"
@@ -1216,6 +1221,16 @@ export default function App() {
                     <option value="-1">{p.tuning && TUNINGS.findIndex((t) => t.strings.join() === p.tuning!.join()) < 0 ? "Tablatura (afinación propia)" : "Sin tablatura"}</option>
                     <For each={TUNINGS}>{(t, k) => <option value={k()}>Tablatura: {t.name}</option>}</For>
                     <For each={TUNINGS}>{(t, k) => <option value={10 + k()}>Solo tablatura: {t.name}</option>}</For>
+                  </select>
+                  <select
+                    class="tab-select"
+                    title="Tonalidad propia de esta parte (armadura de concierto). «La de la pieza» la hace seguir la tonalidad y los cambios de la partitura. Las notas no se mueven: solo cambia la armadura que se dibuja"
+                    value={p.key ? String(p.key.fifths) : "x"}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => { const v = e.currentTarget.value; run(api.updatePart(i(), { key: v === "x" ? null : Number(v) })); }}
+                  >
+                    <option value="x">Tonalidad: la de la pieza</option>
+                    <For each={KEY_NAMES}>{(n, k) => <option value={String(k() - 7)}>Tonalidad propia: {n}</option>}</For>
                   </select>
                   <div class="inst-mix" onClick={(e) => e.stopPropagation()}>
                     <button classList={{ on: p.muted }} title="Silenciar" onClick={() => run(api.updatePart(i(), { muted: !p.muted }))}>M</button>

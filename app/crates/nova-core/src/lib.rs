@@ -544,10 +544,23 @@ pub struct Part {
     /// Only while writing a MuseScore file: this part is the tablature twin of the one before it.
     #[serde(skip)]
     pub tab_staff: bool,
+    /// A key signature of its own (concert key), for a part that does not follow the score's: polytonal writing, or a
+    /// part whose file gave another key than the first part's. `None`: it follows `Score::fifths` and its changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<PartKey>,
     /// Slurs and hairpins, anchored to positions in time so they stay put while notes change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spanners: Vec<Spanner>,
     pub measures: Vec<Measure>,
+}
+
+/// The key signature of a part that has its own: the initial one and later changes (concert keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartKey {
+    pub fifths: i8,
+    /// Sorted by measure, never equal to the key in force before them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<KeyChange>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,7 +656,7 @@ impl Part {
     }
 
     pub fn new(name: impl Into<String>, clef: Clef, program: u8, measures: Vec<Measure>) -> Part {
-        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, tuning: None, tab_only: false, tab_staff: false, spanners: Vec::new(), measures }
+        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, tuning: None, tab_only: false, tab_staff: false, key: None, spanners: Vec::new(), measures }
     }
 }
 
@@ -665,6 +678,9 @@ pub struct PartUpdate {
     pub tuning: Option<Option<Vec<u8>>>,
     /// Show only the tablature (needs a tuning).
     pub tab_only: Option<bool>,
+    /// `Some(Some(fifths))` gives the part its own constant key signature, `Some(None)` makes it follow the score again.
+    #[serde(default, deserialize_with = "double_option")]
+    pub key: Option<Option<i8>>,
 }
 
 fn double_option<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
@@ -1167,6 +1183,18 @@ impl Score {
             let tonic = (*k as i32 * 7).rem_euclid(12);
             *k = assist::fifths_of_pc(tonic + semitones);
         }
+        // a part with its own key moves that key too, and is spelled with it
+        let own: Vec<Option<Vec<i8>>> = (0..self.parts.len())
+            .map(|pi| {
+                self.parts[pi].key.as_ref().map(|_| {
+                    let mut arr: Vec<i8> = (0..n).map(|m| self.part_key_at(pi, m)).collect();
+                    for k in arr.iter_mut().take(to + 1).skip(from) {
+                        *k = assist::fifths_of_pc((*k as i32 * 7).rem_euclid(12) + semitones);
+                    }
+                    arr
+                })
+            })
+            .collect();
         let in_range = |p: &Part| {
             !p.percussion
                 && p.measures.iter().enumerate().skip(from).take(to + 1 - from).all(|(_, me)| {
@@ -1179,9 +1207,10 @@ impl Score {
         if self.parts.iter().any(|p| !p.percussion && !in_range(p)) {
             return Err(EditError::OutOfRange);
         }
-        for p in self.parts.iter_mut().filter(|p| !p.percussion) {
+        for (pi, p) in self.parts.iter_mut().enumerate().filter(|(_, p)| !p.percussion) {
+            let ks = own[pi].as_ref().unwrap_or(&keys);
             for m in from..=to.min(p.measures.len().saturating_sub(1)) {
-                let sharps = keys[m] >= 0;
+                let sharps = ks[m] >= 0;
                 let me = &mut p.measures[m];
                 for e in me.events.iter_mut().chain(me.voices.iter_mut().flatten()) {
                     if let Content::Note { pitches, .. } = &mut e.content {
@@ -1197,6 +1226,11 @@ impl Score {
         for c in self.chords.iter_mut().filter(|c| c.measure >= from && c.measure <= to) {
             c.root = (c.root as i32 + semitones).rem_euclid(12) as u8;
             c.bass = (c.bass as i32 + semitones).rem_euclid(12) as u8;
+        }
+        for (p, arr) in self.parts.iter_mut().zip(&own) {
+            if let Some(arr) = arr {
+                p.key = Some(PartKey { fifths: arr[0], changes: (1..n).filter(|&m| arr[m] != arr[m - 1]).map(|m| KeyChange { measure: m, fifths: arr[m] }).collect() });
+            }
         }
         self.fifths = keys[0];
         self.key_changes = (1..n).filter(|&m| keys[m] != keys[m - 1]).map(|m| KeyChange { measure: m, fifths: keys[m] }).collect();
@@ -1839,6 +1873,9 @@ impl Score {
         if let Some(v) = u.tab_only {
             p.tab_only = v;
         }
+        if let Some(k) = u.key {
+            p.key = k.map(|f| PartKey { fifths: f.clamp(-7, 7), changes: Vec::new() });
+        }
         if p.tuning.is_none() {
             p.tab_only = false;
         }
@@ -1863,6 +1900,14 @@ impl Score {
     /// Key signature (concert key: sharps positive, flats negative) in force at measure `m`.
     pub fn key_at(&self, m: usize) -> i8 {
         self.key_changes.iter().rev().find(|c| c.measure <= m).map_or(self.fifths, |c| c.fifths)
+    }
+
+    /// Key signature (concert) in force at measure `m` for one part: its own when it has one, else the score's.
+    pub fn part_key_at(&self, part: usize, m: usize) -> i8 {
+        match self.parts.get(part).and_then(|p| p.key.as_ref()) {
+            Some(k) => k.changes.iter().rev().find(|c| c.measure <= m).map_or(k.fifths, |c| c.fifths),
+            None => self.key_at(m),
+        }
     }
 
     /// Set the key signature from measure `m` until the next change; `m` = 0 sets the initial key. Setting the key
@@ -2535,6 +2580,31 @@ mod tests {
         r.transpose_range(1, 1, -7).unwrap();
         assert!(r.key_changes.is_empty() && notes(&r, 1) == notes(&mk(), 1));
         assert!(mk().transpose_range(0, 2, 70).is_err() && mk().transpose_range(5, 6, 1).is_err() && mk().transpose_range(0, 2, 0).is_err());
+    }
+
+    #[test]
+    fn a_part_can_keep_its_own_key() {
+        let mut s = Score::new("p", TimeSig { num: 4, den: 4 }, 0, 3);
+        s.add_part("Otra", Clef::Treble, 0, false);
+        s.parts[1].key = Some(PartKey { fifths: 3, changes: Vec::new() });
+        assert_eq!((s.part_key_at(0, 2), s.part_key_at(1, 2)), (0, 3));
+        // the score changes key: the part with its own does not follow, the other one does
+        s.set_key_at(2, 1);
+        assert_eq!((s.part_key_at(0, 2), s.part_key_at(1, 2)), (1, 3));
+        // a transposition moves both keys, each in its own measure range
+        s.transpose_range(0, usize::MAX, 2).unwrap();
+        assert_eq!((s.part_key_at(0, 0), s.part_key_at(0, 2), s.part_key_at(1, 0)), (2, 3, 5));
+        // an update from the interface sets and clears it
+        s.update_part(1, PartUpdate { key: Some(None), ..Default::default() }).unwrap();
+        assert!(s.parts[1].key.is_none());
+        s.update_part(1, PartUpdate { key: Some(Some(-2)), ..Default::default() }).unwrap();
+        assert_eq!(s.part_key_at(1, 1), -2);
+        // old files have no `key` field
+        let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        assert!(!serde_json::to_string(&t).unwrap().contains("\"key\""));
+        t.parts[0].key = Some(PartKey { fifths: 1, changes: vec![] });
+        let back: Score = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.parts[0].key, t.parts[0].key);
     }
 
     #[test]

@@ -704,15 +704,16 @@ pub fn export_mscx(score: &Score) -> String {
                         let _ = writeln!(x, "          <TimeSig>\n            <sigN>{}</sigN>\n            <sigD>{}</sigD>\n            </TimeSig>", t.num, t.den);
                     }
                     if mi > 0 && !part.percussion {
-                        if let Some(c) = score.key_changes.iter().find(|c| c.measure == mi) {
+                        if score.part_key_at(pi, mi) != score.part_key_at(pi, mi - 1) {
+                            let c = KeyChange { measure: mi, fifths: score.part_key_at(pi, mi) };
                             let actual = part.transpose.map_or(String::new(), |t| format!("\n            <actualKey>{}</actualKey>", t.written_fifths(c.fifths)));
                             let _ = writeln!(x, "          <KeySig>\n            <concertKey>{}</concertKey>{actual}\n            </KeySig>", c.fifths);
                         }
                     }
                     if mi == 0 {
                         if !part.percussion {
-                            let actual = part.transpose.map_or(String::new(), |t| format!("\n            <actualKey>{}</actualKey>", t.written_fifths(score.fifths)));
-                            let _ = writeln!(x, "          <KeySig>\n            <concertKey>{}</concertKey>{actual}\n            </KeySig>", score.fifths);
+                            let actual = part.transpose.map_or(String::new(), |t| format!("\n            <actualKey>{}</actualKey>", t.written_fifths(score.part_key_at(pi, 0))));
+                            let _ = writeln!(x, "          <KeySig>\n            <concertKey>{}</concertKey>{actual}\n            </KeySig>", score.part_key_at(pi, 0));
                         }
                         if pi == 0 {
                             let _ = writeln!(
@@ -835,6 +836,17 @@ mod tests {
         let b = import_mscx(&xml).unwrap().score;
         assert_eq!(b.key_changes, s.key_changes);
         assert!(!import_mscx(&xml).unwrap().warnings.iter().any(|w| w.contains("armadura")));
+    }
+
+    #[test]
+    fn a_part_with_its_own_key_round_trips_through_musescore() {
+        let mut s = sample();
+        s.parts[1].key = Some(PartKey { fifths: -2, changes: vec![KeyChange { measure: 2, fifths: 3 }] });
+        let b = import_mscx(&export_mscx(&s)).unwrap().score;
+        assert_eq!(b.fifths, s.fifths);
+        assert!(b.key_changes.is_empty(), "the part's own change is not the score's: {:?}", b.key_changes);
+        assert_eq!(b.parts[1].key, s.parts[1].key);
+        assert!(b.parts[0].key.is_none());
     }
 
     #[test]

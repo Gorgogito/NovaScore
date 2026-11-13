@@ -118,7 +118,8 @@ export interface Part {
   tuning?: number[];
   /** With a tuning: only the tablature is drawn (no standard staff). */
   tab_only?: boolean;
-  /** Set by `displayScore`: key signature this staff is drawn with (written key of a transposing instrument). */
+  /** Own key signature (concert key): the part does not follow the key of the score. */
+  key?: PartKey;
   spanners?: Spanner[];
   measures: Measure[];
 }
@@ -162,6 +163,12 @@ export const writtenFifths = (fifths: number, t?: Transpose): number => {
   while (out < -7) out += 12;
   return out;
 };
+
+/** Key signature of a part that has its own (concert key); the part does not follow the score's. */
+export interface PartKey {
+  fifths: number;
+  changes?: { measure: number; fifths: number }[];
+}
 
 export interface TimeSig {
   num: number;
@@ -224,7 +231,11 @@ export const keyAt = (s: Score, m: number): number => {
 };
 
 /** Key signature a part reads at measure `m` (a transposing instrument reads its own). */
-export const partKeyAt = (s: Score, p: { transpose?: Transpose }, m: number): number => writtenFifths(keyAt(s, m), p.transpose);
+export const partKeyAt = (s: Score, p: { transpose?: Transpose; key?: PartKey }, m: number): number => {
+  const k = p.key;
+  const concert = k ? ([...(k.changes ?? [])].reverse().find((c) => c.measure <= m)?.fifths ?? k.fifths) : keyAt(s, m);
+  return writtenFifths(concert, p.transpose);
+};
 
 /** Time signature in force at measure `m`. */
 export const timeAt = (s: Score, m: number): TimeSig => {

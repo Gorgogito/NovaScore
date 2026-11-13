@@ -607,8 +607,9 @@ pub fn export_musicxml(score: &Score) -> String {
             let _ = writeln!(x, "    <measure number=\"{}\">", mi + 1);
             let mlen = score.measure_len(mi);
             if mi > 0 {
-                if let Some(c) = score.key_changes.iter().find(|c| c.measure == mi) {
-                    let f = part.transpose.map_or(c.fifths, |t| t.written_fifths(c.fifths));
+                if score.part_key_at(pi, mi) != score.part_key_at(pi, mi - 1) {
+                    let cf = score.part_key_at(pi, mi);
+                    let f = part.transpose.map_or(cf, |t| t.written_fifths(cf));
                     let _ = writeln!(x, "      <attributes><key><fifths>{f}</fifths></key></attributes>");
                 }
                 if let Some(c) = score.time_changes.iter().find(|c| c.measure == mi) {
@@ -624,7 +625,8 @@ pub fn export_musicxml(score: &Score) -> String {
                     ("F", 4)
                 };
                 // A transposing instrument reads its own key and writes <transpose>; pitches below are written ones.
-                let fifths = part.transpose.map_or(score.fifths, |t| t.written_fifths(score.fifths));
+                let own_key = score.part_key_at(pi, 0);
+                let fifths = part.transpose.map_or(own_key, |t| t.written_fifths(own_key));
                 let transpose_xml = part.transpose.map_or(String::new(), |t| format!("<transpose><diatonic>{}</diatonic><chromatic>{}</chromatic></transpose>", t.diatonic, t.chromatic));
                 // open strings, lowest first (line 1 of <staff-tuning>)
                 let tuning_xml = part.tuning.as_ref().map_or(String::new(), |tn| {
@@ -1117,7 +1119,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     let mut staff_tab_only: std::collections::HashSet<usize> = Default::default();
     let mut key_read = false; // the score key comes from the first part
     let mut key_map: std::collections::BTreeMap<usize, i8> = Default::default();
-    let mut key_conflicts: Vec<String> = Vec::new();
+    let mut staff_key: std::collections::HashMap<usize, PartKey> = Default::default();
     let mut perc_staves: std::collections::BTreeSet<usize> = Default::default();
     // Slurs and hairpins per staff: (voice, kind, start, end).
     let mut staff_sp: Vec<Vec<(usize, SpannerKind, SpPos, SpPos, u8)>> = Vec::new();
@@ -1156,6 +1158,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut part_tab_only = false;
         // initial key (concert) this part declares: its later changes count only if it agrees with the score's
         let mut part_key0: Option<i8> = None;
+        let mut part_changes: std::collections::BTreeMap<usize, i8> = Default::default();
         // Tablature: open strings of the part, TAB staves (their notes only tell us strings) and the string of each note.
         let mut part_tuning: Option<Vec<u8>> = None;
         let mut tab_staves: std::collections::HashSet<u32> = Default::default();
@@ -1196,8 +1199,9 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 } else if part_key0.map_or(true, |k0| k0 == score.fifths) {
                                     // the first part to give a change at a measure wins
                                     key_map.entry(mi).or_insert(concert);
-                                } else if !key_conflicts.contains(&pname) {
-                                    key_conflicts.push(pname.clone());
+                                } else {
+                                    // a part in another key than the first one keeps its own
+                                    part_changes.insert(mi, concert);
                                 }
                             }
                         }
@@ -1627,6 +1631,17 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             }
         }
         for si in first_staff_idx..staves.len() {
+            if let Some(k0) = part_key0.filter(|&k| k != score.fifths) {
+                let mut prev = k0;
+                let mut changes = Vec::new();
+                for (&mi, &f) in &part_changes {
+                    if f != prev {
+                        changes.push(KeyChange { measure: mi, fifths: f });
+                        prev = f;
+                    }
+                }
+                staff_key.insert(si, PartKey { fifths: k0, changes });
+            }
             if let Some(t) = part_tr.or(part_clef_tr) {
                 staff_tr.insert(si, t);
             }
@@ -1683,9 +1698,6 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             prev_key = f;
         }
     }
-    if !key_conflicts.is_empty() {
-        warnings.push(format!("Las partes {} declaran otra tonalidad inicial que la primera: se ignoraron sus cambios de armadura.", key_conflicts.join(", ")));
-    }
     harmony_chords.sort_by_key(|c| (c.measure, c.tick));
     harmony_chords.dedup_by_key(|c| (c.measure, c.tick));
     score.chords = harmony_chords;
@@ -1738,6 +1750,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         }
         let mut part = Part::new(name, clef, program, out);
         part.transpose = staff_tr.get(&si).copied();
+        part.key = staff_key.get(&si).cloned();
         part.tuning = staff_tab.get(&si).cloned();
         part.tab_only = part.tuning.is_some() && staff_tab_only.contains(&si);
         part.spanners = staff_sp[si]
@@ -2285,10 +2298,14 @@ mod tests {
         // the first one to write a change wins
         let r = import_musicxml(&wrap(part("P1", "uno", 0, Some(1)), part("P2", "dos", 0, Some(2)))).unwrap();
         assert_eq!(r.score.key_changes, vec![KeyChange { measure: 1, fifths: 1 }]);
-        // a part that starts in another key is not trusted, and the file says so
+        // a part that starts in another key keeps its own, changes included, and the score's key is untouched
         let r = import_musicxml(&wrap(part("P1", "uno", 0, None), part("P2", "dos", 3, Some(4)))).unwrap();
-        assert!(r.score.key_changes.is_empty());
-        assert!(r.warnings.iter().any(|w| w.contains("Dos") && w.contains("tonalidad")), "{:?}", r.warnings);
+        assert!(r.score.key_changes.is_empty() && r.score.fifths == 0);
+        assert_eq!(r.score.parts[1].key, Some(PartKey { fifths: 3, changes: vec![KeyChange { measure: 1, fifths: 4 }] }));
+        assert!(r.score.parts[0].key.is_none() && !r.warnings.iter().any(|w| w.contains("tonalidad")));
+        // and it is written back the same way
+        let back = import_musicxml(&export_musicxml(&r.score)).unwrap().score;
+        assert_eq!((back.fifths, back.parts[1].key.clone()), (0, r.score.parts[1].key.clone()));
     }
 
     #[test]

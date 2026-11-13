@@ -592,6 +592,9 @@ pub struct HarmonyOptions {
     pub inversions: bool,
     /// Dominants of the other degrees (V/ii, V/IV, V/V, V/vi…), when the melody has the note that calls for them.
     pub secondary: bool,
+    /// 0 is the best harmonization found; 1, 2… are other good ones (the scores get a fixed pseudo-random nudge per
+    /// variant, so the same number always gives the same result): a melody has many valid harmonizations.
+    pub variant: u8,
 }
 
 /// One chord the harmonizer can choose: degree offset, quality, degree number (0 for a secondary dominant), whether it
@@ -765,7 +768,9 @@ impl Score {
     /// `opts` adds seventh chords (the dominant seventh favoured, first and last chord stay triads), dominants of the
     /// other degrees (they appear only where the melody has their leading tone, and must resolve) and first inversions
     /// (a second pass chooses root or third in the bass to keep the bass line moving by small steps; never on the first
-    /// or last chord). Returns the number of chord symbols.
+    /// or last chord; the final I–V–I cadence may take the cadential 6/4, with the tonic in second inversion over the
+    /// dominant's bass note, and keeps its V in root position). Parallel fifths between the melody and the
+    /// bass cost more than a V–I link gains (octaves are not counted: a melody on the root is just doubled). Returns the number of chord symbols.
     pub fn harmonize(&mut self, part: usize, minor: bool, per_bar: u8, opts: HarmonyOptions) -> Result<usize, String> {
         let p = self.parts.get(part).ok_or("La parte no existe.")?;
         let units = self.chord_units(per_bar, Some(part));
@@ -794,6 +799,29 @@ impl Score {
         if !any {
             return Err("Esa parte no tiene notas que armonizar.".into());
         }
+        // the melody note that starts each unit (the highest one), to look for parallels with the bass
+        let tops: Vec<Option<i32>> = units
+            .iter()
+            .map(|&(m, t0, _)| {
+                let me = p.measures.get(m)?;
+                (0..MAX_VOICES)
+                    .filter_map(|v| me.voice(v))
+                    .flatten()
+                    .filter(|e| e.start == t0)
+                    .filter_map(|e| if let Content::Note { pitches, .. } = &e.content { pitches.iter().map(|q| q.midi()).max() } else { None })
+                    .max()
+            })
+            .collect();
+        // cost of parallel fifths between the melody and the bass
+        let parallel = |u: usize, bass0: i32, bass1: i32| -> f32 {
+            let (Some(m0), Some(m1)) = (tops[u - 1], tops[u]) else { return 0.0 };
+            let (i0, i1) = ((m0 - bass0).rem_euclid(12), (m1 - bass1).rem_euclid(12));
+            if i0 != i1 || m0 == m1 || bass0.rem_euclid(12) == bass1.rem_euclid(12) {
+                return 0.0;
+            }
+            // parallel octaves with the bass are not penalized: a melody that sits on the root is just doubled
+            if i0 == 7 { 4.0 } else { 0.0 }
+        };
         let tonics: Vec<i32> = units.iter().map(|&(m, _, _)| self.mode_tonic(minor, m)).collect();
         let triads: &[(u8, Quality, u8)] = if minor { &MINOR_DEGREES } else { &MAJOR_DEGREES };
         let mut cands: Vec<Cand> = triads.iter().map(|&(off, q, num)| Cand { off, q, num, sev: false, sec: None }).collect();
@@ -858,10 +886,18 @@ impl Score {
                     s -= 2.0;
                 }
             }
+            if opts.variant > 0 && u > 0 && u + 1 < n {
+                // a fixed pseudo-random nudge per (unit, chord, variant); the first and last chord are left alone
+                let mut h = (u as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (c as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9) ^ (opts.variant as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 31;
+                h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+                h ^= h >> 32;
+                s += ((h % 2000) as f32 / 1000.0 - 1.0) * 1.8;
+            }
             s
         };
         // staying on a chord inside a bar is fine; between bars repeating is discouraged; a change inside a bar costs a little
-        let step = |u: usize, a: usize, b: usize| {
+        let base_step = |u: usize, a: usize, b: usize| {
             let same_bar = units[u].0 == units[u - 1].0;
             let (ca, cb) = (cands[a], cands[b]);
             if ca.num == cb.num && ca.sec.is_none() && cb.sec.is_none() {
@@ -876,6 +912,8 @@ impl Score {
             let r = cand_link(ca, cb);
             if same_bar { r * 0.6 - 0.3 } else { r }
         };
+        // parallel fifths or octaves between the melody and the root-position bass cost more than a V-I link gains
+        let step = |u: usize, a: usize, b: usize| base_step(u, a, b) - parallel(u, tonics[u - 1] + cands[a].off as i32, tonics[u] + cands[b].off as i32);
         let mut best: Vec<Vec<f32>> = vec![vec![0.0; cands.len()]; n];
         let mut from: Vec<Vec<usize>> = vec![vec![0; cands.len()]; n];
         for c in 0..cands.len() {
@@ -899,7 +937,18 @@ impl Score {
         if opts.inversions && n > 2 {
             // root or third in the bass: the cheapest bass line (small steps; an inversion costs a little)
             let third = |u: usize| roots[u] + tones(cands[path[u]].q)[1] as i32;
-            let options = |u: usize| -> Vec<i32> { if u == 0 || u + 1 == n { vec![roots[u]] } else { vec![roots[u], third(u)] } };
+            // the last three chords are I, V, I: the V stays in root position and the first I may take the 6/4
+            let plain = |c: Cand| !c.sev && c.sec.is_none();
+            let final_cadence = n >= 3 && cands[path[n - 3]].num == 1 && plain(cands[path[n - 3]]) && cands[path[n - 2]].num == 5 && cands[path[n - 1]].num == 1;
+            let options = |u: usize| -> Vec<i32> {
+                if u == 0 || u + 1 == n || (final_cadence && u == n - 2) {
+                    vec![roots[u]]
+                } else if final_cadence && u == n - 3 {
+                    vec![roots[u], third(u), roots[u] + tones(cands[path[u]].q)[2] as i32]
+                } else {
+                    vec![roots[u], third(u)]
+                }
+            };
             let leap = |a: i32, b: i32| {
                 let d = (a - b).rem_euclid(12);
                 d.min(12 - d) as f32
@@ -911,12 +960,12 @@ impl Score {
                 let mut row = vec![0.0; opt.len()];
                 let mut brow = vec![0usize; opt.len()];
                 for (k, &bass) in opt.iter().enumerate() {
-                    let own = if bass == roots[u] { 0.0 } else { 0.8 };
+                    let own = [0.0, 0.8, -1.0][k.min(2)];
                     if u == 0 {
                         row[k] = own;
                     } else {
                         let prev = options(u - 1);
-                        let (pk, pc) = prev.iter().enumerate().map(|(j, &pb)| (j, cost[u - 1][j] + 0.5 * leap(pb, bass))).fold((0, f32::MAX), |a, b| if b.1 < a.1 { b } else { a });
+                        let (pk, pc) = prev.iter().enumerate().map(|(j, &pb)| (j, cost[u - 1][j] + 0.5 * leap(pb, bass) + parallel(u, pb, bass))).fold((0, f32::MAX), |a, b| if b.1 < a.1 { b } else { a });
                         row[k] = own + pc;
                         brow[k] = pk;
                     }
@@ -1320,18 +1369,18 @@ mod tests {
 
     #[test]
     fn inversions_smooth_the_bass_line_but_never_touch_the_ends() {
-        // C | G | C: the bass C G C leaps a fifth each time; G/B moves by step
-        let mut s = Score::new("i", TimeSig { num: 4, den: 4 }, 0, 3);
-        melody(&mut s, &[&[60, 64, 67, 64], &[62, 67, 71, 67]], Some(60));
+        // C | G | C | F: the bass C G C leaps a fifth each time; G/B moves by step (the V is not in a final cadence)
+        let mut s = Score::new("i", TimeSig { num: 4, den: 4 }, 0, 4);
+        melody(&mut s, &[&[60, 64, 67, 64], &[62, 67, 71, 67], &[60, 64, 67, 64]], Some(65));
         s.harmonize(0, false, 1, HarmonyOptions { inversions: true, ..HarmonyOptions::default() }).unwrap();
-        assert_eq!(s.chords.iter().map(|c| (c.root, c.bass)).collect::<Vec<_>>(), vec![(0, 0), (7, 11), (0, 0)]);
+        assert_eq!(s.chords.iter().map(|c| (c.root, c.bass)).collect::<Vec<_>>(), vec![(0, 0), (7, 11), (0, 0), (5, 5)], "{:?}", s.chords);
         s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
         assert!(s.chords.iter().all(|c| c.bass == c.root));
         // and the accompaniment plays the inverted bass
         s.harmonize(0, false, 1, HarmonyOptions { inversions: true, ..HarmonyOptions::default() }).unwrap();
         let pi = s.add_accompaniment(Accompaniment::Bass).unwrap();
         let bass: Vec<i32> = s.parts[pi].measures.iter().filter_map(|m| m.events.iter().find_map(|e| if let Content::Note { pitches, .. } = &e.content { Some(pitches[0].midi() % 12) } else { None })).collect();
-        assert_eq!(&bass[..3], &[0, 11, 0]);
+        assert_eq!(&bass[..4], &[0, 11, 0, 5]);
     }
 
     #[test]
@@ -1376,5 +1425,54 @@ mod tests {
         m.harmonize(0, false, 4, HarmonyOptions::default()).unwrap();
         assert!(m.chords.len() >= 3 && m.chords.len() <= 12);
         assert_eq!(m.chords.last().map(|c| c.root), Some(0));
+    }
+
+    #[test]
+    fn the_harmonization_avoids_parallel_fifths_with_the_bass() {
+        // G, D, C over I, V, I would run G-D over C-G in parallel fifths: another harmonization is found
+        let mut s = Score::new("p", TimeSig { num: 4, den: 4 }, 0, 3);
+        for (m, n) in [67, 74, 72].iter().enumerate() {
+            s.put_abs(0, m as u32 * 1920, 1920, &[p(*n)]).unwrap();
+        }
+        s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
+        assert_ne!(s.chords.iter().map(|c| c.root).collect::<Vec<_>>(), vec![0, 7, 0], "{:?}", roots(&s));
+        let mut t = s.clone();
+        t.add_accompaniment(Accompaniment::Bass).unwrap();
+        assert!(t.review().iter().all(|i| i.kind != "parallel"), "{:?}", t.review());
+    }
+
+    #[test]
+    fn the_final_cadence_may_take_the_cadential_six_four() {
+        // C | C | V | C: the tonic before the final V sits on the dominant's note, and the V stays in root position
+        let mut s = Score::new("c", TimeSig { num: 4, den: 4 }, 0, 4);
+        melody(&mut s, &[&[60, 64, 67, 64], &[64, 67, 72, 67], &[62, 67, 71, 67]], Some(60));
+        s.harmonize(0, false, 1, HarmonyOptions { inversions: true, ..HarmonyOptions::default() }).unwrap();
+        let by = |m: usize| s.chords.iter().find(|c| c.measure == m).map(|c| (c.root, c.bass));
+        assert_eq!((by(1), by(2), by(3)), (Some((0, 7)), Some((7, 7)), Some((0, 0))), "{:?}", s.chords);
+        // not without the option
+        s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
+        assert!(s.chords.iter().all(|c| c.bass == c.root));
+    }
+
+    #[test]
+    fn other_proposals_differ_but_are_repeatable_and_keep_the_ends() {
+        // whole notes that fit several chords each (E: I, iii, vi; G: I, iii, V; C: I, IV, vi; A: ii, IV, vi…)
+        let mut s = Score::new("v", TimeSig { num: 4, den: 4 }, 0, 9);
+        for (m, n) in [64, 67, 72, 69, 67, 65, 62, 64, 60].iter().enumerate() {
+            s.put_abs(0, m as u32 * 1920, 1920, &[p(*n)]).unwrap();
+        }
+        let run = |s: &mut Score, v: u8| {
+            s.harmonize(0, false, 1, HarmonyOptions { variant: v, ..HarmonyOptions::default() }).unwrap();
+            s.chords.iter().map(|c| (c.measure, c.root, format!("{:?}", c.quality))).collect::<Vec<_>>()
+        };
+        let base = run(&mut s, 0);
+        assert_eq!(run(&mut s, 3), run(&mut s, 3), "the same variant gives the same result");
+        let others: Vec<_> = (1..=8).map(|v| run(&mut s, v)).collect();
+        assert!(others.iter().filter(|o| **o != base).count() >= 3, "variants must differ from the best one");
+        let mut distinct = others.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert!(distinct.len() >= 3, "and among themselves");
+        assert!(others.iter().all(|o| o[0].1 == 0 && o.last().map(|c| c.1) == Some(0)), "every proposal starts and ends on the tonic");
     }
 }

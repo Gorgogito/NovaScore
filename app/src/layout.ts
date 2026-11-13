@@ -1,5 +1,5 @@
 import { drumPos } from "./drum";
-import { EventData, measureLen, notatedTicks, partKeyAt, Pitch, pitchMidi, Score, timeAt, TimeSig, Transpose, voiceCount, voiceEvents } from "./types";
+import { EventData, measureLen, notatedTicks, partKeyAt, PartKey, Pitch, pitchMidi, Score, timeAt, TimeSig, Transpose, voiceCount, voiceEvents } from "./types";
 
 export const SP = 10; // staff space in px
 export const STAFF_H = SP * 4;
@@ -161,12 +161,13 @@ function applyVoiceOffsets(lanes: LLane[], percussion: boolean[]) {
 export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const nMeasures = Math.max(...score.parts.map((p) => p.measures.length));
   // Transposing staves read their own key; the header is as wide as the widest one.
-  const partKey = (p: { transpose?: Transpose }, m: number) => partKeyAt(score, p, m);
+  const partKey = (p: { transpose?: Transpose; key?: PartKey }, m: number) => partKeyAt(score, p, m);
   const keyBlockW = (n: number) => (n ? n * 11 + 8 : 0);
   const sysKeyW = (idx: number) => keyBlockW(Math.max(...score.parts.map((p) => Math.abs(partKey(p, idx)))));
   /** Signs drawn where the key changes: naturals for what is cancelled, then the new signs. */
-  const changeSigns = (idx: number, p: { transpose?: Transpose }) => cancelledSigns(partKey(p, idx - 1), partKey(p, idx)) + Math.abs(partKey(p, idx));
-  const isKeyChange = (idx: number) => idx > 0 && (score.key_changes ?? []).some((c) => c.measure === idx);
+  const changeSigns = (idx: number, p: { transpose?: Transpose; key?: PartKey }) => (partKey(p, idx) === partKey(p, idx - 1) ? 0 : cancelledSigns(partKey(p, idx - 1), partKey(p, idx)) + Math.abs(partKey(p, idx)));
+  /** The key changes at this measure in the score or in any part with a key of its own. */
+  const isKeyChange = (idx: number) => idx > 0 && score.parts.some((p) => partKey(p, idx) !== partKey(p, idx - 1));
   const changeW = (idx: number) => (isKeyChange(idx) ? keyBlockW(Math.max(...score.parts.map((p) => changeSigns(idx, p)))) : 0);
   const clefW = 42;
   const timeW = 30;

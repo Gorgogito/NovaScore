@@ -629,13 +629,13 @@ fn continue_phrase(state: State<AppState>, part: usize, phrase: usize, steps: i3
 /// `progression` (números romanos, p. ej. `I-V-vi-IV`) escribe esa progresión en lugar de analizar la melodía.
 /// `part` del resultado = número de acordes escritos.
 #[tauri::command]
-fn harmonize(state: State<AppState>, part: usize, minor: bool, progression: Option<String>, per_bar: Option<u8>, sevenths: Option<bool>, inversions: Option<bool>, secondary: Option<bool>) -> Result<Entered2, String> {
+fn harmonize(state: State<AppState>, part: usize, minor: bool, progression: Option<String>, per_bar: Option<u8>, sevenths: Option<bool>, inversions: Option<bool>, secondary: Option<bool>, variant: Option<u8>) -> Result<Entered2, String> {
     let per_bar = match per_bar.unwrap_or(1) {
         0 | 1 => 1,
         2 | 3 => 2,
         _ => 4,
     };
-    let opts = nova_core::assist::HarmonyOptions { sevenths: sevenths.unwrap_or(false), inversions: inversions.unwrap_or(false), secondary: secondary.unwrap_or(false) };
+    let opts = nova_core::assist::HarmonyOptions { sevenths: sevenths.unwrap_or(false), inversions: inversions.unwrap_or(false), secondary: secondary.unwrap_or(false), variant: variant.unwrap_or(0) };
     let mut doc = lock(&state);
     let mut result: Result<usize, String> = Err("sin resultado".into());
     doc.edit(|s| {

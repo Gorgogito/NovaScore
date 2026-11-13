@@ -946,7 +946,7 @@ export function ScoreView(props: Props) {
                                   );
                                 }}
                               </For>
-                              <Show when={m.showKey && !part.percussion && !part.tab_only}>
+                              <Show when={m.showKey && !part.percussion && !part.tab_only && partKeyAt(props.score, part, m.index) !== partKeyAt(props.score, part, m.index - 1)}>
                                 {keySig(top, m.x + 6, partKeyAt(props.score, part, m.index), partKeyAt(props.score, part, m.index - 1))}
                               </Show>
                               <Show when={m.showTime}>

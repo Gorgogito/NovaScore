@@ -7,7 +7,7 @@
 //!
 //! `cargo run --release --example eval_harmonize` — optionally followed by `.mscz` / `.musicxml` files, for which it
 //! only prints the chords found and the time taken (long pieces, no truth).
-use nova_core::assist::HarmonyOptions;
+use nova_core::assist::{Accompaniment, HarmonyOptions};
 use nova_core::chords::Quality;
 use nova_core::{Pitch, Score, TimeSig};
 
@@ -102,6 +102,8 @@ fn synthetic() {
     ];
     for (name, opts) in variants {
         let (mut bars, mut root_ok, mut exact_ok) = (0, 0, 0);
+        // quality that needs no ear: parallel fifths/octaves between the melody and the bass line, closing on the tonic
+        let (mut parallels, mut pieces, mut tonic_end, mut changes) = (0usize, 0usize, 0usize, 0usize);
         let mut per_prog = Vec::new();
         for (pname, minor, prog) in progressions() {
             let (mut n, mut r, mut e) = (0, 0, 0);
@@ -115,6 +117,15 @@ fn synthetic() {
                 let mut s = melody(&abs.iter().map(|&(root, q)| (root, q)).collect::<Vec<_>>(), 0, &mut rng);
                 if s.harmonize(0, minor, 1, opts).is_err() {
                     continue;
+                }
+                {
+                    let mut t = s.clone();
+                    if t.add_accompaniment(Accompaniment::Bass).is_ok() {
+                        parallels += t.review().iter().filter(|i| i.kind == "parallel").count();
+                    }
+                    pieces += 1;
+                    tonic_end += (s.chords.last().map(|c| c.root as i32) == Some(tonic)) as usize;
+                    changes += s.chords.len();
                 }
                 if std::env::var("NOVA_VERBOSE").is_ok() && seed < 2 && name != "inversiones" {
                     let nm = |r: i32, q: Quality| format!("{}{}", ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][r.rem_euclid(12) as usize], q.suffix());
@@ -139,6 +150,7 @@ fn synthetic() {
             exact_ok += e;
         }
         println!("{name:<12} compases {bars}: fundamental {:.1} %, tríada exacta {:.1} %   [{}]", 100.0 * root_ok as f64 / bars as f64, 100.0 * exact_ok as f64 / bars as f64, per_prog.join(", "));
+        println!("{:<12} calidad: paralelas melodía–bajo {:.1} por 100 compases, acaba en la tónica {:.0} %, {:.2} acordes por compás", "", 100.0 * parallels as f64 / bars as f64, 100.0 * tonic_end as f64 / pieces as f64, changes as f64 / bars as f64);
     }
 }
 
@@ -181,7 +193,7 @@ fn real(path: &str) {
     let part = (0..s.parts.len()).find(|&i| !s.parts[i].percussion).unwrap_or(0);
     s.chords.clear();
     let t = std::time::Instant::now();
-    let opts = HarmonyOptions { sevenths: true, inversions: true, secondary: true };
+    let opts = HarmonyOptions { sevenths: true, inversions: true, secondary: true, variant: 0 };
     match s.harmonize(part, false, 2, opts) {
         Ok(n) => {
             let names: Vec<String> = s.chords.iter().take(40).map(|c| c.name(s.fifths)).collect();
