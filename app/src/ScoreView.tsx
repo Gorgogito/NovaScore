@@ -2,7 +2,7 @@ import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
 import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, TAB_SP, tabHeight, staffIdx, STAFF_H } from "./layout";
 import { tabPositions } from "./tab";
-import { chordName, ChordMark, Cursor, JUMP_TEXT, lyricCovers, measureLen, notatedTicks, Pitch, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
+import { chordName, ChordMark, Cursor, EventData, JUMP_TEXT, lyricCovers, measureLen, notatedTicks, Pitch, PPQ, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
 const g2 = g;
@@ -140,7 +140,8 @@ export function ScoreView(props: Props) {
         pt.x = e.clientX;
         pt.y = e.clientY;
         const p = pt.matrixTransform(svg.getScreenCTM()!.inverse());
-        props.onPick(lane.part, lane.voice, m.index, le.ev.start, Math.round((top + STAFF_H - p.y) / (SP / 2)), e.shiftKey);
+        const tabOnly = !!props.score.parts[lane.part].tab_only;
+        props.onPick(lane.part, lane.voice, m.index, le.ev.start, tabOnly ? null : Math.round((top + STAFF_H - p.y) / (SP / 2)), e.shiftKey);
       }}
     />
   );
@@ -606,11 +607,102 @@ export function ScoreView(props: Props) {
     return <For each={segs}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.1} />}</For>;
   };
 
+  /** Rhythm of a tablature-only part: stems and beams under the staff, rests, and the cursor / playback highlight. */
+  const tabRhythm = (pi: number, ty: number, n: number, sys: LSystem) => {
+    const bottom = ty + tabHeight(n);
+    const stemEnd = bottom + 22;
+    const flagsOf = (e: EventData) => {
+      if (e.kind !== "note") return 0;
+      const { base } = baseOf(notatedTicks(e));
+      return base >= 480 ? 0 : base === 240 ? 1 : base === 120 ? 2 : base === 60 ? 3 : 4;
+    };
+    return (
+      <For each={sys.measures}>
+        {(m) => (
+          <For each={m.lanes.filter((l) => l.part === pi)}>
+            {(lane) => {
+              const evs = lane.events;
+              const sx = (le: LEvent) => le.x + 5;
+              // beams: runs of neighbouring notes of the same beat with at least `l` flags; a lone one gets a flag
+              const lines: { x1: number; y1: number; x2: number; y2: number }[] = [];
+              for (let l = 1; l <= 4; l++) {
+                let i = 0;
+                while (i < evs.length) {
+                  if (flagsOf(evs[i].ev) < l) {
+                    i++;
+                    continue;
+                  }
+                  let j = i;
+                  while (j + 1 < evs.length && flagsOf(evs[j + 1].ev) >= l && Math.floor(evs[j + 1].ev.start / PPQ) === Math.floor(evs[i].ev.start / PPQ)) j++;
+                  const y = stemEnd - (l - 1) * 3.5;
+                  if (j > i) lines.push({ x1: sx(evs[i]), y1: y, x2: sx(evs[j]), y2: y });
+                  else lines.push({ x1: sx(evs[i]), y1: y, x2: sx(evs[i]) + 5, y2: y - 6 });
+                  i = j + 1;
+                }
+              }
+              // tuplets: the number goes under the stems of each group
+              const tupletGroups: { x1: number; x2: number; n: number; key: string }[] = [];
+              for (const le of evs) {
+                const t = le.ev.tuplet;
+                if (!t) continue;
+                const key = `${t.start}:${t.actual}`;
+                const last = tupletGroups[tupletGroups.length - 1];
+                if (last && last.key === key) last.x2 = sx(le);
+                else tupletGroups.push({ x1: sx(le), x2: sx(le), n: t.actual, key });
+              }
+              return (
+                <g>
+                  <For each={evs}>
+                    {(le) => {
+                      const ev = le.ev;
+                      const { base, dotted } = baseOf(notatedTicks(ev));
+                      const sel = () => {
+                        const s = props.selection;
+                        const key = m.index * 100000 + ev.start;
+                        if (s && s.part === pi && s.voice === lane.voice) return key >= s.from.m * 100000 + s.from.start && key <= s.to.m * 100000 + s.to.start;
+                        return props.cursor.part === pi && props.cursor.voice === lane.voice && props.cursor.m === m.index && props.cursor.start === ev.start;
+                      };
+                      const playing = () => props.playing === `${m.index}:${ev.start}`;
+                      const full = ev.kind === "rest" && ev.start === 0 && ev.ticks === measureLen(props.score, m.index);
+                      const cx = full ? m.x + m.headerW + (m.width - m.headerW) / 2 - 6 : le.x;
+                      const restBase = full ? 1920 : base;
+                      return (
+                        <g>
+                          <Show when={sel() || playing()}>
+                            <rect x={le.slotX - 2} y={ty - 12} width={Math.max(le.slotW, 8)} height={tabHeight(n) + 40} rx={4} fill={playing() ? "var(--play)" : "var(--accent)"} opacity={0.14} pointer-events="none" />
+                          </Show>
+                          <Show when={ev.kind === "note" && base < 1920}>
+                            <line x1={sx(le)} x2={sx(le)} y1={bottom + 3} y2={stemEnd} stroke="var(--ink)" stroke-width={1} />
+                          </Show>
+                          <Show when={ev.kind === "note" && dotted}>
+                            <circle cx={sx(le) + 4} cy={stemEnd - 3} r={1.4} fill="var(--ink)" />
+                          </Show>
+                          <Show when={ev.kind === "rest"}>
+                            <text x={cx} y={ty + tabHeight(n) / 2 + (restBase >= 1920 ? -SP : 0)} font-family="Bravura" font-size={FONT} fill="var(--ink)">{g(REST_GLYPH[restBase] ?? REST_GLYPH[480])}</text>
+                          </Show>
+                        </g>
+                      );
+                    }}
+                  </For>
+                  <For each={lines}>{(l) => <line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke="var(--ink)" stroke-width={2} />}</For>
+                  <For each={tupletGroups}>
+                    {(t) => <text x={(t.x1 + t.x2) / 2} y={stemEnd + 11} text-anchor="middle" font-family="serif" font-style="italic" font-size="11" fill="var(--ink)">{t.n}</text>}
+                  </For>
+                </g>
+              );
+            }}
+          </For>
+        )}
+      </For>
+    );
+  };
+
   /** Tablature staff under a part with a tuning: one line per string, fret numbers on the lines. */
   const tabStaff = (pi: number, top: number, sys: LSystem) => {
     const part = props.score.parts[pi];
     const n = part.tuning!.length;
-    const ty = top + props.layout.tabDy;
+    // under the staff, or centred in the staff's place when the part shows only the tablature
+    const ty = part.tab_only ? top + (STAFF_H - tabHeight(n)) / 2 : top + props.layout.tabDy;
     const x1 = sys.measures[0].x;
     const last = sys.measures[sys.measures.length - 1];
     const x2 = last.x + last.width;
@@ -627,6 +719,7 @@ export function ScoreView(props: Props) {
         <text x={x1 + 8} y={ty + tabHeight(n) / 2 - 4} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">T</text>
         <text x={x1 + 8} y={ty + tabHeight(n) / 2 + 8} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">A</text>
         <text x={x1 + 8} y={ty + tabHeight(n) / 2 + 20} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">B</text>
+        <Show when={part.tab_only}>{tabRhythm(pi, ty, n, sys)}</Show>
         <For each={sys.measures}>
           {(m) => (
             <For each={m.lanes.filter((l) => l.part === pi)}>
@@ -706,16 +799,18 @@ export function ScoreView(props: Props) {
                   const top = tops[pi()];
                   return (
                     <g>
-                      <For each={[0, 1, 2, 3, 4]}>
-                        {(l) => <line x1={first.x} x2={last.x + last.width} y1={top + l * SP} y2={top + l * SP} stroke="var(--ink)" stroke-width={1} />}
-                      </For>
-                      <text x={first.x + 6} y={part.percussion ? top + 2 * SP : part.clef === "treble" ? top + 3 * SP : top + SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">
-                        {g(part.percussion ? 0xe069 : part.clef === "treble" ? 0xe050 : 0xe062)}
-                      </text>
+                      <Show when={!part.tab_only}>
+                        <For each={[0, 1, 2, 3, 4]}>
+                          {(l) => <line x1={first.x} x2={last.x + last.width} y1={top + l * SP} y2={top + l * SP} stroke="var(--ink)" stroke-width={1} />}
+                        </For>
+                        <text x={first.x + 6} y={part.percussion ? top + 2 * SP : part.clef === "treble" ? top + 3 * SP : top + SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">
+                          {g(part.percussion ? 0xe069 : part.clef === "treble" ? 0xe050 : 0xe062)}
+                        </text>
+                      </Show>
                       <Show when={sys === props.layout.systems[0] || props.score.parts.length > 1}>
                         <text x={first.x + 4} y={top - 20} font-size="10" fill="var(--ink-dim)" font-family="system-ui" font-style="italic">{part.name}</text>
                       </Show>
-                      <Show when={!part.percussion}>{keySig(top, first.x + 40, part.shown_fifths ?? props.score.fifths)}</Show>
+                      <Show when={!part.percussion && !part.tab_only}>{keySig(top, first.x + 40, part.shown_fifths ?? props.score.fifths)}</Show>
                       <For each={sys.measures}>
                         {(m) => {
                           const lanes = m.lanes.filter((l) => l.part === pi());
@@ -723,7 +818,7 @@ export function ScoreView(props: Props) {
                           const hitOrder = [...lanes].sort((a, b) => Number(a.voice === props.cursor.voice) - Number(b.voice === props.cursor.voice));
                           return (
                             <g>
-                              <For each={lanes}>
+                              <For each={part.tab_only ? [] : lanes}>
                                 {(lane) => {
                                   const geo = computeBeams(lane, top, bottomLineIndex(part.clef), part.percussion);
                                   return (
@@ -741,7 +836,7 @@ export function ScoreView(props: Props) {
                                 <text x={m.x + m.headerW - 26} y={top + 2 * SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.num)}</text>
                                 <text x={m.x + m.headerW - 26} y={top + 4 * SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.den)}</text>
                               </Show>
-                              <Show when={props.cursor.part === pi() && props.cursor.m === m.index && !lanes.some((l) => l.voice === props.cursor.voice)}>
+                              <Show when={!part.tab_only && props.cursor.part === pi() && props.cursor.m === m.index && !lanes.some((l) => l.voice === props.cursor.voice)}>
                                 <rect x={m.x + m.headerW + 6} y={top - 6} width={16} height={STAFF_H + 12} rx={3} fill="var(--accent)" opacity={0.25} pointer-events="none" />
                               </Show>
                               <Show when={!props.printMode}>

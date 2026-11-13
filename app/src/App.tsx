@@ -454,6 +454,12 @@ export default function App() {
     const current = tabPositions(s, part, voice).get(`${m}:${start}`)?.[idx]?.string ?? 0;
     const options = playableStrings(tuning, midi);
     if (!options.length) { setStatus("Esa nota no se puede tocar con esta afinación."); return; }
+    // the first click on a note selects it; the next ones move it to another string
+    const c = cursor();
+    if (c.part !== part || c.voice !== voice || c.m !== m || c.start !== start) {
+      setCursor({ part, voice, m, start });
+      return;
+    }
     const next = options[(options.indexOf(current) + 1) % options.length];
     if (await run(api.setString(part, voice, m, start, midi, next))) setStatus(`Nota movida a la cuerda ${next} (se conserva al guardar).`);
   };
@@ -974,12 +980,13 @@ export default function App() {
                   <select
                     class="tab-select"
                     title="Tablatura: dibuja un pentagrama de tablatura bajo el pentagrama"
-                    value={TUNINGS.findIndex((t) => t.strings.join() === (p.tuning ?? []).join())}
+                    value={(p.tab_only ? 10 : 0) + TUNINGS.findIndex((t) => t.strings.join() === (p.tuning ?? []).join())}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => { const k = Number(e.currentTarget.value); run(api.updatePart(i(), k >= 0 ? { tuning: TUNINGS[k].strings, ...(TUNINGS[k].octave && !p.transpose ? { transpose: OCTAVE_BELOW } : {}) } : { tuning: null })); }}
+                    onChange={(e) => { const v = Number(e.currentTarget.value); const only = v >= 10; const k = only ? v - 10 : v; run(api.updatePart(i(), k >= 0 ? { tuning: TUNINGS[k].strings, tab_only: only, ...(TUNINGS[k].octave && !p.transpose ? { transpose: OCTAVE_BELOW } : {}) } : { tuning: null, tab_only: false })); }}
                   >
                     <option value="-1">{p.tuning && TUNINGS.findIndex((t) => t.strings.join() === p.tuning!.join()) < 0 ? "Tablatura (afinación propia)" : "Sin tablatura"}</option>
                     <For each={TUNINGS}>{(t, k) => <option value={k()}>Tablatura: {t.name}</option>}</For>
+                    <For each={TUNINGS}>{(t, k) => <option value={10 + k()}>Solo tablatura: {t.name}</option>}</For>
                   </select>
                   <div class="inst-mix" onClick={(e) => e.stopPropagation()}>
                     <button classList={{ on: p.muted }} title="Silenciar" onClick={() => run(api.updatePart(i(), { muted: !p.muted }))}>M</button>

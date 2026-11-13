@@ -523,6 +523,9 @@ pub struct Part {
     /// under the staff, and the frets go to MusicXML and MuseScore files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tuning: Option<Vec<u8>>,
+    /// With a tuning: show only the tablature, without the standard staff.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tab_only: bool,
     /// Only while writing a MuseScore file: this part is the tablature twin of the one before it.
     #[serde(skip)]
     pub tab_staff: bool,
@@ -625,7 +628,7 @@ impl Part {
     }
 
     pub fn new(name: impl Into<String>, clef: Clef, program: u8, measures: Vec<Measure>) -> Part {
-        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, tuning: None, tab_staff: false, spanners: Vec::new(), measures }
+        Part { name: name.into(), clef, program, volume: default_volume(), muted: false, solo: false, percussion: false, ms: None, transpose: None, tuning: None, tab_only: false, tab_staff: false, spanners: Vec::new(), measures }
     }
 }
 
@@ -645,6 +648,8 @@ pub struct PartUpdate {
     /// Tablature: `Some(Some(strings))` shows a tab staff with that tuning, `Some(None)` hides it.
     #[serde(default, deserialize_with = "double_option")]
     pub tuning: Option<Option<Vec<u8>>>,
+    /// Show only the tablature (needs a tuning).
+    pub tab_only: Option<bool>,
 }
 
 fn double_option<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
@@ -1722,6 +1727,12 @@ impl Score {
         }
         if let Some(t) = u.tuning {
             p.tuning = t.filter(|v| !v.is_empty() && v.len() <= 8);
+        }
+        if let Some(v) = u.tab_only {
+            p.tab_only = v;
+        }
+        if p.tuning.is_none() {
+            p.tab_only = false;
         }
         Ok(())
     }

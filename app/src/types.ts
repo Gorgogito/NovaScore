@@ -114,6 +114,8 @@ export interface Part {
   transpose?: Transpose;
   /** Tablature: open strings (sounding MIDI pitch) of the instrument; a tab staff is drawn under the staff. */
   tuning?: number[];
+  /** With a tuning: only the tablature is drawn (no standard staff). */
+  tab_only?: boolean;
   /** Set by `displayScore`: key signature this staff is drawn with (written key of a transposing instrument). */
   shown_fifths?: number;
   spanners?: Spanner[];

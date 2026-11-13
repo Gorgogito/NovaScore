@@ -552,7 +552,12 @@ fn with_tab_twins(score: &Score) -> Score {
     out.parts.clear();
     for p in &score.parts {
         out.parts.push(p.clone());
-        if p.tuning.is_some() && !p.percussion {
+        if p.tuning.is_some() && p.tab_only && !p.percussion {
+            // tablature only: the part itself becomes the tablature staff
+            let last = out.parts.last_mut().expect("just pushed");
+            last.ms = None;
+            last.tab_staff = true;
+        } else if p.tuning.is_some() && !p.percussion {
             let mut twin = p.clone();
             twin.name = format!("{} (2)", p.name);
             twin.ms = None;

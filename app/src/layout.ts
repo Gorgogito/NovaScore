@@ -297,7 +297,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const partGap = PART_GAP + lyricGap;
   // A part with a tuning also holds a tablature staff under its staff.
   const tabDy = STAFF_H + 56 + lyricGap;
-  const extra = (p: { tuning?: number[]; percussion?: boolean }) => (p.tuning && !p.percussion ? tabDy - STAFF_H + tabHeight(p.tuning.length) : 0);
+  const extra = (p: { tuning?: number[]; percussion?: boolean; tab_only?: boolean }) => (p.tuning && !p.percussion && !p.tab_only ? tabDy - STAFF_H + tabHeight(p.tuning.length) : 0);
   const systemH = score.parts.reduce((a, p) => a + STAFF_H + extra(p), 0) + (nParts - 1) * partGap;
   const systems: LSystem[] = [];
   const sysGap = SYSTEM_GAP + (score.chords?.length ? CHORD_GAP : 0) + lyricGap;

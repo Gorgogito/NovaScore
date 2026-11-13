@@ -953,7 +953,9 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
         if raw.is_empty() {
             raw.push(Vec::new());
         }
-        let tuning = info.tuning.clone().filter(|_| info.tab || tab_maps.contains_key(&si));
+        // a tablature staff with no standard staff above it is a tablature-only part
+        let tab_only = info.tab && !tab_maps.contains_key(&si);
+        let tuning = info.tuning.clone().filter(|_| info.tab || tab_maps.contains_key(&si)).or_else(|| tab_only.then(|| crate::tab::GUITAR.to_vec()));
         if let (Some(tn), Some(map)) = (&tuning, tab_maps.get(&si)) {
             for (mi, raws) in raw.iter_mut().flat_map(|v| v.iter_mut().enumerate()) {
                 for r in raws.iter_mut().filter(|r| !r.rest) {
@@ -1013,6 +1015,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
             });
         }
         part.transpose = info.transpose;
+        part.tab_only = tab_only && tuning.is_some();
         part.tuning = tuning;
         score.parts.push(part);
     }

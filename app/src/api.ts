@@ -26,6 +26,8 @@ export interface PartUpdate {
   transpose?: Transpose | null;
   /** Tablature: open strings; `null` hides the tab staff. */
   tuning?: number[] | null;
+  /** Draw only the tablature. */
+  tab_only?: boolean;
 }
 export interface PedalEvent {
   part: number;

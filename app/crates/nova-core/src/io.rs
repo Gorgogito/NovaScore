@@ -607,7 +607,13 @@ pub fn export_musicxml(score: &Score) -> String {
                 }
             }
             if mi == 0 {
-                let (sign, line) = if part.clef == Clef::Treble { ("G", 2) } else { ("F", 4) };
+                let (sign, line) = if part.tab_only && part.tuning.is_some() {
+                    ("TAB", 5)
+                } else if part.clef == Clef::Treble {
+                    ("G", 2)
+                } else {
+                    ("F", 4)
+                };
                 // A transposing instrument reads its own key and writes <transpose>; pitches below are written ones.
                 let fifths = part.transpose.map_or(score.fifths, |t| t.written_fifths(score.fifths));
                 let transpose_xml = part.transpose.map_or(String::new(), |t| format!("<transpose><diatonic>{}</diatonic><chromatic>{}</chromatic></transpose>", t.diatonic, t.chromatic));
@@ -1031,6 +1037,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     let mut staves: Vec<(String, u8, Clef, bool, Vec<Vec<Vec<Raw>>>)> = Vec::new();
     let mut staff_tr: std::collections::HashMap<usize, Transpose> = Default::default();
     let mut staff_tab: std::collections::HashMap<usize, Vec<u8>> = Default::default();
+    let mut staff_tab_only: std::collections::HashSet<usize> = Default::default();
     let mut key_read = false; // the score key comes from the first part
     let mut perc_staves: std::collections::BTreeSet<usize> = Default::default();
     // Slurs and hairpins per staff: (voice, kind, start, end).
@@ -1066,6 +1073,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         // <transpose> of this part: its notes are written pitches and are stored as sounding ones.
         let mut part_tr: Option<Transpose> = None;
         let mut part_clef_tr: Option<Transpose> = None;
+        // a part whose only staff is a TAB staff is a tablature-only part
+        let mut part_tab_only = false;
         // Tablature: open strings of the part, TAB staves (their notes only tell us strings) and the string of each note.
         let mut part_tuning: Option<Vec<u8>> = None;
         let mut tab_staves: std::collections::HashSet<u32> = Default::default();
@@ -1126,6 +1135,10 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                     part_tuning = Some(crate::tab::GUITAR.to_vec());
                                 }
                             }
+                        }
+                        if !clefs.is_empty() && clefs.keys().all(|k| tab_staves.contains(k)) {
+                            tab_staves.clear();
+                            part_tab_only = true;
                         }
                         for sd in el.children().filter(|c| c.has_tag_name("staff-details")) {
                             let mut lines: Vec<(i64, i32)> = Vec::new();
@@ -1523,6 +1536,9 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             if let Some(t) = part_tr.or(part_clef_tr) {
                 staff_tr.insert(si, t);
             }
+            if part_tab_only {
+                staff_tab_only.insert(si);
+            }
             if let Some(tuning) = &part_tuning {
                 staff_tab.insert(si, tuning.clone());
                 if !tab_strings.is_empty() {
@@ -1612,6 +1628,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut part = Part::new(name, clef, program, out);
         part.transpose = staff_tr.get(&si).copied();
         part.tuning = staff_tab.get(&si).cloned();
+        part.tab_only = part.tuning.is_some() && staff_tab_only.contains(&si);
         part.spanners = staff_sp[si]
             .iter()
             .filter_map(|&(vi, kind, start, mut end, endings)| {
@@ -2040,6 +2057,30 @@ mod tests {
         assert_eq!(pos[&(0, 0)], vec![Some(crate::tab::Fret { string: 5, fret: 7 })]);
         assert_eq!(pos[&(0, 480)], vec![Some(crate::tab::Fret { string: 3, fret: 0 })]);
         assert_eq!(part.measures[0].events[0].strings, vec![5]);
+    }
+
+    #[test]
+    fn a_tablature_only_part_survives_musicxml_and_musescore() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.parts[0].tuning = Some(crate::tab::GUITAR.to_vec());
+        s.parts[0].tab_only = true;
+        s.put_note(0, 0, 0, 0, 480, vec![p(52)]).unwrap();
+        s.put_note(0, 0, 0, 480, 480, vec![p(52)]).unwrap();
+        s.set_string(0, 0, 0, 480, 52, 5).unwrap();
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<sign>TAB</sign>"));
+        let back = import_musicxml(&xml).unwrap().score;
+        assert_eq!(back.parts.len(), 1);
+        assert!(back.parts[0].tab_only && back.parts[0].tuning.is_some());
+        assert_eq!(back.tab_positions(0, 0), s.tab_positions(0, 0));
+        let ms = crate::mscx::import_mscx(&crate::mscx_write::export_mscx(&s)).unwrap().score;
+        assert_eq!(ms.parts.len(), 1, "no standard staff is written");
+        assert!(ms.parts[0].tab_only);
+        assert_eq!(ms.tab_positions(0, 0), s.tab_positions(0, 0));
+        // the standard staff next to a tab staff stays a "both" part
+        let both = import_musicxml(include_str!("../../../../samples/tablatura.musicxml")).unwrap().score;
+        assert!(!both.parts[0].tab_only);
     }
 
     #[test]
