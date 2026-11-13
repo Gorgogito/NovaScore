@@ -602,6 +602,10 @@ pub fn export_musicxml(score: &Score) -> String {
             let _ = writeln!(x, "    <measure number=\"{}\">", mi + 1);
             let mlen = score.measure_len(mi);
             if mi > 0 {
+                if let Some(c) = score.key_changes.iter().find(|c| c.measure == mi) {
+                    let f = part.transpose.map_or(c.fifths, |t| t.written_fifths(c.fifths));
+                    let _ = writeln!(x, "      <attributes><key><fifths>{f}</fifths></key></attributes>");
+                }
                 if let Some(c) = score.time_changes.iter().find(|c| c.measure == mi) {
                     let _ = writeln!(x, "      <attributes><time><beats>{}</beats><beat-type>{}</beat-type></time></attributes>", c.time.num, c.time.den);
                 }
@@ -684,7 +688,7 @@ pub fn export_musicxml(score: &Score) -> String {
                 if pi == 0 && v == 0 {
                     // el acorde se escribe antes del evento que suena en su tick, con desplazamiento si cae a mitad
                     for c in score.chords.iter().filter(|c| c.measure == mi && e.start <= c.tick && c.tick < e.start + e.ticks) {
-                        x.push_str(&xml_harmony(c, score.fifths, c.tick - e.start));
+                        x.push_str(&xml_harmony(c, score.key_at(mi), c.tick - e.start));
                     }
                 }
                 x.push_str(&xm[ei].dir);
@@ -1107,6 +1111,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     let mut staff_tab: std::collections::HashMap<usize, Vec<u8>> = Default::default();
     let mut staff_tab_only: std::collections::HashSet<usize> = Default::default();
     let mut key_read = false; // the score key comes from the first part
+    let mut key_part: Option<String> = None;
+    let mut key_map: std::collections::BTreeMap<usize, i8> = Default::default();
     let mut perc_staves: std::collections::BTreeSet<usize> = Default::default();
     // Slurs and hairpins per staff: (voice, kind, start, end).
     let mut staff_sp: Vec<Vec<(usize, SpannerKind, SpPos, SpPos, u8)>> = Vec::new();
@@ -1170,12 +1176,17 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                             part_tr = (d != 0 || c != 0).then(|| Transpose { diatonic: d.clamp(-127, 127) as i8, chromatic: c.clamp(-127, 127) as i8 });
                         }
                         if let Some(k) = el.children().find(|c| c.has_tag_name("key")) {
-                            if mi == 0 && staves.len() == first_staff_idx && !key_read {
-                                if let Some(f) = num_of(k, "fifths") {
+                            if let Some(f) = num_of(k, "fifths") {
+                                let f = f.clamp(-7, 7) as i8;
+                                // the file gives the written key; the score keeps the concert one
+                                let concert = part_tr.and_then(|t| (-7..=7).find(|&c| t.written_fifths(c) == f)).unwrap_or(f);
+                                if mi == 0 && staves.len() == first_staff_idx && !key_read {
                                     key_read = true;
-                                    let f = f.clamp(-7, 7) as i8;
-                                    // the file gives the written key; the score keeps the concert one
-                                    score.fifths = part_tr.and_then(|t| (-7..=7).find(|&c| t.written_fifths(c) == f)).unwrap_or(f);
+                                    key_part = Some(pid.clone());
+                                    score.fifths = concert;
+                                } else if mi > 0 && key_part.as_deref() == Some(pid.as_str()) {
+                                    // later key changes come from the part that gave the first key
+                                    key_map.insert(mi, concert);
                                 }
                             }
                         }
@@ -1652,6 +1663,13 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         if mi > 0 && ts != prev {
             score.time_changes.push(TimeChange { measure: mi, time: ts });
             prev = ts;
+        }
+    }
+    let mut prev_key = score.fifths;
+    for (&mi, &f) in &key_map {
+        if f != prev_key {
+            score.key_changes.push(KeyChange { measure: mi, fifths: f });
+            prev_key = f;
         }
     }
     harmony_chords.sort_by_key(|c| (c.measure, c.tick));
@@ -2174,6 +2192,22 @@ mod tests {
         assert!(xml.contains("<tie type=\"start\"/>") && xml.contains("<tie type=\"stop\"/>"), "{xml}");
         let back = import_musicxml(&xml).unwrap().score;
         assert!(matches!(back.parts[0].measures[0].events[0].content, Content::Note { tie: true, .. }));
+    }
+
+    #[test]
+    fn key_changes_survive_musicxml_even_in_a_transposing_part() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("k", TimeSig { num: 4, den: 4 }, 0, 4);
+        s.add_part("Clarinete", Clef::Treble, 71, false);
+        s.parts[1].transpose = Some(Transpose { diatonic: -1, chromatic: -2 });
+        s.put_note(0, 0, 0, 0, 1920, vec![p(60)]).unwrap();
+        s.set_key_at(2, 2);
+        s.set_key_at(3, -3);
+        let xml = export_musicxml(&s);
+        // the clarinet in B flat reads two sharps more than the concert key
+        assert!(xml.contains("<fifths>4</fifths>") && xml.contains("<fifths>-1</fifths>"), "{xml}");
+        let back = import_musicxml(&xml).unwrap().score;
+        assert_eq!((back.fifths, back.key_changes.clone()), (0, vec![KeyChange { measure: 2, fifths: 2 }, KeyChange { measure: 3, fifths: -3 }]));
     }
 
     #[test]

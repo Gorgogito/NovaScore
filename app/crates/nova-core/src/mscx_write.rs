@@ -689,7 +689,7 @@ pub fn export_mscx(score: &Score) -> String {
                             if e.extras.iter().any(|x| x.xml.starts_with("<Harmony>") && x.place == ExtraPlace::Before) {
                                 continue;
                             }
-                            e.extras.insert(0, Extra { place: ExtraPlace::Before, xml: c.mscx_harmony(score.fifths) });
+                            e.extras.insert(0, Extra { place: ExtraPlace::Before, xml: c.mscx_harmony(score.key_at(mi)) });
                         }
                     }
                     with_chords = owned;
@@ -702,6 +702,12 @@ pub fn export_mscx(score: &Score) -> String {
                     if mi == 0 || starts_of(mi).is_some() {
                         let t = score.time_at(mi);
                         let _ = writeln!(x, "          <TimeSig>\n            <sigN>{}</sigN>\n            <sigD>{}</sigD>\n            </TimeSig>", t.num, t.den);
+                    }
+                    if mi > 0 && !part.percussion {
+                        if let Some(c) = score.key_changes.iter().find(|c| c.measure == mi) {
+                            let actual = part.transpose.map_or(String::new(), |t| format!("\n            <actualKey>{}</actualKey>", t.written_fifths(c.fifths)));
+                            let _ = writeln!(x, "          <KeySig>\n            <concertKey>{}</concertKey>{actual}\n            </KeySig>", c.fifths);
+                        }
                     }
                     if mi == 0 {
                         if !part.percussion {
@@ -817,6 +823,18 @@ mod tests {
         for (pa, pb) in s.parts.iter().zip(&b.parts) {
             assert_eq!(pa.measures, pb.measures);
         }
+    }
+
+    #[test]
+    fn key_changes_round_trip_through_musescore() {
+        let mut s = sample();
+        s.set_key_at(2, -1);
+        s.set_key_at(3, 4);
+        let xml = export_mscx(&s);
+        assert_eq!(xml.matches("<KeySig>").count(), s.parts.len() * 3, "initial key plus two changes in every staff");
+        let b = import_mscx(&xml).unwrap().score;
+        assert_eq!(b.key_changes, s.key_changes);
+        assert!(!import_mscx(&xml).unwrap().warnings.iter().any(|w| w.contains("armadura")));
     }
 
     #[test]

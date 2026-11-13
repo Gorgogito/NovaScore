@@ -1,5 +1,5 @@
 import { drumPos } from "./drum";
-import { EventData, measureLen, notatedTicks, Pitch, pitchMidi, Score, timeAt, TimeSig, voiceCount, voiceEvents } from "./types";
+import { EventData, measureLen, notatedTicks, partKeyAt, Pitch, pitchMidi, Score, timeAt, TimeSig, Transpose, voiceCount, voiceEvents } from "./types";
 
 export const SP = 10; // staff space in px
 export const STAFF_H = SP * 4;
@@ -58,6 +58,8 @@ export interface LMeasure {
   width: number;
   firstInSystem: boolean;
   showTime: boolean;
+  /** A key change is drawn at the start of the measure (not for the first measure of a system, which has the full key signature). */
+  showKey: boolean;
   /** Time signature in force (drawn when `showTime`). */
   time: TimeSig;
   headerW: number;
@@ -84,6 +86,12 @@ export const tabHeight = (lines: number) => (lines - 1) * TAB_SP;
 
 const SHARP_ORDER = [3, 0, 4, 1, 5, 2, 6]; // F C G D A E B
 const FLAT_ORDER = [6, 2, 5, 1, 4, 0, 3]; // B E A D G C F
+
+/** Naturals needed to cancel the key `prev` when going to `next`: all of them if the sign changes, else the surplus. */
+export function cancelledSigns(prev: number, next: number): number {
+  if (!prev) return 0;
+  return Math.sign(prev) !== Math.sign(next) ? Math.abs(prev) : Math.max(0, Math.abs(prev) - Math.abs(next));
+}
 
 export function keyAlter(fifths: number, step: number): number {
   if (fifths > 0) return SHARP_ORDER.slice(0, fifths).includes(step) ? 1 : 0;
@@ -153,9 +161,13 @@ function applyVoiceOffsets(lanes: LLane[], percussion: boolean[]) {
 export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const nMeasures = Math.max(...score.parts.map((p) => p.measures.length));
   // Transposing staves read their own key; the header is as wide as the widest one.
-  const partKey = (p: { shown_fifths?: number }) => p.shown_fifths ?? score.fifths;
-  const maxKey = Math.max(...score.parts.map((p) => Math.abs(partKey(p))));
-  const keyW = maxKey * 11 + (maxKey ? 8 : 0);
+  const partKey = (p: { transpose?: Transpose }, m: number) => partKeyAt(score, p, m);
+  const keyBlockW = (n: number) => (n ? n * 11 + 8 : 0);
+  const sysKeyW = (idx: number) => keyBlockW(Math.max(...score.parts.map((p) => Math.abs(partKey(p, idx)))));
+  /** Signs drawn where the key changes: naturals for what is cancelled, then the new signs. */
+  const changeSigns = (idx: number, p: { transpose?: Transpose }) => cancelledSigns(partKey(p, idx - 1), partKey(p, idx)) + Math.abs(partKey(p, idx));
+  const isKeyChange = (idx: number) => idx > 0 && (score.key_changes ?? []).some((c) => c.measure === idx);
+  const changeW = (idx: number) => (isKeyChange(idx) ? keyBlockW(Math.max(...score.parts.map((p) => changeSigns(idx, p)))) : 0);
   const clefW = 42;
   const timeW = 30;
   const hasTime = (idx: number) => idx === 0 || (score.time_changes ?? []).some((c) => c.measure === idx);
@@ -202,7 +214,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
         const accs: LAccidental[] = [];
         ev.pitches.forEach((pitch, i) => {
           const idx = diatonic(pitch);
-          const cur = state.get(idx) ?? keyAlter(partKey(p), pitch.step);
+          const cur = state.get(idx) ?? keyAlter(partKey(p, m), pitch.step);
           if (cur !== pitch.alter) accs.push({ pitchIndex: i, alter: pitch.alter, col: 0 });
           state.set(idx, pitch.alter);
         });
@@ -277,7 +289,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const lines: Prepared[][] = [];
   let cur: Prepared[] = [];
   let used = 0;
-  const headerFor = (first: boolean, idx: number) => (first ? clefW + keyW : 0) + (hasTime(idx) ? timeW : 0);
+  const headerFor = (first: boolean, idx: number) => (first ? clefW + sysKeyW(idx) : changeW(idx)) + (hasTime(idx) ? timeW : 0);
   // A repeat sign at the start of a measure needs room before the first note.
   const extraL = (idx: number) => (score.parts[0].measures[idx]?.start_repeat ? 12 : 0);
   for (const p of prepared) {
@@ -335,6 +347,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
         width,
         firstInSystem: i === 0,
         showTime: hasTime(p.index),
+        showKey: i > 0 && isKeyChange(p.index),
         time: p.time,
         headerW: headers[i],
         lanes,

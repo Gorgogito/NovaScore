@@ -678,6 +678,13 @@ pub struct TimeChange {
     pub time: TimeSig,
 }
 
+/// A key signature (sharps positive, flats negative) that starts at `measure` (0-based) and lasts until the next change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyChange {
+    pub measure: usize,
+    pub fifths: i8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Score {
     pub title: String,
@@ -687,8 +694,11 @@ pub struct Score {
     /// Later changes, sorted by measure and never equal to the signature in force before them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub time_changes: Vec<TimeChange>,
-    /// Key signature as number of sharps (positive) or flats (negative).
+    /// Initial key signature as number of sharps (positive) or flats (negative).
     pub fifths: i8,
+    /// Later key changes (concert key), sorted by measure and never equal to the key in force before them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_changes: Vec<KeyChange>,
     pub tempo: u32,
     pub parts: Vec<Part>,
     /// Style settings (`score_style.mss`) of the MuseScore file this score came from.
@@ -841,6 +851,7 @@ impl Score {
             time,
             time_changes: Vec::new(),
             fifths,
+            key_changes: Vec::new(),
             tempo: 100,
             ms_style: None,
             chords: Vec::new(),
@@ -1142,7 +1153,7 @@ impl Score {
     }
 
     pub fn transpose_event(&mut self, part: usize, voice: usize, m: usize, start: u32, semitones: i32) -> Result<(), EditError> {
-        let sharps = if semitones != 0 { semitones > 0 } else { self.fifths >= 0 };
+        let sharps = if semitones != 0 { semitones > 0 } else { self.key_at(m) >= 0 };
         let events = self.voice_events_mut(part, voice, m)?;
         let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
         if let Content::Note { pitches, .. } = &mut e.content {
@@ -1340,8 +1351,8 @@ impl Score {
 
     /// Append `other` after the last measure of this score (movements of one piece): parts are matched by
     /// position, a part missing on either side is filled with rests, and a different time signature
-    /// becomes a change at the join. Key signature and tempo stay those of this score. Returns true when the
-    /// key of `other` differs (the key cannot change inside a piece yet).
+    /// becomes a change at the join; so does a different key signature. The tempo stays this score's. Returns true
+    /// when the key of `other` differs from the one in force at the join (a key change was written there).
     pub fn append(&mut self, other: &Score) -> bool {
         let n0 = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
         // pad every part to the same length with the lengths in force
@@ -1361,6 +1372,21 @@ impl Score {
         for c in &other.time_changes {
             self.time_changes.push(TimeChange { measure: c.measure + n0, time: c.time });
         }
+        let join_key = self.key_at(n0);
+        let key_differs = other.fifths != join_key;
+        if key_differs {
+            self.key_changes.push(KeyChange { measure: n0, fifths: other.fifths });
+        }
+        for c in &other.key_changes {
+            self.key_changes.push(KeyChange { measure: c.measure + n0, fifths: c.fifths });
+        }
+        self.key_changes.sort_by_key(|c| c.measure);
+        let mut curk = self.fifths;
+        self.key_changes.retain(|c| {
+            let keep = c.fifths != curk;
+            curk = c.fifths;
+            keep
+        });
         // drop changes equal to the signature already in force
         self.time_changes.sort_by_key(|c| c.measure);
         let mut cur = self.time;
@@ -1409,7 +1435,7 @@ impl Score {
             c.measure += n0;
             self.chords.push(c);
         }
-        other.fifths != self.fifths
+        key_differs
     }
 
     /// Pin the note `midi` of a chord to a string (1 = highest string, as in MusicXML); 0 goes back to automatic.
@@ -1781,6 +1807,31 @@ impl Score {
     /// Time signature in force at measure `m`.
     pub fn time_at(&self, m: usize) -> TimeSig {
         self.time_changes.iter().rev().find(|c| c.measure <= m).map_or(self.time, |c| c.time)
+    }
+
+    /// Key signature (concert key: sharps positive, flats negative) in force at measure `m`.
+    pub fn key_at(&self, m: usize) -> i8 {
+        self.key_changes.iter().rev().find(|c| c.measure <= m).map_or(self.fifths, |c| c.fifths)
+    }
+
+    /// Set the key signature from measure `m` until the next change; `m` = 0 sets the initial key. Setting the key
+    /// already in force removes the change. Notes keep their pitch (only the signature and its spelling change).
+    pub fn set_key_at(&mut self, m: usize, fifths: i8) {
+        let f = fifths.clamp(-7, 7);
+        if m == 0 {
+            self.fifths = f;
+        }
+        self.key_changes.retain(|c| c.measure != m && c.measure != 0);
+        if m > 0 {
+            self.key_changes.push(KeyChange { measure: m, fifths: f });
+            self.key_changes.sort_by_key(|c| c.measure);
+        }
+        let mut prev = self.fifths;
+        self.key_changes.retain(|c| {
+            let keep = c.fifths != prev;
+            prev = c.fifths;
+            keep
+        });
     }
 
     /// Length in ticks of measure `m`.
@@ -2400,6 +2451,25 @@ mod tests {
     }
 
     #[test]
+    fn key_changes_are_set_merged_and_removed() {
+        let mut s = Score::new("k", TimeSig { num: 4, den: 4 }, 0, 6);
+        s.set_key_at(2, 2);
+        s.set_key_at(4, -1);
+        assert_eq!((s.key_at(0), s.key_at(1), s.key_at(2), s.key_at(3), s.key_at(4), s.key_at(5)), (0, 0, 2, 2, -1, -1));
+        // repeating the key in force removes the change; the initial key moves without touching later changes
+        s.set_key_at(3, 2);
+        assert_eq!(s.key_changes.len(), 2);
+        s.set_key_at(2, 0);
+        assert_eq!(s.key_changes, vec![KeyChange { measure: 4, fifths: -1 }]);
+        s.set_key_at(0, -1);
+        assert!(s.key_changes.is_empty() && s.fifths == -1, "{:?}", s.key_changes);
+        // an old file without the field opens
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("key_changes"));
+        assert!(serde_json::from_str::<Score>(&json).is_ok());
+    }
+
+    #[test]
     fn appending_a_movement_joins_measures_and_shifts_anchors() {
         let p = |step, octave| Pitch { step, alter: 0, octave };
         let mut a = Score::new("a", TimeSig { num: 4, den: 4 }, 0, 2);
@@ -2413,6 +2483,8 @@ mod tests {
         b.parts[0].spanners.push(Spanner { kind: SpannerKind::Slur, voice: 0, start: SpPos { measure: 0, tick: 0 }, end: SpPos { measure: 1, tick: 0 }, endings: 0 });
         b.chords.push(chords::ChordMark { measure: 1, tick: 0, root: 0, quality: chords::Quality::Major, bass: 0, manual: true });
         assert!(a.append(&b), "different key is reported");
+        assert_eq!((a.fifths, a.key_changes.clone()), (0, vec![KeyChange { measure: 3, fifths: 2 }]), "and written as a change at the join");
+        assert_eq!((a.key_at(2), a.key_at(3), a.key_at(5)), (0, 2, 2));
         assert_eq!(a.parts.len(), 2);
         // `a` ended with a spare measure after the whole note: 3 + 3 measures
         assert!(a.parts.iter().all(|p| p.measures.len() == 6));

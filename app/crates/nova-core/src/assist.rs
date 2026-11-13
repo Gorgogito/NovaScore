@@ -368,6 +368,12 @@ impl Score {
 
 const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 
+/// Key signature (sharps positive, flats negative, at most six of either) whose major tonic is the pitch class `pc`.
+fn fifths_of_pc(pc: i32) -> i8 {
+    let f = (pc.rem_euclid(12) * 7).rem_euclid(12) as i8;
+    if f > 6 { f - 12 } else { f }
+}
+
 /// Moves a pitch `steps` degrees along the major scale of `tonic` (a pitch class). A note outside the scale keeps
 /// its distance to the scale note below it.
 fn shift_degrees(midi: i32, tonic: i32, steps: i32) -> i32 {
@@ -413,8 +419,9 @@ impl PhraseMove {
 }
 
 impl Score {
-    fn tonic_pc(&self) -> i32 {
-        (self.fifths as i32 * 7).rem_euclid(12)
+    /// Pitch class of the major tonic of the key in force at measure `m`.
+    fn tonic_at(&self, m: usize) -> i32 {
+        (self.key_at(m) as i32 * 7).rem_euclid(12)
     }
 
     /// Last measure of the part with any note in it.
@@ -431,7 +438,7 @@ impl Score {
     }
 
     /// Like [`Score::continue_phrase`] but with any [`PhraseMove`]: a modulation moves the phrase by semitones (the key
-    /// signature does not change: the new notes carry their accidentals) and an inversion mirrors it along the scale.
+    /// signature changes where the new bars start, to the key of the new tonic) and an inversion mirrors it along the scale.
     pub fn vary_phrase(&mut self, part: usize, phrase: usize, how: PhraseMove) -> Result<usize, String> {
         if phrase == 0 || matches!(how, PhraseMove::Degrees(0) | PhraseMove::Semitones(0)) {
             return Err("La frase y el desplazamiento no pueden ser cero.".into());
@@ -441,11 +448,14 @@ impl Score {
             return Err(format!("Solo hay {} compás(es) escritos: elige una frase más corta.", last + 1));
         }
         let first = last + 1 - phrase;
-        let tonic = self.tonic_pc();
-        let sharps = match how {
-            // spell the new key the way its own signature would
-            PhraseMove::Semitones(n) => [0, 7, 2, 9, 4, 11, 6].contains(&(tonic + n).rem_euclid(12)),
-            _ => self.fifths >= 0,
+        let tonic = self.tonic_at(last);
+        let (sharps, new_key) = match how {
+            // the phrase lands in a new key: spell it the way that key's own signature would
+            PhraseMove::Semitones(n) => {
+                let f = fifths_of_pc(tonic + n);
+                (f >= 0, Some(f))
+            }
+            _ => (self.key_at(last) >= 0, None),
         };
         let pivot = (first..=last)
             .find_map(|m| {
@@ -504,6 +514,9 @@ impl Score {
             p.measures[new_start + i] = c;
         }
         p.spanners.extend(moved_spanners);
+        if let Some(f) = new_key {
+            self.set_key_at(new_start, f);
+        }
         Ok(new_start)
     }
 
@@ -516,7 +529,7 @@ impl Score {
             _ => None,
         });
         let top = top.unwrap_or(60);
-        let tonic = self.tonic_pc();
+        let tonic = self.tonic_at(last);
         // the tonic closest to the last note (ties go down)
         let mut best = top - (top - tonic).rem_euclid(12);
         if top - best > 6 {
@@ -526,7 +539,7 @@ impl Score {
         self.add_measures(1);
         let len = self.measure_len(at);
         let abs = self.measure_starts(at + 1)[at];
-        let sharps = self.fifths >= 0;
+        let sharps = self.key_at(last) >= 0;
         self.put_abs(part, abs, len, &[Pitch::from_midi(best, sharps)]).map_err(|e| format!("{e:?}"))?;
         Ok(at)
     }
@@ -592,9 +605,9 @@ fn parse_roman(s: &str) -> Option<(i32, Quality)> {
 }
 
 impl Score {
-    /// Tonic of the harmonization: the major tonic of the key signature, or its relative minor.
-    fn mode_tonic(&self, minor: bool) -> i32 {
-        if minor { (self.tonic_pc() + 9) % 12 } else { self.tonic_pc() }
+    /// Tonic of the harmonization at measure `m`: the major tonic of the key signature there, or its relative minor.
+    fn mode_tonic(&self, minor: bool, m: usize) -> i32 {
+        if minor { (self.tonic_at(m) + 9) % 12 } else { self.tonic_at(m) }
     }
 
     /// Stores one chord per measure (consecutive repeats are merged) as the chord symbols of the score, fixed by hand
@@ -621,8 +634,7 @@ impl Score {
             return Err("La progresión está vacía.".into());
         }
         let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
-        let tonic = self.mode_tonic(minor);
-        let bars: Vec<(i32, Quality)> = (0..n).map(|m| (tonic + cycle[m % cycle.len()].0, cycle[m % cycle.len()].1)).collect();
+        let bars: Vec<(i32, Quality)> = (0..n).map(|m| (self.mode_tonic(minor, m) + cycle[m % cycle.len()].0, cycle[m % cycle.len()].1)).collect();
         self.set_bar_chords(&bars);
         Ok(self.chords.len())
     }
@@ -652,7 +664,7 @@ impl Score {
         if !any {
             return Err("Esa parte no tiene notas que armonizar.".into());
         }
-        let tonic = self.mode_tonic(minor);
+        let tonics: Vec<i32> = (0..n).map(|m| self.mode_tonic(minor, m)).collect();
         let cands: &[(u8, Quality, u8)] = if minor { &MINOR_DEGREES } else { &MAJOR_DEGREES };
         let fit = |m: usize, c: usize| -> f32 {
             let total: f32 = weights[m].iter().sum();
@@ -660,7 +672,7 @@ impl Score {
                 return 0.0;
             }
             let (off, q, num) = cands[c];
-            let root = (tonic + off as i32).rem_euclid(12);
+            let root = (tonics[m] + off as i32).rem_euclid(12);
             let inside: f32 = tones(q).iter().map(|&t| weights[m][(root + t as i32).rem_euclid(12) as usize]).sum();
             let mut s = (inside - 0.7 * (total - inside)) / total * 4.0;
             if m == 0 && num == 1 {
@@ -692,7 +704,7 @@ impl Score {
             path[m] = c;
             c = from[m][c];
         }
-        let bars: Vec<(i32, Quality)> = path.iter().map(|&c| (tonic + cands[c].0 as i32, cands[c].1)).collect();
+        let bars: Vec<(i32, Quality)> = path.iter().enumerate().map(|(m, &c)| (tonics[m] + cands[c].0 as i32, cands[c].1)).collect();
         self.set_bar_chords(&bars);
         Ok(self.chords.len())
     }
@@ -890,10 +902,19 @@ mod tests {
         let mut m = two_bars();
         m.vary_phrase(0, 1, PhraseMove::Semitones(7)).unwrap();
         assert_eq!(pitches_of(&m, 0, 2), vec![74, 72, 71, 69]);
+        assert_eq!((m.key_at(1), m.key_at(2)), (0, 1), "the new bars are in G major: one sharp");
         // down to the relative minor: -3 semitones, with accidentals where the old scale does not reach
         let mut r = two_bars();
         r.vary_phrase(0, 2, PhraseMove::Semitones(-3)).unwrap();
         assert_eq!(pitches_of(&r, 0, 2), vec![57, 59, 61, 62]);
+        assert_eq!(r.key_at(2), 3, "a minor third lower lands in A major");
+        // a sequence or an inversion stays in the key
+        let mut q = two_bars();
+        q.vary_phrase(0, 1, PhraseMove::Invert).unwrap();
+        assert!(q.key_changes.is_empty());
+        // a phrase that modulates again continues from the new key
+        m.vary_phrase(0, 1, PhraseMove::Semitones(7)).unwrap();
+        assert_eq!((m.key_at(2), m.key_at(3)), (1, 2));
         assert!(two_bars().vary_phrase(0, 1, PhraseMove::Semitones(0)).is_err());
     }
 
@@ -945,5 +966,26 @@ mod tests {
         a.put_abs(0, 1920, 1920, &[p(69)]).unwrap();
         a.harmonize(0, true).unwrap();
         assert_eq!(a.chords.last().map(|c| (c.root, c.quality)), Some((9, Quality::Minor)), "{:?}", roots(&a));
+    }
+
+    #[test]
+    fn harmony_follows_the_key_of_each_measure() {
+        // two bars in C, then two in G (one sharp): G B D must be the tonic there, not the dominant
+        let mut s = Score::new("k", TimeSig { num: 4, den: 4 }, 0, 4);
+        s.set_key_at(2, 1);
+        for (m, ns) in [[60, 64, 67, 64], [60, 64, 67, 72]].iter().enumerate() {
+            for (k, n) in ns.iter().enumerate() {
+                s.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
+            }
+        }
+        s.put_abs(0, 2 * 1920, 1920, &[p(71)]).unwrap();
+        s.put_abs(0, 3 * 1920, 1920, &[p(67)]).unwrap();
+        s.harmonize(0, false).unwrap();
+        assert_eq!(s.chords.last().map(|c| (c.measure, c.root)), Some((3, 7)), "{:?}", roots(&s));
+        // a progression is transposed to the key in force: I-IV over C | C | G | G
+        let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 4);
+        t.set_key_at(2, 1);
+        t.set_progression("I-IV", false).unwrap();
+        assert_eq!(roots(&t).iter().map(|c| c.1).collect::<Vec<_>>(), vec![0, 5, 7, 0]);
     }
 }

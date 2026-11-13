@@ -512,7 +512,8 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     let mut time_map: std::collections::BTreeMap<usize, TimeSig> = Default::default();
     let mut got_key = false;
     let mut got_tempo = false;
-    let (mut key_changes, mut clef_changes, mut irregular, mut dropped_voices) = (0usize, 0usize, 0usize, 0usize);
+    let mut key_map: std::collections::BTreeMap<usize, i8> = Default::default();
+    let (mut clef_changes, mut irregular, mut dropped_voices) = (0usize, 0usize, 0usize);
     let mut max_measures = 0usize;
     let mut harmony_chords: Vec<crate::chords::ChordMark> = Vec::new();
     let mut raw_staves: Vec<Vec<Vec<Vec<Raw>>>> = (0..staves.len()).map(|_| Vec::new()).collect(); // staff -> voice -> measure -> events
@@ -557,11 +558,11 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                     }
                     "KeySig" => {
                         if let Some(f) = key_fifths(el) {
-                            if !got_key {
+                            if mi == 0 && !got_key {
                                 score.fifths = f;
                                 got_key = true;
-                            } else if f != score.fifths {
-                                key_changes += 1;
+                            } else if mi > 0 {
+                                key_map.entry(mi).or_insert(f);
                             }
                         }
                     }
@@ -912,6 +913,13 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     }
 
     // ---- build our model
+    let mut prev_key = score.fifths;
+    for (&mi, &f) in &key_map {
+        if f != prev_key {
+            score.key_changes.push(KeyChange { measure: mi, fifths: f });
+            prev_key = f;
+        }
+    }
     score.time = time_map.get(&0).copied().unwrap_or(score.time);
     let mut prev = score.time;
     for (&mi, &ts) in &time_map {
@@ -1021,9 +1029,6 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     }
 
     // ---- warnings
-    if key_changes > 0 {
-        warnings.push(format!("Hay {key_changes} cambio(s) de armadura: solo se usa la inicial."));
-    }
     if clef_changes > 0 {
         warnings.push(format!("Hay {clef_changes} cambio(s) de clave que no se importaron."));
     }

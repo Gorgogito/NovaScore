@@ -1,8 +1,8 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
-import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, TAB_LYRIC_DY, TAB_SP, tabHeight, staffIdx, STAFF_H } from "./layout";
+import { baseOf, bottomLineIndex, cancelledSigns, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, TAB_LYRIC_DY, TAB_SP, tabHeight, staffIdx, STAFF_H } from "./layout";
 import { tabPositions } from "./tab";
-import { chordName, ChordMark, Cursor, EventData, JUMP_TEXT, lyricCovers, measureLen, notatedTicks, Pitch, PPQ, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
+import { chordName, ChordMark, Cursor, EventData, JUMP_TEXT, keyAt, lyricCovers, measureLen, notatedTicks, partKeyAt, Pitch, PPQ, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
 const g = (cp: number) => String.fromCodePoint(cp);
 const g2 = g;
@@ -862,17 +862,29 @@ export function ScoreView(props: Props) {
     );
   };
 
-  const keySig = (top: number, x: number, f: number) => {
+  /** Key signature at `x`; with `prev` (a key change) the signs it cancels are drawn first as naturals. */
+  const keySig = (top: number, x: number, f: number, prev = 0) => {
     const posList = f > 0 ? SHARP_POS : FLAT_POS;
     const shift = clef() === "bass" ? -2 : 0;
+    const nat = cancelledSigns(prev, f);
+    const natFrom = Math.sign(prev) === Math.sign(f) ? Math.abs(f) : 0;
+    const natPos = prev > 0 ? SHARP_POS : FLAT_POS;
+    const y = (list: number[], i: number) => top + STAFF_H - (list[i] + shift) * (SP / 2);
     return (
-      <For each={Array.from({ length: Math.abs(f) }, (_, i) => i)}>
-        {(i) => (
-          <text x={x + i * 11} y={top + STAFF_H - (posList[i] + shift) * (SP / 2)} font-family="Bravura" font-size={FONT} fill="var(--ink)">
-            {g(f > 0 ? 0xe262 : 0xe260)}
-          </text>
-        )}
-      </For>
+      <>
+        <For each={Array.from({ length: nat }, (_, i) => i)}>
+          {(j) => (
+            <text x={x + j * 11} y={y(natPos, natFrom + j)} font-family="Bravura" font-size={FONT} fill="var(--ink)">{g(0xe261)}</text>
+          )}
+        </For>
+        <For each={Array.from({ length: Math.abs(f) }, (_, i) => i)}>
+          {(i) => (
+            <text x={x + (nat + i) * 11} y={y(posList, i)} font-family="Bravura" font-size={FONT} fill="var(--ink)">
+              {g(f > 0 ? 0xe262 : 0xe260)}
+            </text>
+          )}
+        </For>
+      </>
     );
   };
 
@@ -912,7 +924,7 @@ export function ScoreView(props: Props) {
                       <Show when={sys === props.layout.systems[0] || props.score.parts.length > 1}>
                         <text x={first.x + 4} y={top - 20} font-size="10" fill="var(--ink-dim)" font-family="system-ui" font-style="italic">{part.name}</text>
                       </Show>
-                      <Show when={!part.percussion && !part.tab_only}>{keySig(top, first.x + 40, part.shown_fifths ?? props.score.fifths)}</Show>
+                      <Show when={!part.percussion && !part.tab_only}>{keySig(top, first.x + 40, partKeyAt(props.score, part, first.index))}</Show>
                       <For each={sys.measures}>
                         {(m) => {
                           const lanes = m.lanes.filter((l) => l.part === pi());
@@ -934,6 +946,9 @@ export function ScoreView(props: Props) {
                                   );
                                 }}
                               </For>
+                              <Show when={m.showKey && !part.percussion && !part.tab_only}>
+                                {keySig(top, m.x + 6, partKeyAt(props.score, part, m.index), partKeyAt(props.score, part, m.index - 1))}
+                              </Show>
                               <Show when={m.showTime}>
                                 <text x={m.x + m.headerW - 26} y={top + SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.num)}</text>
                                 <text x={m.x + m.headerW - 26} y={top + 3 * SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.den)}</text>
@@ -1003,7 +1018,7 @@ export function ScoreView(props: Props) {
                   const idxTop = Math.max(-1e9, ...m.lanes.filter((l) => l.part === 0).flatMap((l) => l.events).map((le) => (le.ev.kind === "note" ? Math.max(...le.ev.pitches.map((q) => staffIdx(props.score.parts[0].percussion, q))) + 7 : -1e9)));
                   const lift = Math.min(30, Math.max(0, idxTop - (bottomLineIndex(clef()) + 8) + 1) * (SP / 2));
                   return (
-                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui" style={props.onChordClick ? { cursor: "pointer" } : undefined} onClick={(e) => props.onChordClick?.(c, e.clientX, e.clientY)}>{chordName(c, props.score.fifths, props.score.parts[0]?.transpose)}<title>{c.manual ? "Fijado a mano (se conserva al actualizar)" : "Detectado (se recalcula al actualizar)"}</title></text>
+                    <text x={x - 2} y={tops[0] - 8 - lift} font-size="13" font-weight="600" fill="var(--ink)" font-family="system-ui" style={props.onChordClick ? { cursor: "pointer" } : undefined} onClick={(e) => props.onChordClick?.(c, e.clientX, e.clientY)}>{chordName(c, keyAt(props.score, c.measure), props.score.parts[0]?.transpose)}<title>{c.manual ? "Fijado a mano (se conserva al actualizar)" : "Detectado (se recalcula al actualizar)"}</title></text>
                   );
                 }}
               </For>

@@ -328,7 +328,7 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
             r.warnings.push(format!("Audiveris separó la obra en {joined} movimientos: se unieron uno tras otro (los cambios de compás se conservan)."));
         }
         if key_differs {
-            r.warnings.push("Algún movimiento tiene otra tonalidad: solo se conserva la del primero (los cambios de armadura aún no se admiten); revisa las alteraciones.".into());
+            r.warnings.push("Algún movimiento tiene otra tonalidad: se ha añadido un cambio de armadura donde empieza; revisa que sea el que esperabas.".into());
         }
         if unreadable > 0 {
             r.warnings.push(format!("{unreadable} movimiento(s) no se pudieron leer y se omitieron."));

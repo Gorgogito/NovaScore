@@ -96,6 +96,8 @@ export const api = {
   addMeasures: (count: number) => invoke<Score>("add_measures", { count }),
   setTime: (measure: number, num: number, den: number) => invoke<Score>("set_time", { measure, num, den }),
   setFifths: (fifths: number) => invoke<Score>("set_fifths", { fifths }),
+  /** Tonalidad desde el compás `measure` (0-based) hasta el siguiente cambio; en el 0 es la inicial. */
+  setKey: (measure: number, fifths: number) => invoke<Score>("set_key", { measure, fifths }),
   setTempo: (tempo: number) => invoke<Score>("set_tempo", { tempo }),
   detectChords: () => invoke<Score>("detect_chords"),
   setChord: (measure: number, tick: number, text: string) => invoke<Score>("set_chord", { measure, tick, text }),

@@ -119,7 +119,6 @@ export interface Part {
   /** With a tuning: only the tablature is drawn (no standard staff). */
   tab_only?: boolean;
   /** Set by `displayScore`: key signature this staff is drawn with (written key of a transposing instrument). */
-  shown_fifths?: number;
   spanners?: Spanner[];
   measures: Measure[];
 }
@@ -176,7 +175,10 @@ export interface Score {
   time: TimeSig;
   /** Later changes (measure is 0-based); each applies until the next one. */
   time_changes?: { measure: number; time: TimeSig }[];
+  /** Initial key (sharps positive, flats negative). */
   fifths: number;
+  /** Later key changes (concert key, measure 0-based); each applies until the next one. */
+  key_changes?: { measure: number; fifths: number }[];
   tempo: number;
   parts: Part[];
   /** Chord symbols above the first staff; each lasts until the next one. */
@@ -213,6 +215,16 @@ export interface Cursor {
   m: number;
   start: number;
 }
+
+/** Key signature (concert) in force at measure `m`. */
+export const keyAt = (s: Score, m: number): number => {
+  let f = s.fifths;
+  for (const c of s.key_changes ?? []) if (c.measure <= m) f = c.fifths;
+  return f;
+};
+
+/** Key signature a part reads at measure `m` (a transposing instrument reads its own). */
+export const partKeyAt = (s: Score, p: { transpose?: Transpose }, m: number): number => writtenFifths(keyAt(s, m), p.transpose);
 
 /** Time signature in force at measure `m`. */
 export const timeAt = (s: Score, m: number): TimeSig => {
@@ -253,7 +265,6 @@ export const displayScore = (s: Score): Score => {
         });
       return {
         ...p,
-        shown_fifths: p.transpose ? writtenFifths(s.fifths, p.transpose) : undefined,
         measures: p.measures.map((m, mi) => ({ ...m, events: shifted(m.events, mi), voices: m.voices?.map((v) => shifted(v, mi)) })),
       };
     }),

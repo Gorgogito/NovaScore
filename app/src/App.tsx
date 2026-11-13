@@ -9,7 +9,7 @@ import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
 import { ScoreView } from "./ScoreView";
-import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, Tech, timeAt, voiceEvents, writtenFifths } from "./types";
+import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, keyAt, ottavaShiftAt, partKeyAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, Tech, timeAt, voiceEvents } from "./types";
 import "./styles.css";
 
 const BASE: Record<number, number> = { 3: 120, 4: 240, 5: 480, 6: 960, 7: 1920 };
@@ -71,7 +71,7 @@ export default function App() {
   const [chordEdit, setChordEdit] = createSignal<{ measure: number; tick: number; text: string; x: number; y: number } | null>(null);
   const openChordEditor = (measure: number, tick: number, x = 260, y = 230) => {
     const cur = score()?.chords?.find((c) => c.measure === measure && c.tick === tick);
-    setChordEdit({ measure, tick, text: cur ? chordName(cur, score()!.fifths, score()!.parts[0]?.transpose) : "", x, y });
+    setChordEdit({ measure, tick, text: cur ? chordName(cur, keyAt(score()!, measure), score()!.parts[0]?.transpose) : "", x, y });
   };
   const commitChord = async (text: string) => {
     const ed = chordEdit();
@@ -300,9 +300,9 @@ export default function App() {
   // ---- note entry --------------------------------------------------------
   /** Keys and clicks give written pitches; a transposing instrument stores the sounding one. */
   const toSounding = (part: number, p: Pitch): Pitch => soundingPitch(p, score()!.parts[part].transpose);
-  const keyFifths = (part: number) => writtenFifths(score()!.fifths, score()!.parts[part].transpose);
+  const keyFifths = (part: number, m: number) => partKeyAt(score()!, score()!.parts[part], m);
   const pitchFor = (step: number, alterOverride: number | null): Pitch => {
-    const alter = alterOverride ?? keyAlter(keyFifths(cursor().part), step);
+    const alter = alterOverride ?? keyAlter(keyFifths(cursor().part, cursor().m), step);
     let best: Pitch = { step, alter, octave: 4 };
     let bestD = Infinity;
     for (let o = 0; o <= 8; o++) {
@@ -521,7 +521,7 @@ export default function App() {
     const ev = voiceEvents(score()!.parts[t.part].measures[t.m], t.voice)?.find((e) => e.start === t.start);
     if (ev?.kind !== "note") return;
     const top = Math.max(...ev.pitches.map(pitchMidi));
-    const alter = pendingAlter() ?? keyAlter(keyFifths(t.part), step);
+    const alter = pendingAlter() ?? keyAlter(keyFifths(t.part, t.m), step);
     let p: Pitch | null = null;
     for (let o = 0; o <= 8 && !p; o++) {
       const cand = toSounding(t.part, { step, alter, octave: o });
@@ -641,7 +641,7 @@ export default function App() {
       const idx = bottom + pos;
       const step = ((idx % 7) + 7) % 7;
       // A click is a written position: under an octave line the note sounds shifted.
-      const p: Pitch = { step, alter: pendingAlter() ?? keyAlter(keyFifths(part), step), octave: Math.floor(idx / 7) + ottavaShiftAt(s.parts[part], m, start) };
+      const p: Pitch = { step, alter: pendingAlter() ?? keyAlter(keyFifths(part, m), step), octave: Math.floor(idx / 7) + ottavaShiftAt(s.parts[part], m, start) };
       await enter(p);
     }
   };
@@ -740,7 +740,7 @@ export default function App() {
       setDirty(true);
       const bars = `${phrase} ${phrase > 1 ? "compases" : "compás"}`;
       if (phrase > 0 && kind === "semitones") {
-        setStatus(`Modulación añadida (${bars}, ${steps > 0 ? "+" : ""}${steps} semitonos). La armadura no cambia: las notas nuevas llevan sus alteraciones. Ctrl+Z la quita.`);
+        setStatus(`Modulación añadida (${bars}, ${steps > 0 ? "+" : ""}${steps} semitonos). La armadura cambia donde empieza. Ctrl+Z la quita.`);
         return;
       }
       if (phrase > 0 && kind === "invert") {
@@ -977,7 +977,7 @@ export default function App() {
             <option value="4:1">Secuencia ascendente (4 compases)</option>
             <option value="2:7:semitones">Modular a la dominante (+7, 2 compases)</option>
             <option value="2:5:semitones">Modular a la subdominante (+5, 2 compases)</option>
-            <option value="2:-3:semitones">Modular a la relativa menor (−3, 2 compases)</option>
+            <option value="2:2:semitones">Modular un tono más arriba (+2, 2 compases)</option>
             <option value="2:1:invert">Inversión en espejo (2 compases)</option>
             <option value="0:0">Terminar con la tónica</option>
           </select>
@@ -1016,7 +1016,7 @@ export default function App() {
             </select>
           </label>
           <label class="field">Tonalidad
-            <select value={score()!.fifths} onChange={(e) => run(api.setFifths(Number(e.currentTarget.value)))}>
+            <select title="Tonalidad desde el compás seleccionado hasta el siguiente cambio (en el primer compás, la de toda la pieza). Elegir la que ya rige quita el cambio. Las notas no se mueven: solo cambian la armadura y las alteraciones que se dibujan." value={keyAt(score()!, cursor().m)} onChange={(e) => run(api.setKey(cursor().m, Number(e.currentTarget.value)))}>
               <For each={KEY_NAMES}>{(n, i) => <option value={i() - 7}>{n}</option>}</For>
             </select>
           </label>
