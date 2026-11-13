@@ -4,12 +4,12 @@ import { listen } from "@tauri-apps/api/event";
 import { api, AudioOptions } from "./api";
 import { drumFromPos, DRUM_KEYS } from "./drum";
 import { INSTRUMENTS } from "./instruments";
-import { OCTAVE_BELOW, playableStrings, tabPositions, TUNINGS } from "./tab";
+import { MAX_FRET, OCTAVE_BELOW, playableStrings, tabPositions, TUNINGS } from "./tab";
 import { keyAlter, layoutScore } from "./layout";
 import { scoreToSvgPages } from "./pdfExport";
 import { Player } from "./playback";
 import { ScoreView } from "./ScoreView";
-import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, timeAt, voiceEvents, writtenFifths } from "./types";
+import { ArticKind, chordName, Cursor, displayScore, DYNAMICS, Jump, JUMP_TEXT, Marker, measureLen, ottavaShiftAt, Pitch, pitchMidi, Score, Selection, soundingPitch, SpannerKind, Tech, timeAt, voiceEvents, writtenFifths } from "./types";
 import "./styles.css";
 
 const BASE: Record<number, number> = { 3: 120, 4: 240, 5: 480, 6: 960, 7: 1920 };
@@ -31,6 +31,10 @@ export default function App() {
   const [dotted, setDotted] = createSignal(false);
   const [pendingAlter, setPendingAlter] = createSignal<number | null>(null);
   const [inputMode, setInputMode] = createSignal(false);
+  /** Entrada por traste (F2) en una parte con tablatura: cuerda activa (1 = la más aguda) y última nota escrita. */
+  const [fretMode, setFretMode] = createSignal(false);
+  const [fretString, setFretString] = createSignal(1);
+  let lastFret: { part: number; voice: number; m: number; start: number; string: number; fret: number; t: number } | null = null;
   const [lastMidi, setLastMidi] = createSignal(67);
   const [playing, setPlaying] = createSignal<string | null>(null);
   const [isPlaying, setIsPlaying] = createSignal(false);
@@ -398,9 +402,9 @@ export default function App() {
     await run(api.removeSpanners(r.part, r.voice, { measure: r.from.m, tick: r.from.start }, end));
   };
 
-  const enter = async (written: Pitch) => {
+  const enter = (written: Pitch) => enterSounding(toSounding(cursor().part, written));
+  const enterSounding = async (p: Pitch): Promise<boolean> => {
     const c = cursor();
-    const p = toSounding(c.part, written);
     try {
       const r = await api.enterNote(c.part, c.voice, c.m, c.start, ticks(), p);
       setScore(r.score);
@@ -409,9 +413,96 @@ export default function App() {
       setCursor({ ...c, m: r.measure, start: r.start });
       setLastMidi(pitchMidi(p));
       setPendingAlter(null);
+      return true;
     } catch (e) {
       setStatus(String(e));
+      return false;
     }
+  };
+
+  // ---- entrada por traste ---------------------------------------------------
+  const curTech = (): Tech | undefined => {
+    const t = targetNote();
+    return t ? voiceEvents(score()!.parts[t.part].measures[t.m], t.voice)?.find((x) => x.start === t.start)?.tech : undefined;
+  };
+  const fretTuning = () => score()?.parts[cursor().part]?.tuning ?? null;
+  const toggleFretMode = () => {
+    if (fretMode()) {
+      setFretMode(false);
+      setStatus("Entrada por traste desactivada.");
+      return;
+    }
+    const t = fretTuning();
+    if (!t) {
+      setStatus("Entrada por traste: elige antes «Tablatura» en el selector del instrumento.");
+      return;
+    }
+    setFretMode(true);
+    setInputMode(true);
+    setFretString(Math.min(fretString(), t.length));
+    setStatus(`Entrada por traste: ↑↓ cuerda (${fretString()}), 0–9 traste (dos cifras seguidas = traste de dos cifras), [ ] duración, R silencio, F2 sale.`);
+  };
+  /** Digit typed in fret mode: writes the note at the active string, or extends the last fret to two digits. */
+  const typeFret = async (digit: number) => {
+    const t = fretTuning();
+    if (!t) return;
+    const n = t.length;
+    const c = cursor();
+    const now = Date.now();
+    const last = lastFret;
+    // second digit of a two-digit fret: change the note just written
+    if (last && last.part === c.part && last.voice === c.voice && now - last.t < 900 && last.fret * 10 + digit <= MAX_FRET && last.fret >= 1) {
+      const fret = last.fret * 10 + digit;
+      if (await run(api.transpose(last.part, last.voice, last.m, last.start, fret - last.fret))) {
+        await run(api.setString(last.part, last.voice, last.m, last.start, t[n - last.string] + fret, last.string));
+        lastFret = { ...last, fret, t: now };
+        setCursor({ ...c });
+        setStatus(`Cuerda ${last.string}, traste ${fret}`);
+      }
+      return;
+    }
+    const string = fretString();
+    const midi = t[n - string] + digit;
+    const start = c.start;
+    const m = c.m;
+    if (await enterSounding(pitchFromMidi(midi))) {
+      await run(api.setString(c.part, c.voice, m, start, midi, string), false);
+      lastFret = { part: c.part, voice: c.voice, m, start, string, fret: digit, t: now };
+      setStatus(`Cuerda ${string}, traste ${digit}`);
+    }
+  };
+  const fretKey = async (e: KeyboardEvent, k: string): Promise<boolean> => {
+    const t = fretTuning();
+    if (!fretMode() || !t) return false;
+    if (k >= "0" && k <= "9" && k.length === 1) {
+      await typeFret(Number(k));
+    } else if (k === "arrowup" || k === "arrowdown") {
+      setFretString(Math.max(1, Math.min(t.length, fretString() + (k === "arrowup" ? -1 : 1))));
+      lastFret = null;
+      setStatus(`Cuerda ${fretString()}`);
+    } else if (k === "[") {
+      setDur(Math.max(3, dur() - 1));
+    } else if (k === "]") {
+      setDur(Math.min(7, dur() + 1));
+    } else if (k === "r") {
+      lastFret = null;
+      await enterRest();
+    } else if (k === "arrowleft" || k === "arrowright" || k === "backspace" || k === "delete") {
+      lastFret = null;
+      return false;
+    } else return false;
+    void e;
+    return true;
+  };
+
+  /** Guitar technique on the note under the cursor (the same one again removes it). */
+  const setTech = async (tech: Tech | null) => {
+    const t = targetNote();
+    if (!t) {
+      setStatus("Elige primero una nota de la tablatura.");
+      return;
+    }
+    await run(api.setTech(t.part, t.voice, t.m, t.start, tech));
   };
 
   /** The note that chord/tie commands act on: the selected note, else the last one entered. */
@@ -751,6 +842,11 @@ export default function App() {
     }
     if (e.altKey) return;
     e.preventDefault();
+    if (k === "f2") {
+      toggleFretMode();
+      return;
+    }
+    if (await fretKey(e, k)) return;
     if (k === "n") {
       setInputMode(!inputMode());
       setStatus(inputMode() ? "Modo entrada: A–G notas, Mayús+letra acorde, T ligadura, 0 silencio, 3–7 duración, . puntillo, + − alteraciones." : "Modo selección.");
@@ -924,6 +1020,16 @@ export default function App() {
         <button title="Mordente superior (pralltriller): nota, la de arriba, nota" onClick={() => toggleArtic("shorttrill")}>prall</button>
         <button title="Grupeto: arriba, nota, abajo, nota" onClick={() => toggleArtic("turn")}>grup</button>
         <button title="Grupeto invertido: abajo, nota, arriba, nota" onClick={() => toggleArtic("invertedturn")}>grup↺</button>
+        <Show when={fretTuning()}>
+          <span class="sep" />
+          <span class="label">Tablatura</span>
+          <button classList={{ on: fretMode() }} title="Entrada por traste (F2): ↑↓ elige la cuerda, 0–9 escribe el traste, [ ] duración, R silencio" onClick={toggleFretMode}>Traste{fretMode() ? ` · cuerda ${fretString()}` : ""}</button>
+          <button classList={{ on: curTech() === "hammer" }} title="Ligado: martillo (H) si la siguiente nota es más aguda, tirón (P) si es más grave" onClick={() => setTech("hammer")}>H/P</button>
+          <button classList={{ on: curTech() === "slide" }} title="Deslizamiento hasta la siguiente nota" onClick={() => setTech("slide")}>Desliz.</button>
+          <For each={[1, 2, 3, 4]}>
+            {(n) => <button classList={{ on: typeof curTech() === "object" && (curTech() as { bend: number }).bend === n }} title={`Bending de ${["", "medio tono", "un tono", "tono y medio", "dos tonos"][n]}`} onClick={() => setTech({ bend: n })}>{["", "½", "1", "1½", "2"][n]}↗</button>}
+          </For>
+        </Show>
         <span class="sep" />
         <span class="label">Líneas</span>
         <button title="8va: suena una octava más alta que lo escrito" onClick={() => addSpanner("ottava8va")}>8va</button>
@@ -955,7 +1061,7 @@ export default function App() {
         <main class="canvas">
           <Show when={score() && layout()} fallback={<p class="loading">Cargando…</p>}>
             <div class="page" style={{ width: `${zoom()}%` }}>
-              <ScoreView score={shown()!} layout={layout()!} cursor={cursor()} selection={selection()} playing={playing()} inputMode={inputMode()} onPick={onPick} onChordClick={(c, x, y) => openChordEditor(c.measure, c.tick, x, y)} onTabClick={cycleString} />
+              <ScoreView score={shown()!} layout={layout()!} cursor={cursor()} selection={selection()} playing={playing()} inputMode={inputMode()} onPick={onPick} onChordClick={(c, x, y) => openChordEditor(c.measure, c.tick, x, y)} onTabClick={cycleString} fretLine={fretMode() && fretTuning() ? { part: cursor().part, string: fretString() } : null} />
             </div>
           </Show>
         </main>

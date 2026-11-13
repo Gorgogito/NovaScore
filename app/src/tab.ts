@@ -87,12 +87,19 @@ export const tabPositions = (score: Score, part: number, voice: number): Map<str
   const tuning = p?.tuning;
   if (tuning) {
     const hand = { v: 3 };
+    // a note tied forward hands its strings to the tied pitches of the next note
+    let tied: [number, number][] = [];
     p.measures.forEach((m, mi) => {
       for (const e of voiceEvents(m, voice) ?? []) {
-        if (e.kind !== "note") continue;
+        if (e.kind !== "note") {
+          tied = [];
+          continue;
+        }
         const midis = e.snd ?? e.pitches.map(pitchMidi);
-        const manual = e.strings && e.strings.length === midis.length ? e.strings : [];
-        out.set(`${mi}:${e.start}`, assignFrets(tuning, midis, manual, hand));
+        const manual = midis.map((md, k) => (e.strings && e.strings.length === midis.length && e.strings[k]) || tied.find(([tm]) => tm === md)?.[1] || 0);
+        const frets = assignFrets(tuning, midis, manual, hand);
+        tied = e.tie ? midis.flatMap((md, k) => (frets[k] ? [[md, frets[k]!.string] as [number, number]] : [])) : [];
+        out.set(`${mi}:${e.start}`, frets);
       }
     });
   }

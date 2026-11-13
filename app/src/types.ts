@@ -17,7 +17,9 @@ export const DYNAMICS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "fp", "
 export type ArticKind = "staccato" | "staccatissimo" | "tenuto" | "accent" | "marcato" | "portato" | "mordent" | "shorttrill" | "turn" | "invertedturn";
 
 export type Lyric = { verse: number; text: string; syllabic: "single" | "begin" | "middle" | "end"; extend_to?: { measure: number; tick: number } };
-export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[]; text?: string; strings?: number[]; /** Set by `displayScore` on tablature parts: the sounding MIDI pitches (the drawn ones are shifted). */ snd?: number[] } & (
+/** Guitar technique on a tablature note: hammer-on or pull-off, slide towards the next note, or a bend of this many semitones. */
+export type Tech = "hammer" | "slide" | { bend: number };
+export type EventData = { start: number; ticks: number; tuplet?: Tuplet; dynamic?: string; articulations?: ArticKind[]; lyrics?: Lyric[]; text?: string; strings?: number[]; tech?: Tech; /** Set by `displayScore` on tablature parts: the sounding MIDI pitches (the drawn ones are shifted). */ snd?: number[] } & (
   | { kind: "note"; pitches: Pitch[]; tie: boolean }
   | { kind: "rest" }
 );

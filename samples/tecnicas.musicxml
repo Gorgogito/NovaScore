@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="4.0">
+  <work><work-title>Técnicas de guitarra</work-title></work>
+  <part-list>
+    <score-part id="P1"><part-name>Guitarra</part-name><score-instrument id="P1-I1"><instrument-name>Guitarra</instrument-name></score-instrument><midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>480</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>TAB</sign><line>5</line></clef><staff-details><staff-tuning line="1"><tuning-step>E</tuning-step><tuning-octave>2</tuning-octave></staff-tuning><staff-tuning line="2"><tuning-step>A</tuning-step><tuning-octave>2</tuning-octave></staff-tuning><staff-tuning line="3"><tuning-step>D</tuning-step><tuning-octave>3</tuning-octave></staff-tuning><staff-tuning line="4"><tuning-step>G</tuning-step><tuning-octave>3</tuning-octave></staff-tuning><staff-tuning line="5"><tuning-step>B</tuning-step><tuning-octave>3</tuning-octave></staff-tuning><staff-tuning line="6"><tuning-step>E</tuning-step><tuning-octave>4</tuning-octave></staff-tuning></staff-details><transpose><diatonic>-7</diatonic><chromatic>-12</chromatic></transpose></attributes>
+      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>100</per-minute></metronome></direction-type><sound tempo="100"/></direction>
+      <direction placement="above"><direction-type><words>rock</words></direction-type></direction>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><technical><string>4</string><fret>2</fret><hammer-on type="start" number="1">H</hammer-on></technical></notations></note>
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><technical><string>3</string><fret>0</fret><hammer-on type="stop" number="1"/><pull-off type="start" number="1">P</pull-off></technical></notations></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><technical><string>4</string><fret>2</fret><pull-off type="stop" number="1"/><slide type="start" number="1" line-type="solid"/></technical></notations></note>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><technical><string>3</string><fret>2</fret><slide type="stop" number="1"/></technical></notations></note>
+    </measure>
+    <measure number="2">
+      <direction placement="below"><direction-type><dynamics><mf/></dynamics></direction-type></direction>
+      <note><pitch><step>B</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><technical><string>2</string><fret>0</fret><bend><bend-alter>1</bend-alter></bend></technical></notations><lyric number="1"><syllabic>single</syllabic><text>la</text></lyric></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>480</duration><tie type="start"/><voice>1</voice><type>quarter</type><notations><tied type="start"/><technical><string>1</string><fret>0</fret></technical></notations></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>480</duration><tie type="stop"/><voice>1</voice><type>quarter</type><notations><tied type="stop"/><technical><string>1</string><fret>0</fret></technical></notations></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><technical><string>2</string><fret>3</fret></technical></notations></note>
+    </measure>
+    <measure number="3">
+      <note><rest measure="yes"/><duration>1920</duration><voice>1</voice></note>
+    </measure>
+  </part>
+</score-partwise>

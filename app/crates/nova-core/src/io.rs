@@ -725,9 +725,11 @@ pub fn export_musicxml(score: &Score) -> String {
                     Content::Note { pitches, tie } => {
                         let (base, dot) = base_and_dots(e.notated_ticks());
                         for (k, p) in pitches.iter().enumerate() {
+                            // ties compare sounding pitches (the events store those), the file gets the written one
+                            let snd = p.midi();
                             let p = &part.transpose.map_or(*p, |t| t.to_written(*p));
-                            let tie_stop = matches!(prev.map(|v| &v.content), Some(Content::Note { pitches: pp, tie: true }) if pp.iter().any(|q| q.midi() == p.midi()));
-                            let tie_start = *tie && matches!(next.map(|v| &v.content), Some(Content::Note { pitches: np, .. }) if np.iter().any(|q| q.midi() == p.midi()));
+                            let tie_stop = matches!(prev.map(|v| &v.content), Some(Content::Note { pitches: pp, tie: true }) if pp.iter().any(|q| q.midi() == snd));
+                            let tie_start = *tie && matches!(next.map(|v| &v.content), Some(Content::Note { pitches: np, .. }) if np.iter().any(|q| q.midi() == snd));
                             let mut s = String::from("      <note>");
                             if k > 0 {
                                 s.push_str("<chord/>");
@@ -773,7 +775,11 @@ pub fn export_musicxml(score: &Score) -> String {
                             let orn = if k == 0 && (!xm[ei].orn.is_empty() || !signs.is_empty()) { format!("<ornaments>{}{signs}</ornaments>", xm[ei].orn) } else { String::new() };
                             let tup = if k == 0 { format!("{tnot}{}{orn}{artics}", xm[ei].slur) } else { String::new() };
                             // tablature: string and fret of this note
-                            let tech = tabs.get(&(mi, e.start)).and_then(|v| v.get(k).copied().flatten()).map_or(String::new(), |f| format!("<technical><string>{}</string><fret>{}</fret></technical>", f.string, f.fret));
+                            let mut tin = tabs.get(&(mi, e.start)).and_then(|v| v.get(k).copied().flatten()).map_or(String::new(), |f| format!("<string>{}</string><fret>{}</fret>", f.string, f.fret));
+                            if k == 0 {
+                                tin.push_str(&xml_tech(e, prev, next));
+                            }
+                            let tech = if tin.is_empty() { String::new() } else { format!("<technical>{tin}</technical>") };
                             let tup = format!("{tup}{tech}");
                             if tie_stop || tie_start || !tup.is_empty() {
                                 s.push_str("<notations>");
@@ -915,6 +921,66 @@ fn xml_lyrics(el: &roxmltree::Node) -> (Vec<Lyric>, Vec<(u8, String)>) {
 }
 
 /// Pitch of a MusicXML `<note>` as written in the file (no transposition applied).
+/// Highest sounding pitch of a note event.
+fn top_midi(e: &Event) -> Option<i32> {
+    match &e.content {
+        Content::Note { pitches, .. } => pitches.iter().map(|p| p.midi()).max(),
+        Content::Rest => None,
+    }
+}
+
+/// `<technical>` contents for the guitar techniques of a note: its own start (towards `next`) and the stop of the
+/// link that started on `prev`.
+fn xml_tech(e: &Event, prev: Option<&Event>, next: Option<&Event>) -> String {
+    let mut out = String::new();
+    if let (Some(pt), Some(pm), Some(me)) = (prev.and_then(|p| p.tech), prev.and_then(top_midi), top_midi(e)) {
+        match pt {
+            Tech::Hammer => out.push_str(&format!("<{} type=\"stop\" number=\"1\"/>", if me >= pm { "hammer-on" } else { "pull-off" })),
+            Tech::Slide => out.push_str("<slide type=\"stop\" number=\"1\"/>"),
+            Tech::Bend(_) => {}
+        }
+    }
+    match e.tech {
+        Some(Tech::Hammer) => {
+            if let (Some(me), Some(nm)) = (top_midi(e), next.and_then(top_midi)) {
+                if nm >= me {
+                    out.push_str("<hammer-on type=\"start\" number=\"1\">H</hammer-on>");
+                } else {
+                    out.push_str("<pull-off type=\"start\" number=\"1\">P</pull-off>");
+                }
+            }
+        }
+        Some(Tech::Slide) => {
+            if next.and_then(top_midi).is_some() {
+                out.push_str("<slide type=\"start\" number=\"1\" line-type=\"solid\"/>");
+            }
+        }
+        Some(Tech::Bend(n)) => out.push_str(&format!("<bend><bend-alter>{n}</bend-alter></bend>")),
+        None => {}
+    }
+    out
+}
+
+/// Guitar technique that starts at a `<note>` (hammer-on, pull-off, slide or bend).
+fn xml_tech_of(el: &roxmltree::Node) -> Option<Tech> {
+    let t = el.descendants().find(|c| c.has_tag_name("technical"))?;
+    for c in t.children().filter(|c| c.is_element()) {
+        let starts = c.attribute("type") == Some("start");
+        match c.tag_name().name() {
+            "hammer-on" | "pull-off" if starts => return Some(Tech::Hammer),
+            "slide" if starts => return Some(Tech::Slide),
+            "bend" => {
+                let alter = c.children().find(|x| x.has_tag_name("bend-alter")).and_then(|x| x.text()).and_then(|x| x.trim().parse::<f64>().ok()).unwrap_or(2.0);
+                if alter > 0.0 {
+                    return Some(Tech::Bend(alter.round().clamp(1.0, 4.0) as u8));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn xml_note_pitch(el: &roxmltree::Node) -> Option<Pitch> {
     let p = el.children().find(|c| c.has_tag_name("pitch"))?;
     let step = STEPS.iter().position(|s| Some(*s) == text_of(p, "step").as_deref())? as u8;
@@ -936,6 +1002,7 @@ pub(crate) struct Raw {
     pub lyrics: Vec<Lyric>,
     pub text: Option<String>,
     pub strings: Vec<u8>,
+    pub tech: Option<Tech>,
 }
 
 /// Turn raw per-voice events of one staff into measures: durations are snapped to standard
@@ -960,7 +1027,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     let tuplet = r.tup.filter(|&(a, n, _)| tuplet_notated(r.ticks, a, n).map_or(false, valid_duration) && r.start + r.ticks <= mlen);
                     if let Some((a, n, gs)) = tuplet {
                         let content = if r.rest { Content::Rest } else { Content::note(r.pitches.clone(), r.tie) };
-                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone(), text: r.text.clone(), strings: r.strings.clone() });
+                        events.push(Event { start: r.start, ticks: r.ticks, content, tuplet: Some(Tuplet { actual: a, normal: n, start: gs }), extras: r.extras.clone(), dynamic: r.dynamic, articulations: r.articulations.clone(), lyrics: r.lyrics.clone(), text: r.text.clone(), strings: r.strings.clone(), tech: r.tech });
                         pos = r.start + r.ticks;
                         continue;
                     }
@@ -979,6 +1046,7 @@ pub(crate) fn build_measures(voices: &[Vec<Vec<Raw>>], max_measures: usize, lens
                     ev.lyrics = r.lyrics.clone();
                     ev.text = r.text.clone();
                     ev.strings = r.strings.clone();
+                    ev.tech = r.tech;
                     events.push(ev);
                     pos = r.start + t;
                 }
@@ -1079,6 +1147,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut part_tuning: Option<Vec<u8>> = None;
         let mut tab_staves: std::collections::HashSet<u32> = Default::default();
         let mut tab_strings: std::collections::HashMap<(usize, i64, i32), u8> = Default::default();
+        let mut tab_techs: std::collections::HashMap<(usize, i64), Tech> = Default::default();
         let first_staff_idx = staves.len();
         let mut staff_index: std::collections::HashMap<u32, usize> = Default::default();
         let mut mcount = 0usize;
@@ -1340,6 +1409,9 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 let p = part_tr.map_or(p, |t| t.to_sounding(p));
                                 tab_strings.insert((mi, start, p.midi()), sn);
                             }
+                            if let Some(t) = xml_tech_of(&el) {
+                                tab_techs.entry((mi, start)).or_insert(t);
+                            }
                             last_note = if chord { last_note } else { None };
                             continue;
                         }
@@ -1492,7 +1564,7 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                         };
                         let (lyrics, lyric_exts) = xml_lyrics(&el);
                         let raw_idx = ms[mi].len();
-                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics, text: pending_text.remove(&staff), strings: Vec::new() });
+                        ms[mi].push(Raw { start: start.max(0) as u32, ticks: dur.max(0) as u32, pitches: pitch.into_iter().collect(), rest: rest || pitch.is_none(), tie, tup, extras: Vec::new(), dynamic: pending_dyn.remove(&staff), articulations, lyrics, text: pending_text.remove(&staff), strings: Vec::new(), tech: xml_tech_of(&el) });
                         for (verse, kind) in lyric_exts {
                             let key = (staff, vi, verse);
                             if kind == "start" {
@@ -1541,6 +1613,13 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             }
             if let Some(tuning) = &part_tuning {
                 staff_tab.insert(si, tuning.clone());
+                if !tab_techs.is_empty() {
+                    for (mi, ms) in staves[si].4.iter_mut().flat_map(|v| v.iter_mut().enumerate()) {
+                        for raw in ms.iter_mut().filter(|r| !r.rest && r.tech.is_none()) {
+                            raw.tech = tab_techs.get(&(mi, raw.start as i64)).copied();
+                        }
+                    }
+                }
                 if !tab_strings.is_empty() {
                     for (mi, ms) in staves[si].4.iter_mut().flat_map(|v| v.iter_mut().enumerate()).map(|(mi, r)| (mi, r)) {
                         for raw in ms.iter_mut().filter(|r| !r.rest) {
@@ -2081,6 +2160,49 @@ mod tests {
         // the standard staff next to a tab staff stays a "both" part
         let both = import_musicxml(include_str!("../../../../samples/tablatura.musicxml")).unwrap().score;
         assert!(!both.parts[0].tab_only);
+    }
+
+    #[test]
+    fn ties_of_a_transposing_instrument_are_written_to_musicxml() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.parts[0].transpose = Some(Transpose { diatonic: -7, chromatic: -12 });
+        s.put_note(0, 0, 0, 0, 480, vec![p(52)]).unwrap();
+        s.put_note(0, 0, 0, 480, 480, vec![p(52)]).unwrap();
+        s.toggle_tie(0, 0, 0, 0).unwrap();
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<tie type=\"start\"/>") && xml.contains("<tie type=\"stop\"/>"), "{xml}");
+        let back = import_musicxml(&xml).unwrap().score;
+        assert!(matches!(back.parts[0].measures[0].events[0].content, Content::Note { tie: true, .. }));
+    }
+
+    #[test]
+    fn guitar_techniques_survive_musicxml() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.parts[0].tuning = Some(crate::tab::GUITAR.to_vec());
+        s.parts[0].tab_only = true;
+        // hammer-on (up), pull-off (down), slide, bend of a tone, and a plain note
+        for (i, m) in [52, 54, 52, 57, 59].iter().enumerate() {
+            s.put_note(0, 0, 0, i as u32 * 360, 360, vec![p(*m)]).unwrap();
+        }
+        s.set_tech(0, 0, 0, 0, Some(Tech::Hammer)).unwrap();
+        s.set_tech(0, 0, 0, 360, Some(Tech::Hammer)).unwrap();
+        s.set_tech(0, 0, 0, 720, Some(Tech::Slide)).unwrap();
+        s.set_tech(0, 0, 0, 1080, Some(Tech::Bend(2))).unwrap();
+        let xml = export_musicxml(&s);
+        assert!(xml.contains("<hammer-on type=\"start\" number=\"1\">H</hammer-on>"), "{xml}");
+        assert!(xml.contains("<pull-off type=\"start\" number=\"1\">P</pull-off>"), "{xml}");
+        assert!(xml.contains("<hammer-on type=\"stop\"") && xml.contains("<pull-off type=\"stop\"") && xml.contains("<slide type=\"stop\""), "{xml}");
+        assert!(xml.contains("<bend><bend-alter>2</bend-alter></bend>"), "{xml}");
+        let back = import_musicxml(&xml).unwrap().score;
+        let techs: Vec<Option<Tech>> = back.parts[0].measures[0].events.iter().filter(|e| matches!(e.content, Content::Note { .. })).map(|e| e.tech).collect();
+        assert_eq!(techs, vec![Some(Tech::Hammer), Some(Tech::Hammer), Some(Tech::Slide), Some(Tech::Bend(2)), None]);
+        // the same technique again removes it, and a rest cannot carry one
+        s.set_tech(0, 0, 0, 0, Some(Tech::Hammer)).unwrap();
+        assert_eq!(s.parts[0].measures[0].events[0].tech, None);
+        s.set_tech(0, 0, 0, 0, Some(Tech::Bend(9))).unwrap();
+        assert_eq!(s.parts[0].measures[0].events[0].tech, Some(Tech::Bend(4)), "bends are limited to two tones");
     }
 
     #[test]

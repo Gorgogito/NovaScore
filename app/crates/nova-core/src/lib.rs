@@ -144,6 +144,21 @@ pub struct Event {
     /// Empty when the player did not choose; editing the pitches of the event drops it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strings: Vec<u8>,
+    /// Guitar technique that starts at this note (hammer-on / pull-off or slide towards the next note, bend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tech: Option<Tech>,
+}
+
+/// Guitar technique written on a tablature note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tech {
+    /// Slurred link to the next note: hammer-on when it is higher, pull-off when lower.
+    Hammer,
+    /// Slide to the next note.
+    Slide,
+    /// Bend up by this many semitones (1..=4).
+    Bend(u8),
 }
 
 /// How a lyric syllable joins the next one.
@@ -392,7 +407,7 @@ pub fn tuplet_notated(ticks: u32, actual: u8, normal: u8) -> Option<u32> {
 
 impl Event {
     pub fn new(start: u32, ticks: u32, content: Content) -> Event {
-        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new() }
+        Event { start, ticks, content, tuplet: None, extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new(), tech: None }
     }
 
     /// Written (notated) duration: the sounding duration scaled back by the tuplet ratio.
@@ -744,7 +759,7 @@ fn tuplet_rests(from: u32, to: u32, t: Tuplet) -> Result<Vec<Event>, EditError> 
     let mut off = o0;
     for piece in split_standard(o1 - o0) {
         let (a, b) = (t.tick_at(off), t.tick_at(off + piece));
-        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new() });
+        out.push(Event { start: a, ticks: b - a, content: Content::Rest, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new(), tech: None });
         off += piece;
     }
     Ok(out)
@@ -958,7 +973,7 @@ impl Score {
         }
         let mut next: Vec<Event> = events.iter().filter(|e| e.tuplet != Some(t) || e.start + e.ticks <= lo || e.start >= hi).cloned().collect();
         next.extend(tuplet_rests(lo, start, t)?);
-        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new() });
+        next.push(Event { start, ticks: real, content, tuplet: Some(t), extras: Vec::new(), dynamic: None, articulations: Vec::new(), lyrics: Vec::new(), text: None, strings: Vec::new(), tech: None });
         next.extend(tuplet_rests(end, hi, t)?);
         next.sort_by_key(|e| e.start);
         *events = next;
@@ -1005,7 +1020,7 @@ impl Score {
         let each = span / normal as u32; // written value of one slot
         let t = Tuplet { actual, normal, start };
         let slots: Vec<Event> = (0..actual as u32)
-            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() }, text: if i == 0 { e.text.clone() } else { None }, strings: Vec::new() })
+            .map(|i| Event { start: t.tick_at(i * each), ticks: t.tick_at((i + 1) * each) - t.tick_at(i * each), content: if i == 0 { e.content.clone() } else { Content::Rest }, tuplet: Some(t), extras: if i == 0 { e.extras.clone() } else { Vec::new() }, dynamic: if i == 0 { e.dynamic } else { None }, articulations: if i == 0 { e.articulations.clone() } else { Vec::new() }, lyrics: if i == 0 { e.lyrics.clone() } else { Vec::new() }, text: if i == 0 { e.text.clone() } else { None }, strings: Vec::new(), tech: None })
             .collect();
         events.splice(idx..=idx, slots);
         Ok(())
@@ -1248,6 +1263,7 @@ impl Score {
             lyrics: Vec::new(),
             text: None,
             strings: Vec::new(),
+            tech: None,
         };
         let mut new_events: Vec<Event> = Vec::new();
         // pieces of at most `max_n` slots; a note keeps its tie on the last piece only
@@ -1409,6 +1425,21 @@ impl Score {
         if e.strings.iter().all(|&x| x == 0) {
             e.strings.clear();
         }
+        Ok(())
+    }
+
+    /// Set (or clear with `None`) a guitar technique on a note.
+    pub fn set_tech(&mut self, part: usize, voice: usize, m: usize, start: u32, tech: Option<Tech>) -> Result<(), EditError> {
+        let events = self.voice_events_mut(part, voice, m)?;
+        let e = events.iter_mut().find(|e| e.start == start).ok_or(EditError::OutOfRange)?;
+        if !matches!(e.content, Content::Note { .. }) {
+            return Err(EditError::OutOfRange);
+        }
+        let tech = match tech {
+            Some(Tech::Bend(n)) => Some(Tech::Bend(n.clamp(1, 4))),
+            t => t,
+        };
+        e.tech = if e.tech == tech { None } else { tech };
         Ok(())
     }
 

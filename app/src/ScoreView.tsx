@@ -1,6 +1,6 @@
 import { createMemo, For, Show } from "solid-js";
 import { DRUM_X } from "./drum";
-import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, TAB_SP, tabHeight, staffIdx, STAFF_H } from "./layout";
+import { baseOf, bottomLineIndex, LayoutResult, LBeam, LEvent, LLane, LMeasure, LSystem, LYRIC_CHAR_W, LYRIC_LINE, SP, TAB_LYRIC_DY, TAB_SP, tabHeight, staffIdx, STAFF_H } from "./layout";
 import { tabPositions } from "./tab";
 import { chordName, ChordMark, Cursor, EventData, JUMP_TEXT, lyricCovers, measureLen, notatedTicks, Pitch, PPQ, pitchMidi, Score, Selection, Spanner, SpPos, voiceEvents } from "./types";
 
@@ -115,6 +115,8 @@ interface Props {
   onChordClick?: (c: ChordMark, x: number, y: number) => void;
   /** Click on a fret number of a tablature staff: the app moves that note to another string. */
   onTabClick?: (part: number, voice: number, measure: number, start: number, midi: number) => void;
+  /** String line to highlight while entering notes by fret. */
+  fretLine?: { part: number; string: number } | null;
   /** Static rendering for export: fixed size, no hit areas. */
   printMode?: boolean;
   /** Draw the title and composer (first page only when printing). */
@@ -568,7 +570,24 @@ export function ScoreView(props: Props) {
         a.sys === b.sys
           ? [arc(x1, ya, x2, yb, below)]
           : [arc(x1, ya, sysEdges(a.sys).right, ya, below), arc(sysEdges(b.sys).left, yb, x2, yb, below)];
-      return <For each={paths}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.6} stroke-linecap="round" />}</For>;
+      // the tablature staff shows the slur above its own lines (alone when the standard staff is hidden)
+      const part = props.score.parts[pi];
+      const tabTop = (si: number) => {
+        const top = props.layout.staffTops(props.layout.systems[si])[pi];
+        return part.tab_only ? top + (STAFF_H - tabHeight(part.tuning!.length)) / 2 : top + props.layout.tabDy;
+      };
+      const tabPaths =
+        part.tuning && !part.percussion
+          ? a.sys === b.sys
+            ? [arc(a.x + 5, tabTop(a.sys) - 6, b.x + 5, tabTop(b.sys) - 6, false)]
+            : [arc(a.x + 5, tabTop(a.sys) - 6, sysEdges(a.sys).right, tabTop(a.sys) - 6, false), arc(sysEdges(b.sys).left, tabTop(b.sys) - 6, b.x + 5, tabTop(b.sys) - 6, false)]
+          : [];
+      return (
+        <>
+          <For each={part.tab_only ? [] : paths}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.6} stroke-linecap="round" />}</For>
+          <For each={tabPaths}>{(d) => <path d={d} fill="none" stroke="var(--ink)" stroke-width={1.3} stroke-linecap="round" />}</For>
+        </>
+      );
     }
     if (sp.kind === "volta") return pi === 0 ? renderVolta(sp) : null;
     if (sp.kind !== "crescendo" && sp.kind !== "decrescendo") return renderLine(pi, sp, a);
@@ -588,7 +607,7 @@ export function ScoreView(props: Props) {
       endX = b.x - 3;
       endSys = b.sys;
     }
-    const ySys = (si: number) => props.layout.staffTops(props.layout.systems[si])[pi] + STAFF_H + 26;
+    const ySys = (si: number) => props.layout.staffTops(props.layout.systems[si])[pi] + STAFF_H + 26 + (props.score.parts[pi].tab_only ? TAB_LYRIC_DY + 6 : 0);
     const half = 6;
     const wedge = (x1: number, x2: number, y: number, h1: number, h2: number) => [
       `M ${x1} ${y - h1} L ${x2} ${y - h2}`,
@@ -608,8 +627,9 @@ export function ScoreView(props: Props) {
   };
 
   /** Rhythm of a tablature-only part: stems and beams under the staff, rests, and the cursor / playback highlight. */
-  const tabRhythm = (pi: number, ty: number, n: number, sys: LSystem) => {
+  const tabRhythm = (pi: number, top: number, ty: number, n: number, sys: LSystem) => {
     const bottom = ty + tabHeight(n);
+    const lyricY = top + STAFF_H + TAB_LYRIC_DY;
     const stemEnd = bottom + 22;
     const flagsOf = (e: EventData) => {
       if (e.kind !== "note") return 0;
@@ -680,6 +700,30 @@ export function ScoreView(props: Props) {
                           <Show when={ev.kind === "rest"}>
                             <text x={cx} y={ty + tabHeight(n) / 2 + (restBase >= 1920 ? -SP : 0)} font-family="Bravura" font-size={FONT} fill="var(--ink)">{g(REST_GLYPH[restBase] ?? REST_GLYPH[480])}</text>
                           </Show>
+                          <Show when={ev.text}>
+                            <text x={le.x - 2} y={ty - 18} font-family="serif" font-style="italic" font-size="13" fill="var(--ink)">{ev.text}</text>
+                          </Show>
+                          <Show when={ev.dynamic}>
+                            <text x={le.x - 2} y={top + STAFF_H + 31 + TAB_LYRIC_DY} font-family="Bravura" font-size={FONT} fill="var(--ink)">{dynamicText(ev.dynamic!)}</text>
+                          </Show>
+                          <For each={lyricCovers(props.score, pi, lane.voice).covered.get(`${m.index}:${ev.start}`) ?? []}>
+                            {([verse, last]) => (
+                              <line x1={le.slotX} x2={last ? le.x + HEAD_W + 2 : le.slotX + le.slotW} y1={lyricY + 47.5 + verse * LYRIC_LINE} y2={lyricY + 47.5 + verse * LYRIC_LINE} stroke="var(--ink)" stroke-width={0.8} />
+                            )}
+                          </For>
+                          <For each={ev.lyrics ?? []}>
+                            {(y) => (
+                              <>
+                                <Show when={lyricCovers(props.score, pi, lane.voice).origins.has(`${m.index}:${ev.start}:${y.verse}`)}>
+                                  <line x1={le.x + HEAD_W / 2 + (y.text.length * LYRIC_CHAR_W) / 2 + 2} x2={le.slotX + le.slotW} y1={lyricY + 47.5 + y.verse * LYRIC_LINE} y2={lyricY + 47.5 + y.verse * LYRIC_LINE} stroke="var(--ink)" stroke-width={0.8} />
+                                </Show>
+                                <text x={le.x + HEAD_W / 2} y={lyricY + 46 + y.verse * LYRIC_LINE} text-anchor="middle" font-family="serif" font-size="12.5" fill="var(--ink)">{y.text}</text>
+                                <Show when={y.syllabic === "begin" || y.syllabic === "middle"}>
+                                  <text x={(le.x + HEAD_W / 2 + (y.text.length * LYRIC_CHAR_W) / 2 + le.slotX + le.slotW + 4) / 2} y={lyricY + 46 + y.verse * LYRIC_LINE} text-anchor="middle" font-family="serif" font-size="12.5" fill="var(--ink)">-</text>
+                                </Show>
+                              </>
+                            )}
+                          </For>
                         </g>
                       );
                     }}
@@ -695,6 +739,58 @@ export function ScoreView(props: Props) {
         )}
       </For>
     );
+  };
+
+  /** Ties between equal frets and guitar techniques (hammer-on / pull-off, slide, bend) of the note `le` of a tablature staff. */
+  const tabMarks = (pi: number, lane: LLane, k: number, le: LEvent, m: LMeasure, sys: LSystem, lineY: (string: number) => number, positions: Map<string, ({ string: number; fret: number } | null)[]>) => {
+    const ev = le.ev;
+    if (ev.kind !== "note") return null;
+    const mine = positions.get(`${m.index}:${ev.start}`) ?? [];
+    const placed = mine.flatMap((f, i) => (f ? [{ f, i }] : []));
+    if (!placed.length) return null;
+    const sameMeasure = lane.events[k + 1];
+    const nle = sameMeasure ?? sys.measures.find((x) => x.index === m.index + 1)?.lanes.find((l) => l.part === pi && l.voice === lane.voice)?.events[0] ?? null;
+    const nIdx = sameMeasure ? m.index : m.index + 1;
+    const nEv = nle && nle.ev.kind === "note" ? nle.ev : null;
+    const nFrets = nEv ? (positions.get(`${nIdx}:${nEv.start}`) ?? []) : [];
+    const x1 = le.x + 5;
+    const x2 = nle ? nle.x + 5 : x1 + 22;
+    const top = placed[placed.length - 1]; // the highest pitch carries the technique
+    const yMine = lineY(top.f.string);
+    const nTop = nFrets.flatMap((f) => (f ? [f] : [])).slice(-1)[0];
+    const yNext = nTop ? lineY(nTop.string) : yMine;
+    const mids = (e: EventData) => (e.kind === "note" ? (e.snd ?? e.pitches.map(pitchMidi)) : []);
+    const myMidi = Math.max(...mids(ev));
+    const nextMidi = nEv ? Math.max(...mids(nEv)) : myMidi;
+    const out: any[] = [];
+    // ties: an arc over the line of every tied pitch that continues in the next note
+    if (ev.tie && nEv) {
+      const nm = mids(nEv);
+      const m0 = mids(ev);
+      for (const p of placed) {
+        if (!nm.includes(m0[p.i])) continue;
+        const y = lineY(p.f.string) - 5;
+        out.push(<path d={`M ${x1 + 5} ${y} Q ${(x1 + x2) / 2 + 2} ${y - 7} ${x2 - 3} ${y}`} fill="none" stroke="var(--ink)" stroke-width={1.1} stroke-linecap="round" />);
+      }
+    }
+    const tech = ev.tech;
+    if (tech === "hammer" && nEv) {
+      const yA = Math.min(yMine, yNext) - 8;
+      const xm = (x1 + x2) / 2 + 2;
+      out.push(<path d={`M ${x1 + 4} ${yA} Q ${xm} ${yA - 9} ${x2 + 2} ${yA}`} fill="none" stroke="var(--ink)" stroke-width={1.1} stroke-linecap="round" />);
+      out.push(<text x={xm} y={yA - 6} text-anchor="middle" font-family="serif" font-style="italic" font-size="9" fill="var(--ink)">{nextMidi >= myMidi ? "H" : "P"}</text>);
+    } else if (tech === "slide" && nEv) {
+      const dir = nextMidi >= myMidi ? 1 : -1; // up in pitch = up on the page
+      out.push(<line x1={x1 + 8} y1={yMine + 3 * dir} x2={x2 - 6} y2={yNext - 3 * dir} stroke="var(--ink)" stroke-width={1.2} />);
+    } else if (tech && typeof tech === "object") {
+      const n = tech.bend;
+      const label = ["", "½", "1", "1½", "2"][Math.max(1, Math.min(4, n))];
+      const xb = x1 + 17;
+      out.push(<path d={`M ${x1 + 7} ${yMine - 2} C ${x1 + 14} ${yMine - 2}, ${xb} ${yMine - 5}, ${xb} ${yMine - 12}`} fill="none" stroke="var(--ink)" stroke-width={1.1} />);
+      out.push(<path d={`M ${xb - 2.5} ${yMine - 10} L ${xb} ${yMine - 15} L ${xb + 2.5} ${yMine - 10} Z`} fill="var(--ink)" />);
+      out.push(<text x={xb} y={yMine - 18} text-anchor="middle" font-family="system-ui" font-size="9" fill="var(--ink)">{label}</text>);
+    }
+    return out;
   };
 
   /** Tablature staff under a part with a tuning: one line per string, fret numbers on the lines. */
@@ -719,7 +815,10 @@ export function ScoreView(props: Props) {
         <text x={x1 + 8} y={ty + tabHeight(n) / 2 - 4} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">T</text>
         <text x={x1 + 8} y={ty + tabHeight(n) / 2 + 8} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">A</text>
         <text x={x1 + 8} y={ty + tabHeight(n) / 2 + 20} font-family="serif" font-weight="bold" font-size="12" fill="var(--ink)">B</text>
-        <Show when={part.tab_only}>{tabRhythm(pi, ty, n, sys)}</Show>
+        <Show when={part.tab_only}>{tabRhythm(pi, top, ty, n, sys)}</Show>
+        <Show when={props.fretLine && props.fretLine.part === pi}>
+          <line x1={x1} x2={x2} y1={lineY(props.fretLine!.string)} y2={lineY(props.fretLine!.string)} stroke="var(--accent)" stroke-width={2.2} opacity={0.55} pointer-events="none" />
+        </Show>
         <For each={sys.measures}>
           {(m) => (
             <For each={m.lanes.filter((l) => l.part === pi)}>
@@ -727,10 +826,12 @@ export function ScoreView(props: Props) {
                 const positions = tabPositions(props.score, pi, lane.voice);
                 return (
                   <For each={lane.events}>
-                    {(le) => {
+                    {(le, ki) => {
                       const frets = positions.get(`${m.index}:${le.ev.start}`);
                       const ev = le.ev;
                       return (
+                        <>
+                        <Show when={frets && ev.kind === "note"}>{tabMarks(pi, lane, ki(), le, m, sys, lineY, positions)}</Show>
                         <Show when={frets && ev.kind === "note"}>
                           <For each={frets!}>
                             {(f, k) => {
@@ -748,6 +849,7 @@ export function ScoreView(props: Props) {
                             }}
                           </For>
                         </Show>
+                        </>
                       );
                     }}
                   </For>

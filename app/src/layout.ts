@@ -13,6 +13,8 @@ const CHORD_GAP = 30;
 /** Height of one verse line of lyrics, and the approximate width of one lyric character. */
 export const LYRIC_LINE = 14;
 export const LYRIC_CHAR_W = 6.2;
+/** Extra distance of lyrics and dynamics below a tablature-only part (its stems and tuplet numbers take the room under the staff). */
+export const TAB_LYRIC_DY = 10;
 
 /** Width a lyric syllable needs, with room for the hyphen that follows it. */
 export const lyricWidth = (text: string, syllabic: string) => text.length * LYRIC_CHAR_W + (syllabic === "begin" || syllabic === "middle" ? 8 : 4);
@@ -293,7 +295,7 @@ export function layoutScore(score: Score, pageWidth = PAGE_W): LayoutResult {
   const nParts = score.parts.length;
   // Lyrics hang below each staff, one line per verse, so the gap grows with the verses in use.
   const verses = score.parts.reduce((a, p) => Math.max(a, ...p.measures.flatMap((m) => [m.events, ...(m.voices ?? [])]).flatMap((evs) => evs.flatMap((e) => (e.lyrics ?? []).map((y) => y.verse + 1)))), 0);
-  const lyricGap = verses ? verses * LYRIC_LINE + 4 : 0;
+  const lyricGap = verses ? verses * LYRIC_LINE + 4 + (score.parts.some((p) => p.tab_only) ? TAB_LYRIC_DY : 0) : 0;
   const partGap = PART_GAP + lyricGap;
   // A part with a tuning also holds a tablature staff under its staff.
   const tabDy = STAFF_H + 56 + lyricGap;

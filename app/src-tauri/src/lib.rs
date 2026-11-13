@@ -99,6 +99,14 @@ fn set_string(state: State<AppState>, part: usize, voice: usize, measure: usize,
     Ok(doc.score.clone())
 }
 
+/// Guitar technique on a note of a tablature part (the same one again removes it).
+#[tauri::command]
+fn set_tech(state: State<AppState>, part: usize, voice: usize, measure: usize, start: u32, tech: Option<nova_core::Tech>) -> Res {
+    let mut doc = lock(&state);
+    doc.edit(|s| s.set_tech(part, voice, measure, start, tech)).map_err(|e| e.to_string())?;
+    Ok(doc.score.clone())
+}
+
 /// Set (or clear when `end_measure` is `None`) the end of the melisma line of a verse's syllable.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -682,7 +690,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
-            set_time, set_fifths, set_tempo, detect_chords, set_chord, add_accompaniment, review_score, clear_chords, undo, redo, save_score, load_score
+            set_tech, set_time, set_fifths, set_tempo, detect_chords, set_chord, add_accompaniment, review_score, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

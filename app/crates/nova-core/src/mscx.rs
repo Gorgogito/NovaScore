@@ -838,7 +838,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                         }
                                     }
                                 }
-                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, strings: if staves[si].tab { note_strings } else { Vec::new() }, text: pending_text.take(), lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
+                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, strings: if staves[si].tab { note_strings } else { Vec::new() }, text: pending_text.take(), tech: None, lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
                             }
                             pos += real;
                         }

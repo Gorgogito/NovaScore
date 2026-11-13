@@ -104,12 +104,25 @@ impl Score {
         let Some(p) = self.parts.get(part) else { return out };
         let Some(tuning) = p.tuning.as_deref() else { return out };
         let mut hand = 3.0;
+        // the previous note when it is tied forward: (pitch, string) pairs a tied note must keep
+        let mut tied: Vec<(i32, u8)> = Vec::new();
         for (mi, m) in p.measures.iter().enumerate() {
             for e in m.voice(voice).into_iter().flatten() {
-                if let Content::Note { pitches, .. } = &e.content {
+                if let Content::Note { pitches, tie } = &e.content {
                     let midis: Vec<i32> = pitches.iter().map(|q| q.midi()).collect();
-                    let manual: &[u8] = if e.strings.len() == midis.len() { &e.strings } else { &[] };
-                    out.insert((mi, e.start), assign(tuning, &midis, manual, &mut hand));
+                    let mut manual: Vec<u8> = if e.strings.len() == midis.len() { e.strings.clone() } else { vec![0; midis.len()] };
+                    for (k, m) in midis.iter().enumerate() {
+                        if manual[k] == 0 {
+                            if let Some(&(_, s)) = tied.iter().find(|(tm, _)| tm == m) {
+                                manual[k] = s;
+                            }
+                        }
+                    }
+                    let frets = assign(tuning, &midis, &manual, &mut hand);
+                    tied = if *tie { midis.iter().zip(&frets).filter_map(|(&mid, f)| f.map(|f| (mid, f.string))).collect() } else { Vec::new() };
+                    out.insert((mi, e.start), frets);
+                } else {
+                    tied.clear();
                 }
             }
         }
@@ -169,6 +182,23 @@ mod tests {
             }
         }
         assert!(maxjump <= 6, "{maxjump}");
+    }
+
+    #[test]
+    fn a_tied_note_stays_on_the_string_of_the_note_it_continues() {
+        use crate::{Pitch, Score, TimeSig};
+        let p = |m: i32| Pitch::from_midi(m, true);
+        let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 2);
+        s.parts[0].tuning = Some(GUITAR.to_vec());
+        // E4 pinned to the D string (fret 14), tied across the barline into an E4 that would be the open first string alone
+        s.put_note(0, 0, 0, 1440, 480, vec![p(64)]).unwrap();
+        s.set_string(0, 0, 0, 1440, 64, 4).unwrap();
+        s.put_note(0, 0, 1, 0, 480, vec![p(64)]).unwrap();
+        let alone = s.tab_positions(0, 0)[&(1, 0)][0].unwrap();
+        assert_eq!((alone.string, alone.fret), (1, 0), "without the tie the note is free to move");
+        s.toggle_tie(0, 0, 0, 1440).unwrap();
+        let tied = s.tab_positions(0, 0)[&(1, 0)][0].unwrap();
+        assert_eq!((tied.string, tied.fret), (4, 14));
     }
 
     #[test]

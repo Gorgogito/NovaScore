@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Jump, Marker, Pitch, Score, SpannerKind, SpPos, Transpose } from "./types";
+import type { Jump, Marker, Pitch, Score, SpannerKind, SpPos, Tech, Transpose } from "./types";
 
 export interface Entered {
   score: Score;
@@ -68,6 +68,8 @@ export const api = {
 
   setText: (part: number, voice: number, measure: number, start: number, text: string) =>
     invoke<Score>("set_text", { part, voice, measure, start, text }),
+  setTech: (part: number, voice: number, measure: number, start: number, tech: Tech | null) =>
+    invoke<Score>("set_tech", { part, voice, measure, start, tech }),
   setString: (part: number, voice: number, measure: number, start: number, midi: number, string: number) =>
     invoke<Score>("set_string", { part, voice, measure, start, midi, string }),
   setLyricExtend: (part: number, voice: number, measure: number, start: number, verse: number, endMeasure: number | null, endTick: number) =>
