@@ -40,6 +40,8 @@ export default function App() {
   const [audioFile, setAudioFile] = createSignal<string | null>(null);
   /** Reconocimiento óptico (Audiveris): diálogo de instalación y reconocimiento en curso. */
   const [omrSetup, setOmrSetup] = createSignal(false);
+  /** Asistente: resultado de «Revisar» (lista de avisos) abierto en un diálogo. */
+  const [issues, setIssues] = createSignal<Awaited<ReturnType<typeof api.reviewScore>> | null>(null);
   const [omrBusy, setOmrBusy] = createSignal<string | null>(null);
   const [dirty, setDirty] = createSignal(false);
   const player = new Player();
@@ -619,6 +621,26 @@ export default function App() {
       setStatus(String(e));
     }
   };
+  const doAccompaniment = async (style: "bass" | "blocks" | "arpeggio") => {
+    try {
+      const r = await api.addAccompaniment(style);
+      apply(r.score, true);
+      selectPart(r.part);
+      setDirty(true);
+      const detected = score()!.chords?.some((c) => !c.manual);
+      setStatus(`Acompañamiento «${r.score.parts[r.part].name}» añadido siguiendo el cifrado de acordes${detected ? " (detectado: revísalo con las teclas K o «Actualizar acordes»)" : ""}. Se puede deshacer con Ctrl+Z.`);
+    } catch (e) {
+      setStatus(String(e));
+    }
+  };
+  const doReview = async () => {
+    const list = await api.reviewScore();
+    if (!list.length) {
+      setStatus("Revisión: no se encontró nada raro (tesitura, voces cruzadas, quintas y octavas paralelas).");
+      return;
+    }
+    setIssues(list);
+  };
   const startOmr = async () => {
     const st = await api.omrStatus();
     if (!st.found) {
@@ -694,7 +716,7 @@ export default function App() {
 
   // ---- keyboard ----------------------------------------------------------
   const onKey = async (e: KeyboardEvent) => {
-    if (!score() || showNew() || audioFile() || omrSetup() || omrBusy()) return;
+    if (!score() || showNew() || audioFile() || omrSetup() || omrBusy() || issues()) return;
     const tag = (e.target as HTMLElement).tagName;
     if (tag === "INPUT" || tag === "SELECT") return;
     const k = e.key.toLowerCase();
@@ -791,6 +813,21 @@ export default function App() {
           <Show when={score()!.chords?.length}>
             <button onClick={refreshChords} title="Vuelve a detectar los acordes con las notas actuales; los que fijaste a mano (o leíste de un archivo) se conservan">Actualizar acordes</button>
           </Show>
+        </Show>
+        <span class="sep" />
+        <Show when={score()}>
+          <select
+            class="assist-select"
+            title="Asistente: escribe una parte de acompañamiento a partir del cifrado de acordes (si no hay, se detecta)"
+            value=""
+            onChange={(e) => { const v = e.currentTarget.value as "bass" | "blocks" | "arpeggio" | ""; e.currentTarget.value = ""; if (v) void doAccompaniment(v); }}
+          >
+            <option value="">Acompañamiento…</option>
+            <option value="bass">Bajo (fundamentales)</option>
+            <option value="blocks">Acordes sostenidos</option>
+            <option value="arpeggio">Arpegio en corcheas</option>
+          </select>
+          <button onClick={doReview} title="Busca notas fuera de la tesitura del instrumento, voces cruzadas y quintas u octavas paralelas">Revisar</button>
         </Show>
         <span class="sep" />
         <button class="play" classList={{ on: isPlaying() }} onClick={togglePlay} title="Reproducir (Espacio)">
@@ -1049,6 +1086,29 @@ export default function App() {
             }
           }}
         />
+      </Show>
+
+      <Show when={issues()}>
+        {(list) => (
+          <div class="modal" onClick={() => setIssues(null)}>
+            <div class="dialog" onClick={(e) => e.stopPropagation()}>
+              <h2>Revisión de la partitura</h2>
+              <p>{list().length} aviso(s). Son sugerencias, no errores seguros: la música puede romper estas reglas a propósito. Pulsa uno para ir al compás.</p>
+              <ul class="issues" style={{ "max-height": "50vh", "overflow-y": "auto", "padding-left": "18px", margin: 0 }}>
+                <For each={list()}>
+                  {(it) => (
+                    <li style={{ cursor: "pointer", margin: "4px 0" }} onClick={() => { setCursor({ part: it.part, voice: it.voice, m: it.measure, start: it.tick }); setIssues(null); setStatus(it.message); }}>
+                      <b>Compás {it.measure + 1}</b>, {score()!.parts[it.part].name}: {it.message}
+                    </li>
+                  )}
+                </For>
+              </ul>
+              <div class="actions">
+                <button type="button" class="primary" onClick={() => setIssues(null)}>Cerrar</button>
+              </div>
+            </div>
+          </div>
+        )}
       </Show>
 
       <Show when={omrSetup()}>

@@ -551,6 +551,35 @@ fn detect_chords(state: State<AppState>) -> Res {
 }
 
 /// Fija (o con texto vacío borra) el acorde que empieza en `(measure, tick)`.
+/// Añade una parte de acompañamiento (`bass`, `blocks` o `arpeggio`) siguiendo el cifrado de acordes.
+#[tauri::command]
+fn add_accompaniment(state: State<AppState>, style: nova_core::assist::Accompaniment) -> Result<Entered2, String> {
+    let mut doc = lock(&state);
+    let mut result: Result<usize, String> = Err("sin resultado".into());
+    doc.edit(|s| {
+        result = s.add_accompaniment(style);
+        if result.is_err() {
+            return Err(nova_core::EditError::OutOfRange);
+        }
+        Ok(())
+    })
+    .ok();
+    let part = result?;
+    Ok(Entered2 { score: doc.score.clone(), part })
+}
+
+#[derive(Serialize)]
+struct Entered2 {
+    score: Score,
+    part: usize,
+}
+
+/// Revisión de la partitura: tesitura, voces cruzadas y quintas/octavas paralelas.
+#[tauri::command]
+fn review_score(state: State<AppState>) -> Vec<nova_core::assist::Issue> {
+    lock(&state).score.review()
+}
+
 #[tauri::command]
 fn set_chord(state: State<AppState>, measure: usize, tick: u32, text: String) -> Res {
     let mut doc = lock(&state);
@@ -653,7 +682,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
-            set_time, set_fifths, set_tempo, detect_chords, set_chord, clear_chords, undo, redo, save_score, load_score
+            set_time, set_fifths, set_tempo, detect_chords, set_chord, add_accompaniment, review_score, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
