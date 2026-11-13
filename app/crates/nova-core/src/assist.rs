@@ -610,51 +610,85 @@ impl Score {
         if minor { (self.tonic_at(m) + 9) % 12 } else { self.tonic_at(m) }
     }
 
-    /// Stores one chord per measure (consecutive repeats are merged) as the chord symbols of the score, fixed by hand
-    /// so «Actualizar acordes» keeps them.
-    fn set_bar_chords(&mut self, chords: &[(i32, Quality)]) {
+    /// Places where a chord can start: one per measure or, with `per_bar` = 2, one per half bar (4/4, 2/4, 2/2 and the
+    /// compound meters 6/8, 12/8…; a 3/4 bar is never split). With `part`, a bar is split only when a note of that part
+    /// starts in its second half, so a held note keeps a single chord. Each item is `(measure, tick, length)`.
+    fn chord_units(&self, per_bar: u8, part: Option<usize>) -> Vec<(usize, u32, u32)> {
+        let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+        let mut out = Vec::new();
+        for m in 0..n {
+            let len = self.measure_len(m);
+            let t = self.time_at(m);
+            let half = len / 2;
+            let splittable = per_bar >= 2 && len % 2 == 0 && (half % PPQ == 0 || (t.den == 8 && t.num % 6 == 0));
+            let moves = |pi: usize| {
+                self.parts[pi].measures.get(m).map_or(false, |me| (0..MAX_VOICES).any(|v| me.voice(v).into_iter().flatten().any(|e| matches!(e.content, Content::Note { .. }) && e.start >= half)))
+            };
+            if splittable && part.map_or(true, moves) {
+                out.push((m, 0, half));
+                out.push((m, half, len - half));
+            } else {
+                out.push((m, 0, len));
+            }
+        }
+        out
+    }
+
+    /// Stores the chords of `units` (merging consecutive repeats) as the chord symbols of the score, fixed by hand so
+    /// «Actualizar acordes» keeps them.
+    fn set_unit_chords(&mut self, units: &[(usize, u32, u32)], chords: &[(i32, Quality)]) {
         let mut marks: Vec<ChordMark> = Vec::new();
-        for (m, &(root, quality)) in chords.iter().enumerate() {
+        for (&(measure, tick, _), &(root, quality)) in units.iter().zip(chords) {
             let root = root.rem_euclid(12) as u8;
             if marks.last().map_or(false, |l| (l.root, l.quality) == (root, quality)) {
                 continue;
             }
-            marks.push(ChordMark { measure: m, tick: 0, root, quality, bass: root, manual: true });
+            marks.push(ChordMark { measure, tick, root, quality, bass: root, manual: true });
         }
         self.chords = marks;
     }
 
     /// Writes the chord symbols for a progression given as roman numerals separated by hyphens or spaces, one chord per
-    /// measure and repeated to the end of the score. `minor` takes the relative minor of the key signature as tonic
-    /// (write its degrees as in a major key: `i-bVII-bVI-V`). Returns the number of chord symbols written.
-    pub fn set_progression(&mut self, text: &str, minor: bool) -> Result<usize, String> {
+    /// measure (`per_bar` = 1) or per half bar (2) and repeated to the end of the score. `minor` takes the relative
+    /// minor of the key signature as tonic (write its degrees as in a major key: `i-bVII-bVI-V`). Returns the number of
+    /// chord symbols written.
+    pub fn set_progression(&mut self, text: &str, minor: bool, per_bar: u8) -> Result<usize, String> {
         let cycle: Option<Vec<(i32, Quality)>> = text.split(|c: char| c == '-' || c == '–' || c.is_whitespace()).filter(|w| !w.is_empty()).map(parse_roman).collect();
         let cycle = cycle.ok_or("No entiendo la progresión: usa números romanos separados por guiones, como I-V-vi-IV o ii-V7-I.")?;
         if cycle.is_empty() {
             return Err("La progresión está vacía.".into());
         }
-        let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
-        let bars: Vec<(i32, Quality)> = (0..n).map(|m| (self.mode_tonic(minor, m) + cycle[m % cycle.len()].0, cycle[m % cycle.len()].1)).collect();
-        self.set_bar_chords(&bars);
+        let units = self.chord_units(per_bar, None);
+        let chords: Vec<(i32, Quality)> = units.iter().enumerate().map(|(u, &(m, _, _))| (self.mode_tonic(minor, m) + cycle[u % cycle.len()].0, cycle[u % cycle.len()].1)).collect();
+        self.set_unit_chords(&units, &chords);
         Ok(self.chords.len())
     }
 
-    /// Proposes chord symbols for the melody of `part`, one chord per measure, chosen among the degrees of the key
-    /// (major, or its relative minor when `minor`). Each bar scores the share of its notes (weighted by length and by
-    /// beat) that belong to the chord, plus a taste for the usual links (V–I, ii–V, IV–V…), for starting on the tonic
-    /// and for closing V–I; the best path is found with dynamic programming. Returns the number of chord symbols.
-    pub fn harmonize(&mut self, part: usize, minor: bool) -> Result<usize, String> {
+    /// Proposes chord symbols for the melody of `part`, one chord per measure (`per_bar` = 1) or per half bar where the
+    /// melody moves in the second half (2), chosen among the degrees of the key (major, or its relative minor when
+    /// `minor`). Each unit scores the share of its notes (weighted by length and by beat) that belong to the chord, plus
+    /// a taste for the usual links (V–I, ii–V, IV–V…), for starting on the tonic and for closing V–I; the best path is
+    /// found with dynamic programming. With `sevenths` every degree also has its seventh chord (dominant seventh on V,
+    /// and on VII in minor; major or minor seventh elsewhere): the dominant seventh is favoured, the others appear when
+    /// the melody has their seventh, and the first and last chord stay triads. Returns the number of chord symbols.
+    pub fn harmonize(&mut self, part: usize, minor: bool, per_bar: u8, sevenths: bool) -> Result<usize, String> {
         let p = self.parts.get(part).ok_or("La parte no existe.")?;
-        let n = p.measures.len();
+        let units = self.chord_units(per_bar, Some(part));
+        let n = units.len();
         let mut weights: Vec<[f32; 12]> = vec![[0.0; 12]; n];
         let mut any = false;
-        for (m, w) in weights.iter_mut().enumerate() {
+        for (w, &(m, t0, ul)) in weights.iter_mut().zip(&units) {
+            let Some(me) = p.measures.get(m) else { continue };
             for v in 0..MAX_VOICES {
-                for e in p.measures[m].voice(v).into_iter().flatten() {
+                for e in me.voice(v).into_iter().flatten() {
                     if let Content::Note { pitches, .. } = &e.content {
-                        let beat = if e.start == 0 { 2.0 } else if e.start % PPQ == 0 { 1.5 } else { 1.0 };
+                        let (a, b) = (e.start.max(t0), (e.start + e.ticks).min(t0 + ul));
+                        if b <= a {
+                            continue;
+                        }
+                        let beat = if e.start == t0 { 2.0 } else if e.start % PPQ == 0 { 1.5 } else { 1.0 };
                         for q in pitches {
-                            w[q.midi().rem_euclid(12) as usize] += e.ticks as f32 * beat;
+                            w[q.midi().rem_euclid(12) as usize] += (b - a) as f32 * beat;
                         }
                         any = true;
                     }
@@ -664,48 +698,85 @@ impl Score {
         if !any {
             return Err("Esa parte no tiene notas que armonizar.".into());
         }
-        let tonics: Vec<i32> = (0..n).map(|m| self.mode_tonic(minor, m)).collect();
-        let cands: &[(u8, Quality, u8)] = if minor { &MINOR_DEGREES } else { &MAJOR_DEGREES };
-        let fit = |m: usize, c: usize| -> f32 {
-            let total: f32 = weights[m].iter().sum();
+        let tonics: Vec<i32> = units.iter().map(|&(m, _, _)| self.mode_tonic(minor, m)).collect();
+        let triads: &[(u8, Quality, u8)] = if minor { &MINOR_DEGREES } else { &MAJOR_DEGREES };
+        // (offset, quality, degree number, is a seventh chord)
+        let mut cands: Vec<(u8, Quality, u8, bool)> = triads.iter().map(|&(o, q, n)| (o, q, n, false)).collect();
+        if sevenths {
+            for &(o, q, n) in triads {
+                let seventh = match q {
+                    Quality::Major if n == 5 || (minor && n == 7) => Quality::Dominant7,
+                    Quality::Major => Quality::Major7,
+                    Quality::Minor => Quality::Minor7,
+                    _ => continue,
+                };
+                cands.push((o, seventh, n, true));
+            }
+        }
+        let fit = |u: usize, c: usize| -> f32 {
+            let total: f32 = weights[u].iter().sum();
             if total == 0.0 {
                 return 0.0;
             }
-            let (off, q, num) = cands[c];
-            let root = (tonics[m] + off as i32).rem_euclid(12);
-            let inside: f32 = tones(q).iter().map(|&t| weights[m][(root + t as i32).rem_euclid(12) as usize]).sum();
+            let (off, q, num, sev) = cands[c];
+            let root = (tonics[u] + off as i32).rem_euclid(12);
+            let inside: f32 = tones(q).iter().map(|&t| weights[u][(root + t as i32).rem_euclid(12) as usize]).sum();
             let mut s = (inside - 0.7 * (total - inside)) / total * 4.0;
-            if m == 0 && num == 1 {
+            if u == 0 && num == 1 {
                 s += 1.5;
             }
-            if m + 1 == n {
+            if u + 1 == n {
                 s += match num { 1 => 3.0, 5 => 0.5, _ => 0.0 };
             }
-            if m + 2 == n && num == 5 {
+            if u + 2 == n && num == 5 {
                 s += 1.0;
             }
+            if sev {
+                s += if num == 5 || (minor && num == 7) { 0.6 } else { -0.3 };
+                if u == 0 {
+                    s -= 1.0;
+                }
+                if u + 1 == n {
+                    s -= 2.0;
+                }
+            }
             s
+        };
+        // staying on a chord inside a bar is fine; between bars repeating is discouraged
+        let step = |u: usize, a: usize, b: usize| {
+            let same_bar = units[u].0 == units[u - 1].0;
+            let (ca, cb) = (cands[a], cands[b]);
+            if ca.2 == cb.2 {
+                // the same degree again: V then V7 is natural inside a bar, repeating the very same chord is not
+                return match (a == b, same_bar) {
+                    (true, true) => 0.5,
+                    (true, false) => -1.5,
+                    (false, true) => 0.3,
+                    (false, false) => 0.0,
+                };
+            }
+            link(ca.2, cb.2) + if ca.3 && ca.2 == 5 && cb.2 == 1 { 0.5 } else { 0.0 }
         };
         let mut best: Vec<Vec<f32>> = vec![vec![0.0; cands.len()]; n];
         let mut from: Vec<Vec<usize>> = vec![vec![0; cands.len()]; n];
         for c in 0..cands.len() {
             best[0][c] = fit(0, c);
         }
-        for m in 1..n {
+        for u in 1..n {
             for c in 0..cands.len() {
-                let (prev, score) = (0..cands.len()).map(|q| (q, best[m - 1][q] + link(cands[q].2, cands[c].2))).fold((0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
-                best[m][c] = score + fit(m, c);
-                from[m][c] = prev;
+                let (prev, score) = (0..cands.len()).map(|q| (q, best[u - 1][q] + step(u, q, c))).fold((0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
+                best[u][c] = score + fit(u, c);
+                from[u][c] = prev;
             }
         }
         let mut c = (0..cands.len()).fold(0, |a, b| if best[n - 1][b] > best[n - 1][a] { b } else { a });
         let mut path = vec![0usize; n];
-        for m in (0..n).rev() {
-            path[m] = c;
-            c = from[m][c];
+        for u in (0..n).rev() {
+            path[u] = c;
+            c = from[u][c];
         }
-        let bars: Vec<(i32, Quality)> = path.iter().enumerate().map(|(m, &c)| (tonics[m] + cands[c].0 as i32, cands[c].1)).collect();
-        self.set_bar_chords(&bars);
+        let chords: Vec<(i32, Quality)> = path.iter().enumerate().map(|(u, &c)| (tonics[u] + cands[c].0 as i32, cands[c].1)).collect();
+        self.set_unit_chords(&units, &chords);
         Ok(self.chords.len())
     }
 }
@@ -926,19 +997,19 @@ mod tests {
     fn a_progression_in_roman_numerals_is_written_bar_by_bar() {
         // G major (one sharp): I-V-vi-IV = G D Em C, repeated over five bars
         let mut s = Score::new("p", TimeSig { num: 4, den: 4 }, 1, 5);
-        assert_eq!(s.set_progression("I-V-vi-IV", false).unwrap(), 5);
+        assert_eq!(s.set_progression("I-V-vi-IV", false, 1).unwrap(), 5);
         assert_eq!(roots(&s), vec![(0, 7, Quality::Major), (1, 2, Quality::Major), (2, 4, Quality::Minor), (3, 0, Quality::Major), (4, 7, Quality::Major)]);
         assert!(s.chords.iter().all(|c| c.manual && c.bass == c.root), "fixed by hand, so «Actualizar acordes» keeps them");
         // A minor (no signature): i-bVII-bVI-V = Am G F E
         let mut m = Score::new("m", TimeSig { num: 4, den: 4 }, 0, 4);
-        m.set_progression("i-bVII-bVI-V", true).unwrap();
+        m.set_progression("i-bVII-bVI-V", true, 1).unwrap();
         assert_eq!(roots(&m), vec![(0, 9, Quality::Minor), (1, 7, Quality::Major), (2, 5, Quality::Major), (3, 4, Quality::Major)]);
         // sevenths and merged repeats: I7 I7 IV7 -> two symbols
         let mut b = Score::new("b", TimeSig { num: 4, den: 4 }, 0, 3);
-        assert_eq!(b.set_progression("I7 I7 IV7", false).unwrap(), 2);
+        assert_eq!(b.set_progression("I7 I7 IV7", false, 1).unwrap(), 2);
         assert_eq!(b.chords[0].quality, Quality::Dominant7);
-        assert!(b.set_progression("I-X-V", false).is_err());
-        assert!(b.set_progression("  ", false).is_err());
+        assert!(b.set_progression("I-X-V", false, 1).is_err());
+        assert!(b.set_progression("  ", false, 1).is_err());
         // and the accompaniment reads them
         let pi = b.add_accompaniment(Accompaniment::Bass).unwrap();
         assert!(pi > 0 || b.parts.len() > 1);
@@ -954,17 +1025,17 @@ mod tests {
             }
         }
         s.put_abs(0, 3 * 1920, 1920, &[p(60)]).unwrap();
-        assert_eq!(s.harmonize(0, false).unwrap(), 4);
+        assert_eq!(s.harmonize(0, false, 1, false).unwrap(), 4);
         // C F G C
         assert_eq!(roots(&s), vec![(0, 0, Quality::Major), (1, 5, Quality::Major), (2, 7, Quality::Major), (3, 0, Quality::Major)]);
         // an empty part has nothing to harmonize
         let mut e = Score::new("e", TimeSig { num: 4, den: 4 }, 0, 2);
-        assert!(e.harmonize(0, false).is_err());
+        assert!(e.harmonize(0, false, 1, false).is_err());
         // a melody that closes on A in A minor ends on the tonic chord
         let mut a = Score::new("a", TimeSig { num: 4, den: 4 }, 0, 2);
         a.put_abs(0, 0, 1920, &[p(64)]).unwrap();
         a.put_abs(0, 1920, 1920, &[p(69)]).unwrap();
-        a.harmonize(0, true).unwrap();
+        a.harmonize(0, true, 1, false).unwrap();
         assert_eq!(a.chords.last().map(|c| (c.root, c.quality)), Some((9, Quality::Minor)), "{:?}", roots(&a));
     }
 
@@ -980,12 +1051,76 @@ mod tests {
         }
         s.put_abs(0, 2 * 1920, 1920, &[p(71)]).unwrap();
         s.put_abs(0, 3 * 1920, 1920, &[p(67)]).unwrap();
-        s.harmonize(0, false).unwrap();
+        s.harmonize(0, false, 1, false).unwrap();
         assert_eq!(s.chords.last().map(|c| (c.measure, c.root)), Some((3, 7)), "{:?}", roots(&s));
         // a progression is transposed to the key in force: I-IV over C | C | G | G
         let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 4);
         t.set_key_at(2, 1);
-        t.set_progression("I-IV", false).unwrap();
+        t.set_progression("I-IV", false, 1).unwrap();
         assert_eq!(roots(&t).iter().map(|c| c.1).collect::<Vec<_>>(), vec![0, 5, 7, 0]);
+    }
+
+    #[test]
+    fn two_chords_per_bar_split_only_where_the_music_moves() {
+        // bar 1: C E | G B (I then V); bar 2: a held C (one chord); bar 3 in 3/4 is never split
+        let mut s = Score::new("d", TimeSig { num: 4, den: 4 }, 0, 2);
+        for (k, n) in [60, 64, 67, 71].iter().enumerate() {
+            s.put_abs(0, k as u32 * 480, 480, &[p(*n)]).unwrap();
+        }
+        s.put_abs(0, 1920, 1920, &[p(60)]).unwrap();
+        assert_eq!(s.harmonize(0, false, 2, false).unwrap(), 3);
+        assert_eq!(s.chords.iter().map(|c| (c.measure, c.tick, c.root)).collect::<Vec<_>>(), vec![(0, 0, 0), (0, 960, 7), (1, 0, 0)]);
+        // one per bar is unchanged
+        assert!(s.harmonize(0, false, 1, false).unwrap() <= 2);
+        assert!(s.chords.iter().all(|c| c.tick == 0));
+        // a progression takes every half bar; 6/8 splits in two dotted quarters; 3/4 stays whole
+        let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 2);
+        t.set_progression("I-V-vi-IV", false, 2).unwrap();
+        assert_eq!(t.chords.iter().map(|c| (c.measure, c.tick, c.root)).collect::<Vec<_>>(), vec![(0, 0, 0), (0, 960, 7), (1, 0, 9), (1, 960, 5)]);
+        let mut c = Score::new("c", TimeSig { num: 6, den: 8 }, 0, 1);
+        c.set_progression("I-V", false, 2).unwrap();
+        assert_eq!(c.chords.iter().map(|c| c.tick).collect::<Vec<_>>(), vec![0, 720]);
+        let mut w = Score::new("w", TimeSig { num: 3, den: 4 }, 0, 2);
+        assert_eq!(w.set_progression("I-V", false, 2).unwrap(), 2);
+        assert!(w.chords.iter().all(|c| c.tick == 0));
+        // the accompaniment follows half-bar chords
+        let pi = t.add_accompaniment(Accompaniment::Bass).unwrap();
+        assert_eq!(t.parts[pi].measures[0].events.len(), 2);
+    }
+
+    #[test]
+    fn sevenths_appear_where_the_melody_asks_for_them() {
+        // bar 2 holds D F G B: all of G7; the last bar is a plain C even though the melody holds the B (Cmaj7 tones)
+        let mut s = Score::new("s", TimeSig { num: 4, den: 4 }, 0, 3);
+        let bars: [[i32; 4]; 3] = [[60, 64, 67, 64], [62, 65, 67, 71], [60, 64, 67, 71]];
+        for (m, b) in bars.iter().enumerate() {
+            for (k, n) in b.iter().enumerate() {
+                s.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
+            }
+        }
+        s.harmonize(0, false, 1, true).unwrap();
+        assert_eq!(roots(&s), vec![(0, 0, Quality::Major), (1, 7, Quality::Dominant7), (2, 0, Quality::Major)]);
+        // without sevenths bar 2 is a plain G major
+        s.harmonize(0, false, 1, false).unwrap();
+        assert_eq!(s.chords[1].quality, Quality::Major);
+        // a minor seventh shows up on ii when the melody holds its seventh (C over D F A)
+        let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 3);
+        let bars: [[i32; 4]; 3] = [[64, 67, 72, 67], [62, 65, 69, 72], [67, 71, 62, 71]];
+        for (m, b) in bars.iter().enumerate() {
+            for (k, n) in b.iter().enumerate() {
+                t.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
+            }
+        }
+        t.harmonize(0, false, 1, true).unwrap();
+        assert_eq!(t.chords[1].quality, Quality::Minor7, "{:?}", roots(&t));
+        // in minor, V is the dominant seventh too and the accompaniment plays all four notes
+        let mut m = Score::new("m", TimeSig { num: 4, den: 4 }, 0, 2);
+        for (k, n) in [64, 68, 71, 62].iter().enumerate() {
+            m.put_abs(0, k as u32 * 480, 480, &[p(*n)]).unwrap();
+        }
+        m.put_abs(0, 1920, 1920, &[p(69)]).unwrap();
+        m.harmonize(0, true, 1, true).unwrap();
+        let pi = m.add_accompaniment(Accompaniment::Blocks).unwrap();
+        assert!(m.parts[pi].measures[0].events.iter().any(|e| matches!(&e.content, Content::Note { pitches, .. } if pitches.len() == 4)), "{:?}", roots(&m));
     }
 }

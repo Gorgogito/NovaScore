@@ -754,15 +754,19 @@ export default function App() {
   };
   /** Asistente: escribe el cifrado de acordes de la parte del cursor (analizando su melodía) o una progresión de números romanos. */
   const doHarmonize = async (minor: boolean, progression?: string) => {
+    const perBar = chordsPerBar();
     try {
-      const r = await api.harmonize(cursor().part, minor, progression);
+      const r = await api.harmonize(cursor().part, minor, progression, perBar, sevenths());
       apply(r.score, true);
       setDirty(true);
-      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, uno por compás. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
+      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, ${perBar === 2 ? "hasta dos por compás (se parte el compás solo donde la música se mueve en su segunda mitad; los compases de 3 tiempos no se parten)" : "uno por compás"}. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
     } catch (e) {
       setStatus(String(e));
     }
   };
+  /** Armonizar: acordes por compás (1 o 2). */
+  const [chordsPerBar, setChordsPerBar] = createSignal(1);
+  const [sevenths, setSevenths] = createSignal(false);
   const doReview = async () => {
     const list = await api.reviewScore();
     if (!list.length) {
@@ -980,6 +984,14 @@ export default function App() {
             <option value="2:2:semitones">Modular un tono más arriba (+2, 2 compases)</option>
             <option value="2:1:invert">Inversión en espejo (2 compases)</option>
             <option value="0:0">Terminar con la tónica</option>
+          </select>
+          <select class="assist-select" title="Cuántos acordes escribe «Armonizar…» por compás. Con dos, el compás solo se parte donde la melodía se mueve en su segunda mitad (3/4 nunca se parte)" value={String(chordsPerBar())} onChange={(e) => setChordsPerBar(Number(e.currentTarget.value))}>
+            <option value="1">1 acorde/compás</option>
+            <option value="2">2 acordes/compás</option>
+          </select>
+          <select class="assist-select" title="«Armonizar…» con tríadas, o también con séptimas: la de dominante (V7) se favorece y las demás salen cuando la melodía tiene su séptima; el primer y el último acorde siguen siendo tríadas. No afecta a las progresiones, que llevan lo que escribas (V7, ii7…)" value={sevenths() ? "7" : "3"} onChange={(e) => setSevenths(e.currentTarget.value === "7")}>
+            <option value="3">Tríadas</option>
+            <option value="7">Con séptimas</option>
           </select>
           <select
             class="assist-select"

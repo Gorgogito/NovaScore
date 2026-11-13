@@ -125,7 +125,7 @@ export const api = {
   /** `phrase` > 0: secuencia de los últimos compases `steps` grados más arriba/abajo; 0: compás final con la tónica. `part` del resultado = primer compás nuevo. */
   continuePhrase: (part: number, phrase: number, steps: number, kind: "degrees" | "semitones" | "invert" = "degrees") => invoke<{ score: Score; part: number }>("continue_phrase", { part, phrase, steps, kind }),
   /** Cifrado de acordes: de la melodía de `part` o, con `progression` (números romanos), esa progresión. `part` del resultado = acordes escritos. */
-  harmonize: (part: number, minor: boolean, progression?: string) => invoke<{ score: Score; part: number }>("harmonize", { part, minor, progression: progression ?? null }),
+  harmonize: (part: number, minor: boolean, progression?: string, perBar = 1, sevenths = false) => invoke<{ score: Score; part: number }>("harmonize", { part, minor, progression: progression ?? null, perBar, sevenths }),
   reviewScore: () => invoke<{ part: number; voice: number; measure: number; tick: number; kind: string; message: string }[]>("review_score"),
   omrStartup: () => invoke<{ state: "none" | "running" | "done"; name?: string; imported?: Imported; error?: string }>("omr_startup"),
   omrStatus: () => invoke<{ found: boolean; path?: string; source?: string }>("omr_status"),
