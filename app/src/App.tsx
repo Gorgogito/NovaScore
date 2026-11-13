@@ -731,14 +731,34 @@ export default function App() {
     }
   };
   /** Asistente: continúa la parte del cursor como secuencia (`phrase` compases, `steps` grados) o con una cadencia final (`phrase` = 0). */
-  const doContinue = async (phrase: number, steps: number) => {
+  const doContinue = async (phrase: number, steps: number, kind: "degrees" | "semitones" | "invert" = "degrees") => {
     const part = cursor().part;
     try {
-      const r = await api.continuePhrase(part, phrase, steps);
+      const r = await api.continuePhrase(part, phrase, steps, kind);
       apply(r.score, true);
       setCursor({ part, voice: 0, m: r.part, start: 0 });
       setDirty(true);
-      setStatus(phrase === 0 ? "Compás final con la tónica añadido. Se puede deshacer con Ctrl+Z." : `Secuencia añadida (${phrase} compás${phrase > 1 ? "es" : ""}, ${Math.abs(steps)} grado${Math.abs(steps) > 1 ? "s" : ""} ${steps > 0 ? "más arriba" : "más abajo"}). Repite para alargarla; Ctrl+Z la quita.`);
+      const bars = `${phrase} ${phrase > 1 ? "compases" : "compás"}`;
+      if (phrase > 0 && kind === "semitones") {
+        setStatus(`Modulación añadida (${bars}, ${steps > 0 ? "+" : ""}${steps} semitonos). La armadura no cambia: las notas nuevas llevan sus alteraciones. Ctrl+Z la quita.`);
+        return;
+      }
+      if (phrase > 0 && kind === "invert") {
+        setStatus(`Inversión añadida (${bars}, en espejo por la escala alrededor de la primera nota de la frase). Ctrl+Z la quita.`);
+        return;
+      }
+      setStatus(phrase === 0 ? "Compás final con la tónica añadido. Se puede deshacer con Ctrl+Z." : `Secuencia añadida (${bars}, ${Math.abs(steps)} grado${Math.abs(steps) > 1 ? "s" : ""} ${steps > 0 ? "más arriba" : "más abajo"}). Repite para alargarla; Ctrl+Z la quita.`);
+    } catch (e) {
+      setStatus(String(e));
+    }
+  };
+  /** Asistente: escribe el cifrado de acordes de la parte del cursor (analizando su melodía) o una progresión de números romanos. */
+  const doHarmonize = async (minor: boolean, progression?: string) => {
+    try {
+      const r = await api.harmonize(cursor().part, minor, progression);
+      apply(r.score, true);
+      setDirty(true);
+      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, uno por compás. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
     } catch (e) {
       setStatus(String(e));
     }
@@ -946,7 +966,7 @@ export default function App() {
             class="assist-select"
             title="Asistente: alarga la melodía de la parte seleccionada repitiendo sus últimos compases como secuencia (por grados de la escala) o la cierra con la tónica"
             value=""
-            onChange={(e) => { const v = e.currentTarget.value; e.currentTarget.value = ""; if (v) { const [ph, st] = v.split(":").map(Number); void doContinue(ph, st); } }}
+            onChange={(e) => { const v = e.currentTarget.value; e.currentTarget.value = ""; if (v) { const [ph, st, kind] = v.split(":"); void doContinue(Number(ph), Number(st), (kind || "degrees") as "degrees" | "semitones" | "invert"); } }}
           >
             <option value="">Continuar frase…</option>
             <option value="1:-1">Secuencia descendente (último compás)</option>
@@ -955,7 +975,30 @@ export default function App() {
             <option value="1:1">Secuencia ascendente (último compás)</option>
             <option value="2:1">Secuencia ascendente (2 compases)</option>
             <option value="4:1">Secuencia ascendente (4 compases)</option>
+            <option value="2:7:semitones">Modular a la dominante (+7, 2 compases)</option>
+            <option value="2:5:semitones">Modular a la subdominante (+5, 2 compases)</option>
+            <option value="2:-3:semitones">Modular a la relativa menor (−3, 2 compases)</option>
+            <option value="2:1:invert">Inversión en espejo (2 compases)</option>
             <option value="0:0">Terminar con la tónica</option>
+          </select>
+          <select
+            class="assist-select"
+            title="Asistente: escribe el cifrado de acordes, un acorde por compás, analizando la melodía de la parte seleccionada o con una progresión clásica (números romanos). Después, «Acompañamiento» lo toca"
+            value=""
+            onChange={(e) => { const v = e.currentTarget.value; e.currentTarget.value = ""; if (v) { const [mode, prog] = v.split("|"); void doHarmonize(mode === "m", prog || undefined); } }}
+          >
+            <option value="">Armonizar…</option>
+            <option value="M|">Melodía en mayor</option>
+            <option value="m|">Melodía en menor</option>
+            <option value="M|I-IV-V-I">I–IV–V–I</option>
+            <option value="M|I-V-vi-IV">I–V–vi–IV</option>
+            <option value="M|I-vi-IV-V">I–vi–IV–V (años 50)</option>
+            <option value="M|ii-V-I">ii–V–I</option>
+            <option value="M|I-V-vi-iii-IV-I-IV-V">Canon de Pachelbel</option>
+            <option value="M|I7-I7-I7-I7-IV7-IV7-I7-I7-V7-IV7-I7-V7">Blues de 12 compases</option>
+            <option value="m|i-iv-V-i">i–iv–V–i (menor)</option>
+            <option value="m|i-bVII-bVI-V">Cadencia andaluza (menor)</option>
+            <option value="m|i-bVI-bIII-bVII">i–VI–III–VII (menor)</option>
           </select>
           <button onClick={doReview} title="Busca notas fuera de la tesitura del instrumento, voces cruzadas, quintas u octavas paralelas o directas y saltos melódicos de más de una octava">Revisar</button>
         </Show>

@@ -3,6 +3,10 @@
 //! - [`Score::add_accompaniment`] escribe una parte nueva (bajo, acordes o arpegio) a partir del cifrado de acordes.
 //! - [`Score::review`] revisa la partitura y lista lo que suele ser un error: notas fuera de la tesitura del
 //!   instrumento, voces cruzadas, quintas u octavas paralelas o directas entre dos líneas y saltos melódicos muy grandes.
+//! - [`Score::harmonize`] propone un cifrado de acordes para la melodía de una parte (grados de la escala, con
+//!   preferencia por los enlaces típicos y por cerrar en la tónica) y [`Score::set_progression`] escribe una progresión
+//!   con números romanos (`I-V-vi-IV`, `ii-V-I`, `i-bVII-bVI-V`…).
+//! - [`Score::vary_phrase`] sigue la melodía con una variación: modulación (transporte cromático) o inversión.
 //! - [`Score::continue_phrase`] sigue la melodía de una parte repitiendo sus últimos compases como secuencia
 //!   (subiendo o bajando por grados de la escala) y [`Score::end_with_cadence`] la cierra con la tónica.
 
@@ -367,12 +371,45 @@ const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 /// Moves a pitch `steps` degrees along the major scale of `tonic` (a pitch class). A note outside the scale keeps
 /// its distance to the scale note below it.
 fn shift_degrees(midi: i32, tonic: i32, steps: i32) -> i32 {
+    let (d, extra) = degree_index(midi, tonic);
+    from_degree_index(d + steps, tonic) + extra
+}
+
+/// Position of a pitch on the major scale of `tonic` as a running degree number (7 per octave) plus 1 if it is a
+/// chromatic note sitting a semitone above the degree.
+fn degree_index(midi: i32, tonic: i32) -> (i32, i32) {
     let rel = midi - tonic;
     let (base, extra) = if MAJOR.contains(&rel.rem_euclid(12)) { (rel, 0) } else { (rel - 1, 1) };
     let (oct, r) = (base.div_euclid(12), base.rem_euclid(12));
-    let deg = MAJOR.iter().position(|&x| x == r).unwrap_or(0) as i32;
-    let total = oct * 7 + deg + steps;
-    tonic + total.div_euclid(7) * 12 + MAJOR[total.rem_euclid(7) as usize] + extra
+    (oct * 7 + MAJOR.iter().position(|&x| x == r).unwrap_or(0) as i32, extra)
+}
+
+fn from_degree_index(total: i32, tonic: i32) -> i32 {
+    tonic + total.div_euclid(7) * 12 + MAJOR[total.rem_euclid(7) as usize]
+}
+
+/// How [`Score::vary_phrase`] changes the pitches of the repeated measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhraseMove {
+    /// Sequence: `n` degrees of the scale higher (negative: lower).
+    Degrees(i32),
+    /// Modulation: `n` semitones higher (negative: lower), keeping every interval of the phrase.
+    Semitones(i32),
+    /// Mirror inversion along the scale around the first note of the phrase.
+    Invert,
+}
+
+impl PhraseMove {
+    fn apply(self, midi: i32, tonic: i32, pivot: i32) -> i32 {
+        match self {
+            PhraseMove::Degrees(s) => shift_degrees(midi, tonic, s),
+            PhraseMove::Semitones(n) => midi + n,
+            PhraseMove::Invert => {
+                let ((d, extra), (p, _)) = (degree_index(midi, tonic), degree_index(pivot, tonic));
+                from_degree_index(2 * p - d, tonic) + extra
+            }
+        }
+    }
 }
 
 impl Score {
@@ -390,7 +427,13 @@ impl Score {
     /// lower), as a melodic sequence. The measures are appended to every part (the others stay silent there).
     /// Returns the index of the first new measure.
     pub fn continue_phrase(&mut self, part: usize, phrase: usize, steps: i32) -> Result<usize, String> {
-        if phrase == 0 || steps == 0 {
+        self.vary_phrase(part, phrase, PhraseMove::Degrees(steps))
+    }
+
+    /// Like [`Score::continue_phrase`] but with any [`PhraseMove`]: a modulation moves the phrase by semitones (the key
+    /// signature does not change: the new notes carry their accidentals) and an inversion mirrors it along the scale.
+    pub fn vary_phrase(&mut self, part: usize, phrase: usize, how: PhraseMove) -> Result<usize, String> {
+        if phrase == 0 || matches!(how, PhraseMove::Degrees(0) | PhraseMove::Semitones(0)) {
             return Err("La frase y el desplazamiento no pueden ser cero.".into());
         }
         let last = self.last_written_measure(part).ok_or("Esa parte no tiene notas que continuar.")?;
@@ -398,7 +441,20 @@ impl Score {
             return Err(format!("Solo hay {} compás(es) escritos: elige una frase más corta.", last + 1));
         }
         let first = last + 1 - phrase;
-        let (tonic, sharps) = (self.tonic_pc(), self.fifths >= 0);
+        let tonic = self.tonic_pc();
+        let sharps = match how {
+            // spell the new key the way its own signature would
+            PhraseMove::Semitones(n) => [0, 7, 2, 9, 4, 11, 6].contains(&(tonic + n).rem_euclid(12)),
+            _ => self.fifths >= 0,
+        };
+        let pivot = (first..=last)
+            .find_map(|m| {
+                self.parts[part].measures[m].voice(0).into_iter().flatten().find_map(|e| match &e.content {
+                    Content::Note { pitches, .. } => pitches.iter().map(|q| q.midi()).max(),
+                    _ => None,
+                })
+            })
+            .unwrap_or(60);
         let total = self.parts[part].measures.len();
         // the copies keep the original lengths: a different time signature in between is not handled
         let lens: Vec<u32> = (first..=last).map(|m| self.measure_len(m)).collect();
@@ -421,7 +477,7 @@ impl Score {
                 e.text = None;
                 e.strings.clear();
                 if let Content::Note { pitches, tie } = &e.content {
-                    let moved: Vec<Pitch> = pitches.iter().map(|q| Pitch::from_midi(shift_degrees(q.midi(), tonic, steps), sharps)).collect();
+                    let moved: Vec<Pitch> = pitches.iter().map(|q| Pitch::from_midi(how.apply(q.midi(), tonic, pivot), sharps)).collect();
                     if let Some((lo, hi, name)) = range {
                         if moved.iter().any(|q| q.midi() < lo || q.midi() > hi) {
                             return Err(format!("La secuencia saldría de la tesitura de «{}» ({name}): prueba en sentido contrario.", self.parts[part].name));
@@ -473,6 +529,172 @@ impl Score {
         let sharps = self.fifths >= 0;
         self.put_abs(part, abs, len, &[Pitch::from_midi(best, sharps)]).map_err(|e| format!("{e:?}"))?;
         Ok(at)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Harmonization
+
+/// Degrees available when harmonizing: (semitones above the tonic, quality, degree number).
+const MAJOR_DEGREES: [(u8, Quality, u8); 6] = [(0, Quality::Major, 1), (2, Quality::Minor, 2), (4, Quality::Minor, 3), (5, Quality::Major, 4), (7, Quality::Major, 5), (9, Quality::Minor, 6)];
+const MINOR_DEGREES: [(u8, Quality, u8); 7] = [(0, Quality::Minor, 1), (2, Quality::Dim, 2), (3, Quality::Major, 3), (5, Quality::Minor, 4), (7, Quality::Major, 5), (8, Quality::Major, 6), (10, Quality::Major, 7)];
+
+/// Taste for going from degree `a` to degree `b`: the usual functional links score high, retrogressions low.
+fn link(a: u8, b: u8) -> f32 {
+    match (a, b) {
+        _ if a == b => -1.5,
+        (5, 1) => 3.0,
+        (2, 5) => 2.5,
+        (4, 5) => 2.0,
+        (5, 6) | (6, 4) | (6, 2) | (3, 6) | (7, 3) => 1.5,
+        (1, 4) | (1, 6) | (4, 1) | (6, 7) | (7, 1) => 1.0,
+        (1, 5) | (4, 2) => 0.5,
+        (5, 4) | (5, 2) => -1.5,
+        _ => 0.0,
+    }
+}
+
+/// Roman numeral (`I`, `ii`, `bVII`, `V7`, `vii°`…) → (semitones above the tonic, quality). Upper case is major, lower
+/// case minor; a leading `b` or `#` lowers or raises the degree; `7` makes it a seventh chord.
+fn parse_roman(s: &str) -> Option<(i32, Quality)> {
+    let mut t = s;
+    let mut acc = 0;
+    if let Some(r) = t.strip_prefix('b').or_else(|| t.strip_prefix('♭')) {
+        acc = -1;
+        t = r;
+    } else if let Some(r) = t.strip_prefix('#').or_else(|| t.strip_prefix('♯')) {
+        acc = 1;
+        t = r;
+    }
+    let letters: String = t.chars().take_while(|c| matches!(c, 'I' | 'V' | 'i' | 'v')).collect();
+    let deg = match letters.to_uppercase().as_str() {
+        "I" => 0,
+        "II" => 1,
+        "III" => 2,
+        "IV" => 3,
+        "V" => 4,
+        "VI" => 5,
+        "VII" => 6,
+        _ => return None,
+    };
+    let upper = letters.chars().next()?.is_uppercase();
+    let q = match (&t[letters.len()..], upper) {
+        ("", true) => Quality::Major,
+        ("", false) => Quality::Minor,
+        ("7", true) => Quality::Dominant7,
+        ("7", false) => Quality::Minor7,
+        ("maj7", true) | ("Δ", true) => Quality::Major7,
+        ("°", _) | ("dim", _) => Quality::Dim,
+        ("°7", _) | ("dim7", _) => Quality::Dim7,
+        _ => return None,
+    };
+    Some(((MAJOR[deg] + acc).rem_euclid(12), q))
+}
+
+impl Score {
+    /// Tonic of the harmonization: the major tonic of the key signature, or its relative minor.
+    fn mode_tonic(&self, minor: bool) -> i32 {
+        if minor { (self.tonic_pc() + 9) % 12 } else { self.tonic_pc() }
+    }
+
+    /// Stores one chord per measure (consecutive repeats are merged) as the chord symbols of the score, fixed by hand
+    /// so «Actualizar acordes» keeps them.
+    fn set_bar_chords(&mut self, chords: &[(i32, Quality)]) {
+        let mut marks: Vec<ChordMark> = Vec::new();
+        for (m, &(root, quality)) in chords.iter().enumerate() {
+            let root = root.rem_euclid(12) as u8;
+            if marks.last().map_or(false, |l| (l.root, l.quality) == (root, quality)) {
+                continue;
+            }
+            marks.push(ChordMark { measure: m, tick: 0, root, quality, bass: root, manual: true });
+        }
+        self.chords = marks;
+    }
+
+    /// Writes the chord symbols for a progression given as roman numerals separated by hyphens or spaces, one chord per
+    /// measure and repeated to the end of the score. `minor` takes the relative minor of the key signature as tonic
+    /// (write its degrees as in a major key: `i-bVII-bVI-V`). Returns the number of chord symbols written.
+    pub fn set_progression(&mut self, text: &str, minor: bool) -> Result<usize, String> {
+        let cycle: Option<Vec<(i32, Quality)>> = text.split(|c: char| c == '-' || c == '–' || c.is_whitespace()).filter(|w| !w.is_empty()).map(parse_roman).collect();
+        let cycle = cycle.ok_or("No entiendo la progresión: usa números romanos separados por guiones, como I-V-vi-IV o ii-V7-I.")?;
+        if cycle.is_empty() {
+            return Err("La progresión está vacía.".into());
+        }
+        let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+        let tonic = self.mode_tonic(minor);
+        let bars: Vec<(i32, Quality)> = (0..n).map(|m| (tonic + cycle[m % cycle.len()].0, cycle[m % cycle.len()].1)).collect();
+        self.set_bar_chords(&bars);
+        Ok(self.chords.len())
+    }
+
+    /// Proposes chord symbols for the melody of `part`, one chord per measure, chosen among the degrees of the key
+    /// (major, or its relative minor when `minor`). Each bar scores the share of its notes (weighted by length and by
+    /// beat) that belong to the chord, plus a taste for the usual links (V–I, ii–V, IV–V…), for starting on the tonic
+    /// and for closing V–I; the best path is found with dynamic programming. Returns the number of chord symbols.
+    pub fn harmonize(&mut self, part: usize, minor: bool) -> Result<usize, String> {
+        let p = self.parts.get(part).ok_or("La parte no existe.")?;
+        let n = p.measures.len();
+        let mut weights: Vec<[f32; 12]> = vec![[0.0; 12]; n];
+        let mut any = false;
+        for (m, w) in weights.iter_mut().enumerate() {
+            for v in 0..MAX_VOICES {
+                for e in p.measures[m].voice(v).into_iter().flatten() {
+                    if let Content::Note { pitches, .. } = &e.content {
+                        let beat = if e.start == 0 { 2.0 } else if e.start % PPQ == 0 { 1.5 } else { 1.0 };
+                        for q in pitches {
+                            w[q.midi().rem_euclid(12) as usize] += e.ticks as f32 * beat;
+                        }
+                        any = true;
+                    }
+                }
+            }
+        }
+        if !any {
+            return Err("Esa parte no tiene notas que armonizar.".into());
+        }
+        let tonic = self.mode_tonic(minor);
+        let cands: &[(u8, Quality, u8)] = if minor { &MINOR_DEGREES } else { &MAJOR_DEGREES };
+        let fit = |m: usize, c: usize| -> f32 {
+            let total: f32 = weights[m].iter().sum();
+            if total == 0.0 {
+                return 0.0;
+            }
+            let (off, q, num) = cands[c];
+            let root = (tonic + off as i32).rem_euclid(12);
+            let inside: f32 = tones(q).iter().map(|&t| weights[m][(root + t as i32).rem_euclid(12) as usize]).sum();
+            let mut s = (inside - 0.7 * (total - inside)) / total * 4.0;
+            if m == 0 && num == 1 {
+                s += 1.5;
+            }
+            if m + 1 == n {
+                s += match num { 1 => 3.0, 5 => 0.5, _ => 0.0 };
+            }
+            if m + 2 == n && num == 5 {
+                s += 1.0;
+            }
+            s
+        };
+        let mut best: Vec<Vec<f32>> = vec![vec![0.0; cands.len()]; n];
+        let mut from: Vec<Vec<usize>> = vec![vec![0; cands.len()]; n];
+        for c in 0..cands.len() {
+            best[0][c] = fit(0, c);
+        }
+        for m in 1..n {
+            for c in 0..cands.len() {
+                let (prev, score) = (0..cands.len()).map(|q| (q, best[m - 1][q] + link(cands[q].2, cands[c].2))).fold((0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
+                best[m][c] = score + fit(m, c);
+                from[m][c] = prev;
+            }
+        }
+        let mut c = (0..cands.len()).fold(0, |a, b| if best[n - 1][b] > best[n - 1][a] { b } else { a });
+        let mut path = vec![0usize; n];
+        for m in (0..n).rev() {
+            path[m] = c;
+            c = from[m][c];
+        }
+        let bars: Vec<(i32, Quality)> = path.iter().map(|&c| (tonic + cands[c].0 as i32, cands[c].1)).collect();
+        self.set_bar_chords(&bars);
+        Ok(self.chords.len())
     }
 }
 
@@ -656,5 +878,72 @@ mod tests {
         l.put_abs(0, 1440, 480, &[p(60)]).unwrap();
         let issues = l.review();
         assert_eq!(issues.iter().filter(|i| i.kind == "leap").count(), 1, "{issues:?}");
+    }
+
+    #[test]
+    fn a_phrase_can_be_inverted_or_modulated() {
+        // last bar G F E D mirrored around G along C major: G A B C
+        let mut s = two_bars();
+        s.vary_phrase(0, 1, PhraseMove::Invert).unwrap();
+        assert_eq!(pitches_of(&s, 0, 2), vec![67, 69, 71, 72]);
+        // a modulation to the dominant keeps every interval: +7 semitones
+        let mut m = two_bars();
+        m.vary_phrase(0, 1, PhraseMove::Semitones(7)).unwrap();
+        assert_eq!(pitches_of(&m, 0, 2), vec![74, 72, 71, 69]);
+        // down to the relative minor: -3 semitones, with accidentals where the old scale does not reach
+        let mut r = two_bars();
+        r.vary_phrase(0, 2, PhraseMove::Semitones(-3)).unwrap();
+        assert_eq!(pitches_of(&r, 0, 2), vec![57, 59, 61, 62]);
+        assert!(two_bars().vary_phrase(0, 1, PhraseMove::Semitones(0)).is_err());
+    }
+
+    fn roots(s: &Score) -> Vec<(usize, u8, Quality)> {
+        s.chords.iter().map(|c| (c.measure, c.root, c.quality)).collect()
+    }
+
+    #[test]
+    fn a_progression_in_roman_numerals_is_written_bar_by_bar() {
+        // G major (one sharp): I-V-vi-IV = G D Em C, repeated over five bars
+        let mut s = Score::new("p", TimeSig { num: 4, den: 4 }, 1, 5);
+        assert_eq!(s.set_progression("I-V-vi-IV", false).unwrap(), 5);
+        assert_eq!(roots(&s), vec![(0, 7, Quality::Major), (1, 2, Quality::Major), (2, 4, Quality::Minor), (3, 0, Quality::Major), (4, 7, Quality::Major)]);
+        assert!(s.chords.iter().all(|c| c.manual && c.bass == c.root), "fixed by hand, so «Actualizar acordes» keeps them");
+        // A minor (no signature): i-bVII-bVI-V = Am G F E
+        let mut m = Score::new("m", TimeSig { num: 4, den: 4 }, 0, 4);
+        m.set_progression("i-bVII-bVI-V", true).unwrap();
+        assert_eq!(roots(&m), vec![(0, 9, Quality::Minor), (1, 7, Quality::Major), (2, 5, Quality::Major), (3, 4, Quality::Major)]);
+        // sevenths and merged repeats: I7 I7 IV7 -> two symbols
+        let mut b = Score::new("b", TimeSig { num: 4, den: 4 }, 0, 3);
+        assert_eq!(b.set_progression("I7 I7 IV7", false).unwrap(), 2);
+        assert_eq!(b.chords[0].quality, Quality::Dominant7);
+        assert!(b.set_progression("I-X-V", false).is_err());
+        assert!(b.set_progression("  ", false).is_err());
+        // and the accompaniment reads them
+        let pi = b.add_accompaniment(Accompaniment::Bass).unwrap();
+        assert!(pi > 0 || b.parts.len() > 1);
+    }
+
+    #[test]
+    fn a_melody_is_harmonized_with_the_degrees_it_outlines() {
+        let mut s = Score::new("h", TimeSig { num: 4, den: 4 }, 0, 4);
+        let bars: [[i32; 4]; 3] = [[60, 64, 67, 64], [65, 69, 60, 69], [67, 71, 62, 71]];
+        for (m, b) in bars.iter().enumerate() {
+            for (k, n) in b.iter().enumerate() {
+                s.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
+            }
+        }
+        s.put_abs(0, 3 * 1920, 1920, &[p(60)]).unwrap();
+        assert_eq!(s.harmonize(0, false).unwrap(), 4);
+        // C F G C
+        assert_eq!(roots(&s), vec![(0, 0, Quality::Major), (1, 5, Quality::Major), (2, 7, Quality::Major), (3, 0, Quality::Major)]);
+        // an empty part has nothing to harmonize
+        let mut e = Score::new("e", TimeSig { num: 4, den: 4 }, 0, 2);
+        assert!(e.harmonize(0, false).is_err());
+        // a melody that closes on A in A minor ends on the tonic chord
+        let mut a = Score::new("a", TimeSig { num: 4, den: 4 }, 0, 2);
+        a.put_abs(0, 0, 1920, &[p(64)]).unwrap();
+        a.put_abs(0, 1920, 1920, &[p(69)]).unwrap();
+        a.harmonize(0, true).unwrap();
+        assert_eq!(a.chords.last().map(|c| (c.root, c.quality)), Some((9, Quality::Minor)), "{:?}", roots(&a));
     }
 }

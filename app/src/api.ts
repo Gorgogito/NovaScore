@@ -121,7 +121,9 @@ export const api = {
   deletePianoModel: () => invoke<void>("delete_piano_model"),
   addAccompaniment: (style: "bass" | "blocks" | "arpeggio") => invoke<{ score: Score; part: number }>("add_accompaniment", { style }),
   /** `phrase` > 0: secuencia de los últimos compases `steps` grados más arriba/abajo; 0: compás final con la tónica. `part` del resultado = primer compás nuevo. */
-  continuePhrase: (part: number, phrase: number, steps: number) => invoke<{ score: Score; part: number }>("continue_phrase", { part, phrase, steps }),
+  continuePhrase: (part: number, phrase: number, steps: number, kind: "degrees" | "semitones" | "invert" = "degrees") => invoke<{ score: Score; part: number }>("continue_phrase", { part, phrase, steps, kind }),
+  /** Cifrado de acordes: de la melodía de `part` o, con `progression` (números romanos), esa progresión. `part` del resultado = acordes escritos. */
+  harmonize: (part: number, minor: boolean, progression?: string) => invoke<{ score: Score; part: number }>("harmonize", { part, minor, progression: progression ?? null }),
   reviewScore: () => invoke<{ part: number; voice: number; measure: number; tick: number; kind: string; message: string }[]>("review_score"),
   omrStartup: () => invoke<{ state: "none" | "running" | "done"; name?: string; imported?: Imported; error?: string }>("omr_startup"),
   omrStatus: () => invoke<{ found: boolean; path?: string; source?: string }>("omr_status"),

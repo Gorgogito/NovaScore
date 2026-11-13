@@ -6,7 +6,7 @@ Idioma de trabajo con el usuario: **español**. El detalle completo está en `do
 ## Estado en una línea
 Editor funcional y verificado contra MuseScore 4.6: notación completa básica, 4 voces, tuplets, cambios de compás, repeticiones/casillas,
 ligaduras de expresión, reguladores, dinámicas, articulaciones, octavas, pedal, trinos, percusión, mezclador, SoundFont, PDF, MIDI,
-MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **IA local:** audio→partitura, acordes y OMR (Audiveris externo) hechos; asistente simbólico (acompañamiento, continuar frases por secuencia, cadencia y revisión) hecho; OMR probado con Audiveris 5.11 real; no hay modelo generativo. Ver `docs/HANDOFF.md` §7.
+MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **IA local:** audio→partitura, acordes y OMR (Audiveris externo) hechos; asistente simbólico (acompañamiento, armonización de la melodía y progresiones, secuencias con modulación e inversión, cadencia y revisión) hecho; OMR probado con Audiveris 5.11 real; no hay modelo generativo. Ver `docs/HANDOFF.md` §7.
 
 ## Mapa del código (`app/`)
 - `crates/nova-core/` — núcleo en Rust, sin UI. `lib.rs` modelo + edición + undo; `io.rs` sonidos/MIDI/MusicXML; `mscx.rs` lector MuseScore; `mscx_write.rs` escritor MuseScore.
@@ -19,7 +19,7 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **IA local:** audio�
 ## Comandos
 ```
 cd app && npm install && npm run tauri dev          # ejecutar
-cd app/crates/nova-core && cargo test               # 151 tests del núcleo
+cd app/crates/nova-core && cargo test               # 154 tests del núcleo
 cd app/crates/nova-audio && cargo test              # 5 tests; audio→notas (Basic Pitch/ONNX). Ejemplos: audio2notes, audio2score, roundtrip (mide F1 sobre samples/)
 cd app && npx tsc --noEmit                          # tipos del frontend
 cd app && npx tauri build --debug --no-bundle       # exe de depuración (src-tauri/target/debug/novascore.exe)
