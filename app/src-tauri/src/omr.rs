@@ -178,6 +178,41 @@ fn no_window(cmd: &mut std::process::Command) {
     let _ = cmd;
 }
 
+/// Carpeta con los datos de idioma del OCR (`*.traineddata`) para pasársela a Audiveris como `TESSDATA_PREFIX`:
+/// la de NovaScore (`<ajustes>/tessdata`) o la que haya junto a Audiveris. `None` si ya está definida la variable o no hay ninguna.
+fn tessdata_dir(settings_dir: &Path, exe: &Path) -> Option<PathBuf> {
+    if std::env::var_os("TESSDATA_PREFIX").is_some() {
+        return None;
+    }
+    let mut cands = vec![settings_dir.join("tessdata")];
+    for up in exe.ancestors().skip(1).take(3) {
+        cands.push(up.join("tessdata"));
+    }
+    cands.into_iter().find(|d| {
+        std::fs::read_dir(d).map_or(false, |rd| rd.flatten().any(|f| f.path().extension().map_or(false, |e| e == "traineddata")))
+    })
+}
+
+/// Aviso si el registro de Audiveris dice que el OCR no pudo cargar ningún idioma (sin él no lee letra, títulos ni textos).
+fn ocr_problem(out_dir: &Path) -> Option<String> {
+    fn logs(d: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                logs(&p, out);
+            } else if p.extension().map_or(false, |x| x == "log") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    logs(out_dir, &mut files);
+    let bad = files.iter().any(|f| {
+        std::fs::read_to_string(f).map_or(false, |t| t.contains("No installed OCR languages") || t.contains("Could not initialize TessBaseAPI") || t.contains("Missing support for"))
+    });
+    bad.then(|| "El OCR de Audiveris no tiene idiomas instalados (o no se pudieron cargar): no se han leído la letra, los títulos ni los textos. Instala los datos de idioma completos de Tesseract (eng.traineddata, spa.traineddata del repositorio «tessdata») en una carpeta «tessdata» junto a Audiveris o en la carpeta de ajustes de NovaScore, o define TESSDATA_PREFIX.".to_string())
+}
+
 /// Reconoce una partitura impresa: lanza Audiveris sobre `input` y devuelve la partitura importada.
 pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) -> Result<ImportReport, String> {
     if !is_omr_path(input) {
@@ -223,6 +258,9 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
     let log_path = out_dir.join("audiveris-stderr.log");
     if let Ok(f) = std::fs::File::create(&log_path) {
         cmd.stderr(f);
+    }
+    if let Some(d) = tessdata_dir(settings_dir, &exe) {
+        cmd.env("TESSDATA_PREFIX", d);
     }
     no_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| {
@@ -283,6 +321,9 @@ pub fn recognize(settings_dir: &Path, input: &str, exe_override: Option<&Path>) 
             r.score.title = name;
         }
         r.warnings.insert(0, "Reconocimiento óptico (Audiveris): es un borrador, revisa notas, ritmos, alteraciones y letra frente a la partitura original.".into());
+        if let Some(w) = ocr_problem(&out_dir) {
+            r.warnings.push(w);
+        }
         if joined > 1 {
             r.warnings.push(format!("Audiveris separó la obra en {joined} movimientos: se unieron uno tras otro (los cambios de compás se conservan)."));
         }

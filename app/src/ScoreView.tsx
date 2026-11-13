@@ -935,8 +935,8 @@ export function ScoreView(props: Props) {
                                 }}
                               </For>
                               <Show when={m.showTime}>
-                                <text x={m.x + m.headerW - 26} y={top + 2 * SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.num)}</text>
-                                <text x={m.x + m.headerW - 26} y={top + 4 * SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.den)}</text>
+                                <text x={m.x + m.headerW - 26} y={top + SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.num)}</text>
+                                <text x={m.x + m.headerW - 26} y={top + 3 * SP} font-family="Bravura" font-size={FONT} fill="var(--ink)">{timeDigits(m.time.den)}</text>
                               </Show>
                               <Show when={!part.tab_only && props.cursor.part === pi() && props.cursor.m === m.index && !lanes.some((l) => l.voice === props.cursor.voice)}>
                                 <rect x={m.x + m.headerW + 6} y={top - 6} width={16} height={STAFF_H + 12} rx={3} fill="var(--accent)" opacity={0.25} pointer-events="none" />
