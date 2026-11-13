@@ -195,7 +195,7 @@ pub fn sounds(score: &Score) -> Vec<Sound> {
         let part = &score.parts[s.part];
         // Mordents and turns are written out as the notes they play.
         if let (Some(&o), false) = (ornaments.get(&i), part.percussion) {
-            if let Some(notes) = ornament_notes(o, &s, score.fifths) {
+            if let Some(notes) = ornament_notes(o, &s, score.key_at(score.locate(abs).0)) {
                 let mut t = 0;
                 for (midi, len) in notes {
                     result.push(Sound { start: s.start + t, ticks: len, midi, ..s.clone() });
@@ -213,7 +213,7 @@ pub fn sounds(score: &Score) -> Vec<Sound> {
             result.push(s);
             continue;
         }
-        let upper = trill_upper(s.midi, score.fifths);
+        let upper = trill_upper(s.midi, score.key_at(score.locate(abs).0));
         let (mut t, mut up) = (0u32, false);
         while t < s.ticks {
             let len = 60.min(s.ticks - t);
@@ -336,12 +336,17 @@ pub fn export_midi(score: &Score) -> Vec<u8> {
     let measure_starts = score.measure_starts(n_measures);
     let mut sigs: Vec<(u32, TimeSig)> = vec![(0, score.time)];
     sigs.extend(score.time_changes.iter().filter(|c| c.measure < n_measures).map(|c| (measure_starts[c.measure], c.time)));
+    // time and key signatures share the conductor track, in tick order (time first when both start together)
+    let mut metas: Vec<(u32, Vec<u8>)> = sigs.into_iter().map(|(tick, ts)| (tick, vec![0xff, 0x58, 0x04, ts.num as u8, ts.den.max(1).ilog2() as u8, 24, 8])).collect();
+    let mut keys: Vec<(u32, i8)> = vec![(0, score.fifths)];
+    keys.extend(score.key_changes.iter().filter(|c| c.measure < n_measures).map(|c| (measure_starts[c.measure], c.fifths)));
+    metas.extend(keys.into_iter().map(|(tick, f)| (tick, vec![0xff, 0x59, 0x02, f as u8, 0])));
+    metas.sort_by_key(|m| m.0);
     let mut last_tick = 0u32;
-    for (tick, ts) in sigs {
+    for (tick, bytes) in metas {
         vlq(&mut t0, tick - last_tick);
         last_tick = tick;
-        let dd = ts.den.max(1).ilog2() as u8;
-        t0.extend([0xff, 0x58, 0x04, ts.num as u8, dd, 24, 8]);
+        t0.extend(bytes);
     }
     vlq(&mut t0, 0);
     t0.extend([0xff, 0x2f, 0x00]);
@@ -1111,8 +1116,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
     let mut staff_tab: std::collections::HashMap<usize, Vec<u8>> = Default::default();
     let mut staff_tab_only: std::collections::HashSet<usize> = Default::default();
     let mut key_read = false; // the score key comes from the first part
-    let mut key_part: Option<String> = None;
     let mut key_map: std::collections::BTreeMap<usize, i8> = Default::default();
+    let mut key_conflicts: Vec<String> = Vec::new();
     let mut perc_staves: std::collections::BTreeSet<usize> = Default::default();
     // Slurs and hairpins per staff: (voice, kind, start, end).
     let mut staff_sp: Vec<Vec<(usize, SpannerKind, SpPos, SpPos, u8)>> = Vec::new();
@@ -1149,6 +1154,8 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
         let mut part_clef_tr: Option<Transpose> = None;
         // a part whose only staff is a TAB staff is a tablature-only part
         let mut part_tab_only = false;
+        // initial key (concert) this part declares: its later changes count only if it agrees with the score's
+        let mut part_key0: Option<i8> = None;
         // Tablature: open strings of the part, TAB staves (their notes only tell us strings) and the string of each note.
         let mut part_tuning: Option<Vec<u8>> = None;
         let mut tab_staves: std::collections::HashSet<u32> = Default::default();
@@ -1180,13 +1187,17 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
                                 let f = f.clamp(-7, 7) as i8;
                                 // the file gives the written key; the score keeps the concert one
                                 let concert = part_tr.and_then(|t| (-7..=7).find(|&c| t.written_fifths(c) == f)).unwrap_or(f);
-                                if mi == 0 && staves.len() == first_staff_idx && !key_read {
-                                    key_read = true;
-                                    key_part = Some(pid.clone());
-                                    score.fifths = concert;
-                                } else if mi > 0 && key_part.as_deref() == Some(pid.as_str()) {
-                                    // later key changes come from the part that gave the first key
-                                    key_map.insert(mi, concert);
+                                if mi == 0 {
+                                    part_key0.get_or_insert(concert);
+                                    if staves.len() == first_staff_idx && !key_read {
+                                        key_read = true;
+                                        score.fifths = concert;
+                                    }
+                                } else if part_key0.map_or(true, |k0| k0 == score.fifths) {
+                                    // the first part to give a change at a measure wins
+                                    key_map.entry(mi).or_insert(concert);
+                                } else if !key_conflicts.contains(&pname) {
+                                    key_conflicts.push(pname.clone());
                                 }
                             }
                         }
@@ -1672,6 +1683,9 @@ pub fn import_musicxml(text: &str) -> Result<ImportReport, String> {
             prev_key = f;
         }
     }
+    if !key_conflicts.is_empty() {
+        warnings.push(format!("Las partes {} declaran otra tonalidad inicial que la primera: se ignoraron sus cambios de armadura.", key_conflicts.join(", ")));
+    }
     harmony_chords.sort_by_key(|c| (c.measure, c.tick));
     harmony_chords.dedup_by_key(|c| (c.measure, c.tick));
     score.chords = harmony_chords;
@@ -1794,6 +1808,7 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
     score.parts.clear();
     let (mut got_tempo, mut got_key) = (false, false);
     let mut ts_events: Vec<(u32, TimeSig)> = Vec::new();
+    let mut key_events: Vec<(u32, i8)> = Vec::new();
 
     struct Stream {
         name: String,
@@ -1825,9 +1840,13 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
                         ts_events.push((scale(t), TimeSig { num: n as u32, den }));
                     }
                 }
-                TrackEventKind::Meta(MetaMessage::KeySignature(sf, _)) if !got_key => {
-                    score.fifths = sf.clamp(-7, 7);
-                    got_key = true;
+                TrackEventKind::Meta(MetaMessage::KeySignature(sf, _)) => {
+                    if !got_key {
+                        score.fifths = sf.clamp(-7, 7);
+                        got_key = true;
+                    } else {
+                        key_events.push((scale(t), sf.clamp(-7, 7)));
+                    }
                 }
                 TrackEventKind::Midi { channel, message } => {
                     let ch = channel.as_int();
@@ -1902,7 +1921,29 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
     if misaligned > 0 {
         warnings.push(format!("{misaligned} cambio(s) de compás no coinciden con una barra de compás y se ignoraron."));
     }
-    let sharps = score.fifths >= 0;
+    // Key changes: they apply from the barline at or after their tick (a change in mid-bar cannot be written).
+    key_events.sort_by_key(|e| e.0);
+    key_events.dedup();
+    let (mut cur_key, mut mid_bar) = (score.fifths, 0usize);
+    for &(tick, f) in &key_events {
+        if f == cur_key {
+            continue;
+        }
+        let (m, off) = score.locate(tick);
+        let m = if off == 0 {
+            m
+        } else {
+            mid_bar += 1;
+            m + 1
+        };
+        if m > 0 {
+            score.set_key_at(m, f);
+            cur_key = f;
+        }
+    }
+    if mid_bar > 0 {
+        warnings.push(format!("{mid_bar} cambio(s) de tonalidad caen a mitad de compás y se pasaron al compás siguiente."));
+    }
     let q = |t: u32| ((t + GRID / 2) / GRID) * GRID;
     let mlen = score.time.measure_ticks();
     let limit = MAX_MEASURES * mlen;
@@ -1938,6 +1979,7 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
                 if let Some(next) = starts.get(i + 1) {
                     dur = dur.min(next - st);
                 }
+                let sharps = score.key_at(score.locate(*st).0) >= 0;
                 let pitches: Vec<Pitch> = group.iter().map(|g| Pitch::from_midi(g.0 as i32, sharps)).collect();
                 score.put_abs(pi, *st, dur.max(GRID), &pitches).map_err(|e| e.to_string())?;
             }
@@ -1994,7 +2036,7 @@ pub fn import_midi(bytes: &[u8]) -> Result<ImportReport, String> {
             part.percussion = false;
             score.parts.push(part);
             let pi = score.parts.len() - 1;
-            dropped |= crate::quantize::place_staff(&mut score, pi, staff_notes, 4, GRID, false, &tuplets, sharps);
+            dropped |= crate::quantize::place_staff(&mut score, pi, staff_notes, 4, GRID, false, &tuplets);
             voice_extra += score.parts[pi].measures.iter().map(|m| m.voices.iter().filter(|v| !v.is_empty()).count()).max().unwrap_or(0);
         }
     }
@@ -2208,6 +2250,45 @@ mod tests {
         assert!(xml.contains("<fifths>4</fifths>") && xml.contains("<fifths>-1</fifths>"), "{xml}");
         let back = import_musicxml(&xml).unwrap().score;
         assert_eq!((back.fifths, back.key_changes.clone()), (0, vec![KeyChange { measure: 2, fifths: 2 }, KeyChange { measure: 3, fifths: -3 }]));
+    }
+
+    #[test]
+    fn key_changes_survive_midi_and_set_the_spelling() {
+        let mut s = Score::new("k", TimeSig { num: 4, den: 4 }, 0, 4);
+        s.set_key_at(2, -3);
+        for m in 0..4 {
+            s.put_note(0, 0, m, 0, 1920, vec![Pitch::from_midi(70, m < 2)]).unwrap();
+        }
+        let back = import_midi(&export_midi(&s)).unwrap().score;
+        assert_eq!((back.fifths, back.key_changes.clone()), (0, vec![KeyChange { measure: 2, fifths: -3 }]));
+        let first = |m: usize| match &back.parts[0].measures[m].events[0].content {
+            Content::Note { pitches, .. } => (pitches[0].step, pitches[0].alter),
+            _ => panic!("not a note"),
+        };
+        assert_eq!(first(0), (5, 1), "A sharp in C major");
+        assert_eq!(first(3), (6, -1), "B flat once the key has three flats");
+    }
+
+    #[test]
+    fn key_changes_come_from_any_part_when_the_first_has_none() {
+        let part = |id: &str, name: &str, key0: i32, key1: Option<i32>| {
+            let attr = key1.map_or(String::new(), |k| format!("<attributes><key><fifths>{k}</fifths></key></attributes>"));
+            format!(
+                "<part id=\"{id}\"><measure number=\"1\"><attributes><divisions>1</divisions><key><fifths>{key0}</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note></measure><measure number=\"2\">{attr}<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration><type>whole</type></note></measure></part><!--{name}-->"
+            )
+        };
+        let wrap = |a: String, b: String| format!("<score-partwise version=\"3.1\"><part-list><score-part id=\"P1\"><part-name>Uno</part-name></score-part><score-part id=\"P2\"><part-name>Dos</part-name></score-part></part-list>{a}{b}</score-partwise>");
+        // only the second part writes the change
+        let r = import_musicxml(&wrap(part("P1", "uno", 0, None), part("P2", "dos", 0, Some(2)))).unwrap();
+        assert_eq!(r.score.key_changes, vec![KeyChange { measure: 1, fifths: 2 }]);
+        assert!(!r.warnings.iter().any(|w| w.contains("tonalidad")));
+        // the first one to write a change wins
+        let r = import_musicxml(&wrap(part("P1", "uno", 0, Some(1)), part("P2", "dos", 0, Some(2)))).unwrap();
+        assert_eq!(r.score.key_changes, vec![KeyChange { measure: 1, fifths: 1 }]);
+        // a part that starts in another key is not trusted, and the file says so
+        let r = import_musicxml(&wrap(part("P1", "uno", 0, None), part("P2", "dos", 3, Some(4)))).unwrap();
+        assert!(r.score.key_changes.is_empty());
+        assert!(r.warnings.iter().any(|w| w.contains("Dos") && w.contains("tonalidad")), "{:?}", r.warnings);
     }
 
     #[test]
@@ -2787,6 +2868,29 @@ mod tests {
         let back = import_musicxml(&xml).unwrap().score;
         let arts = |s: &Score| s.parts[0].measures.iter().flat_map(|m| m.events.iter().map(|e| e.articulations.clone())).collect::<Vec<_>>();
         assert_eq!(arts(&back), arts(&s));
+    }
+
+    #[test]
+    fn ornaments_and_trills_follow_the_key_of_their_measure() {
+        // E5 with an upper mordent: F in C major, F sharp once the key changes to G major
+        let mut s = Score::new("k", TimeSig { num: 4, den: 4 }, 0, 2);
+        s.set_key_at(1, 1);
+        for m in 0..2 {
+            s.put_note(0, 0, m, 0, 480, vec![p(2, 0, 5)]).unwrap();
+            s.toggle_articulation(0, 0, SpPos { measure: m, tick: 0 }, SpPos { measure: m, tick: 0 }, Artic::ShortTrill).unwrap();
+        }
+        // and a trill over a whole note in each bar
+        s.put_note(0, 0, 0, 480, 1440, vec![p(2, 0, 5)]).unwrap();
+        s.put_note(0, 0, 1, 480, 1440, vec![p(2, 0, 5)]).unwrap();
+        for m in 0..2 {
+            s.parts[0].spanners.push(Spanner { kind: SpannerKind::Trill, voice: 0, start: SpPos { measure: m, tick: 480 }, end: SpPos { measure: m, tick: 1920 }, endings: 0 });
+        }
+        let snd = sounds(&s);
+        let notes = |from: u32, to: u32| snd.iter().filter(|x| x.start >= from && x.start < to).map(|x| x.midi).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(notes(0, 480), [76, 77].into_iter().collect(), "C major: F above");
+        assert_eq!(notes(1920, 2400), [76, 78].into_iter().collect(), "G major: F sharp above");
+        assert_eq!(notes(480, 1920), [76, 77].into_iter().collect());
+        assert_eq!(notes(2400, 3840), [76, 78].into_iter().collect());
     }
 
     #[test]

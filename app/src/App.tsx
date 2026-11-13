@@ -756,10 +756,10 @@ export default function App() {
   const doHarmonize = async (minor: boolean, progression?: string) => {
     const perBar = chordsPerBar();
     try {
-      const r = await api.harmonize(cursor().part, minor, progression, perBar, sevenths());
+      const r = await api.harmonize(cursor().part, minor, progression, perBar, { sevenths: sevenths(), inversions: inversions(), secondary: secondary() });
       apply(r.score, true);
       setDirty(true);
-      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, ${perBar === 2 ? "hasta dos por compás (se parte el compás solo donde la música se mueve en su segunda mitad; los compases de 3 tiempos no se parten)" : "uno por compás"}. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
+      setStatus(`${progression ? `Progresión ${progression}` : `Armonización de la melodía (${minor ? "menor" : "mayor"})`}: ${r.part} símbolo${r.part > 1 ? "s" : ""} de acorde, ${perBar === 4 ? "hasta uno por pulso (un pulso sin nota nueva se une al anterior)" : perBar === 2 ? "hasta dos por compás (se parte el compás solo donde la música se mueve en su segunda mitad; los compases de 3 tiempos no se parten)" : "uno por compás"}. Pide «Acompañamiento» para tocarlos; Ctrl+Z los quita.`);
     } catch (e) {
       setStatus(String(e));
     }
@@ -767,6 +767,8 @@ export default function App() {
   /** Armonizar: acordes por compás (1 o 2). */
   const [chordsPerBar, setChordsPerBar] = createSignal(1);
   const [sevenths, setSevenths] = createSignal(false);
+  const [inversions, setInversions] = createSignal(false);
+  const [secondary, setSecondary] = createSignal(false);
   const doReview = async () => {
     const list = await api.reviewScore();
     if (!list.length) {
@@ -917,6 +919,17 @@ export default function App() {
     else if (inputMode() && k in LETTER_STEP) await enter(pitchFor(LETTER_STEP[k], pendingAlter()));
   };
 
+  /** Transponer: toda la pieza o desde el compás del cursor hasta el final, con armadura y cifrado. */
+  const [transposeScope, setTransposeScope] = createSignal<"all" | "from">("all");
+  const doTransposeRange = async (semi: number) => {
+    const s = score()!;
+    const last = Math.max(...s.parts.map((p) => p.measures.length)) - 1;
+    const from = transposeScope() === "all" ? 0 : cursor().m;
+    if (await run(api.transposeRange(from, last, semi))) {
+      const f = keyAt(score()!, last);
+      setStatus(`Transpuesto ${semi > 0 ? "+" : ""}${semi} semitono${Math.abs(semi) > 1 ? "s" : ""} ${from === 0 ? "en toda la pieza" : `desde el compás ${from + 1}`}: armadura y cifrado incluidos (tonalidad final ${KEY_NAMES[f + 7] ?? f}). Ctrl+Z lo deshace.`);
+    }
+  };
   const transpose = async (semi: number) => {
     const c = cursor();
     const ev = voiceEvents(score()!.parts[c.part].measures[c.m], c.voice)?.find((x) => x.start === c.start);
@@ -988,11 +1001,14 @@ export default function App() {
           <select class="assist-select" title="Cuántos acordes escribe «Armonizar…» por compás. Con dos, el compás solo se parte donde la melodía se mueve en su segunda mitad (3/4 nunca se parte)" value={String(chordsPerBar())} onChange={(e) => setChordsPerBar(Number(e.currentTarget.value))}>
             <option value="1">1 acorde/compás</option>
             <option value="2">2 acordes/compás</option>
+            <option value="4">1 acorde/pulso</option>
           </select>
           <select class="assist-select" title="«Armonizar…» con tríadas, o también con séptimas: la de dominante (V7) se favorece y las demás salen cuando la melodía tiene su séptima; el primer y el último acorde siguen siendo tríadas. No afecta a las progresiones, que llevan lo que escribas (V7, ii7…)" value={sevenths() ? "7" : "3"} onChange={(e) => setSevenths(e.currentTarget.value === "7")}>
             <option value="3">Tríadas</option>
             <option value="7">Con séptimas</option>
           </select>
+          <label class="field" title="«Armonizar…» puede usar primeras inversiones cuando hacen que el bajo se mueva por grados conjuntos (nunca en el primer ni el último acorde)"><input type="checkbox" checked={inversions()} onChange={(e) => setInversions(e.currentTarget.checked)} /> Inversiones</label>
+          <label class="field" title="«Armonizar…» puede usar dominantes de otros grados (V/vi, V/V…) donde la melodía tiene su sensible; siempre resuelven al grado que anuncian"><input type="checkbox" checked={secondary()} onChange={(e) => setSecondary(e.currentTarget.checked)} /> Dom. secundarias</label>
           <select
             class="assist-select"
             title="Asistente: escribe el cifrado de acordes, un acorde por compás, analizando la melodía de la parte seleccionada o con una progresión clásica (números romanos). Después, «Acompañamiento» lo toca"
@@ -1076,6 +1092,30 @@ export default function App() {
         <button onClick={() => addSpanner("crescendo")} title="Crescendo (<)">&lt; Cresc.</button>
         <button onClick={() => addSpanner("decrescendo")} title="Decrescendo (>)">&gt; Dim.</button>
         <button onClick={removeSpanners} title="Quitar ligaduras de expresión y reguladores de la selección">Quitar expresión</button>
+        <select class="assist-select" title="Qué transpone «Transponer…»: toda la pieza, o desde el compás del cursor hasta el final (la armadura vuelve a cambiar en ese compás)" value={transposeScope()} onChange={(e) => setTransposeScope(e.currentTarget.value as "all" | "from")}>
+          <option value="all">Toda la pieza</option>
+          <option value="from">Desde el compás del cursor</option>
+        </select>
+        <select
+          class="assist-select"
+          title="Transpone todas las partes con altura, con su armadura (la más cercana a la nueva tónica) y el cifrado de acordes. Las notas se escriben con la armadura nueva; las cuerdas fijadas en la tablatura se sueltan"
+          value=""
+          onChange={(e) => { const v = Number(e.currentTarget.value); e.currentTarget.value = ""; if (v) void doTransposeRange(v); }}
+        >
+          <option value="">Transponer…</option>
+          <option value="1">+1 semitono</option>
+          <option value="2">+2 (un tono)</option>
+          <option value="3">+3 (tercera menor)</option>
+          <option value="5">+5 (cuarta)</option>
+          <option value="7">+7 (quinta)</option>
+          <option value="12">+12 (octava)</option>
+          <option value="-1">−1 semitono</option>
+          <option value="-2">−2 (un tono)</option>
+          <option value="-3">−3 (tercera menor)</option>
+          <option value="-5">−5 (cuarta)</option>
+          <option value="-7">−7 (quinta)</option>
+          <option value="-12">−12 (octava)</option>
+        </select>
         <button onClick={() => transpose(1)} title="↑">Semitono ↑</button>
         <button onClick={() => transpose(-1)} title="↓">Semitono ↓</button>
         <button onClick={() => run(api.deleteEvent(cursor().part, cursor().voice, cursor().m, cursor().start))} title="Supr">Borrar</button>

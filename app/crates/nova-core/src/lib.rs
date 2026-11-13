@@ -1152,6 +1152,57 @@ impl Score {
         }
     }
 
+    /// Transposes every pitched part from measure `from` to `to` (inclusive) by `semitones`, together with the key
+    /// signature (the nearest one to the new tonic, so the notes keep their place in the scale) and the chord symbols.
+    /// Notes are spelled with the key of their measure. Refuses a transposition that leaves the MIDI range; strings
+    /// pinned on tablature and per-note extras of MuseScore are dropped, as when a single note is moved.
+    pub fn transpose_range(&mut self, from: usize, to: usize, semitones: i32) -> Result<(), EditError> {
+        let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
+        if semitones == 0 || from >= n || from > to {
+            return Err(EditError::OutOfRange);
+        }
+        let to = to.min(n - 1);
+        let mut keys: Vec<i8> = (0..n).map(|m| self.key_at(m)).collect();
+        for k in keys.iter_mut().take(to + 1).skip(from) {
+            let tonic = (*k as i32 * 7).rem_euclid(12);
+            *k = assist::fifths_of_pc(tonic + semitones);
+        }
+        let in_range = |p: &Part| {
+            !p.percussion
+                && p.measures.iter().enumerate().skip(from).take(to + 1 - from).all(|(_, me)| {
+                    me.events.iter().chain(me.voices.iter().flatten()).all(|e| match &e.content {
+                        Content::Note { pitches, .. } => pitches.iter().all(|q| (0..=127).contains(&(q.midi() + semitones))),
+                        _ => true,
+                    })
+                })
+        };
+        if self.parts.iter().any(|p| !p.percussion && !in_range(p)) {
+            return Err(EditError::OutOfRange);
+        }
+        for p in self.parts.iter_mut().filter(|p| !p.percussion) {
+            for m in from..=to.min(p.measures.len().saturating_sub(1)) {
+                let sharps = keys[m] >= 0;
+                let me = &mut p.measures[m];
+                for e in me.events.iter_mut().chain(me.voices.iter_mut().flatten()) {
+                    if let Content::Note { pitches, .. } = &mut e.content {
+                        for q in pitches.iter_mut() {
+                            *q = Pitch::from_midi(q.midi() + semitones, sharps);
+                        }
+                        e.extras.retain(|x| !matches!(x.place, ExtraPlace::Note(_)));
+                        e.strings.clear();
+                    }
+                }
+            }
+        }
+        for c in self.chords.iter_mut().filter(|c| c.measure >= from && c.measure <= to) {
+            c.root = (c.root as i32 + semitones).rem_euclid(12) as u8;
+            c.bass = (c.bass as i32 + semitones).rem_euclid(12) as u8;
+        }
+        self.fifths = keys[0];
+        self.key_changes = (1..n).filter(|&m| keys[m] != keys[m - 1]).map(|m| KeyChange { measure: m, fifths: keys[m] }).collect();
+        Ok(())
+    }
+
     pub fn transpose_event(&mut self, part: usize, voice: usize, m: usize, start: u32, semitones: i32) -> Result<(), EditError> {
         let sharps = if semitones != 0 { semitones > 0 } else { self.key_at(m) >= 0 };
         let events = self.voice_events_mut(part, voice, m)?;
@@ -2448,6 +2499,42 @@ mod tests {
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Score>(&j).unwrap().parts[0].spanners, s.parts[0].spanners);
         assert!(!serde_json::to_string(&score()).unwrap().contains("spanners"));
+    }
+
+    #[test]
+    fn transposing_a_range_moves_notes_chords_and_the_key() {
+        let mk = || {
+            let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 3);
+            for m in 0..3 {
+                s.put_note(0, 0, m, 0, 960, vec![Pitch::from_midi(60, true)]).unwrap();
+                s.put_note(0, 0, m, 960, 960, vec![Pitch::from_midi(64, true)]).unwrap();
+            }
+            s.chords = vec![chords::ChordMark { measure: 1, tick: 0, root: 0, quality: chords::Quality::Major, bass: 0, manual: true }];
+            s
+        };
+        let notes = |s: &Score, m: usize| s.parts[0].measures[m].events.iter().filter_map(|e| if let Content::Note { pitches, .. } = &e.content { Some((pitches[0].midi(), pitches[0].step, pitches[0].alter)) } else { None }).collect::<Vec<_>>();
+        // the whole piece a tone up: C major -> D major, C E -> D F sharp
+        let mut s = mk();
+        s.transpose_range(0, usize::MAX, 2).unwrap();
+        assert_eq!((s.fifths, s.key_changes.is_empty()), (2, true));
+        assert_eq!(notes(&s, 2), vec![(62, 1, 0), (66, 3, 1)]);
+        assert_eq!((s.chords[0].root, s.chords[0].quality), (2, chords::Quality::Major));
+        // a semitone up lands on D flat major (five flats): spelled with flats, not sharps
+        let mut f = mk();
+        f.transpose_range(0, usize::MAX, 1).unwrap();
+        assert_eq!(f.fifths, -5);
+        assert_eq!(notes(&f, 0), vec![(61, 1, -1), (65, 3, 0)]);
+        // a range: only the middle measure moves, with its own key, and the key comes back after it
+        let mut r = mk();
+        r.transpose_range(1, 1, 7).unwrap();
+        assert_eq!((r.key_at(0), r.key_at(1), r.key_at(2)), (0, 1, 0));
+        assert_eq!(notes(&r, 0), vec![(60, 0, 0), (64, 2, 0)]);
+        assert_eq!(notes(&r, 1), vec![(67, 4, 0), (71, 6, 0)]);
+        assert_eq!(r.chords[0].root, 7);
+        // undoing it is the opposite move; leaving the MIDI range or an empty range is refused
+        r.transpose_range(1, 1, -7).unwrap();
+        assert!(r.key_changes.is_empty() && notes(&r, 1) == notes(&mk(), 1));
+        assert!(mk().transpose_range(0, 2, 70).is_err() && mk().transpose_range(5, 6, 1).is_err() && mk().transpose_range(0, 2, 0).is_err());
     }
 
     #[test]

@@ -369,7 +369,7 @@ impl Score {
 const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 
 /// Key signature (sharps positive, flats negative, at most six of either) whose major tonic is the pitch class `pc`.
-fn fifths_of_pc(pc: i32) -> i8 {
+pub(crate) fn fifths_of_pc(pc: i32) -> i8 {
     let f = (pc.rem_euclid(12) * 7).rem_euclid(12) as i8;
     if f > 6 { f - 12 } else { f }
 }
@@ -392,6 +392,32 @@ fn degree_index(midi: i32, tonic: i32) -> (i32, i32) {
 
 fn from_degree_index(total: i32, tonic: i32) -> i32 {
     tonic + total.div_euclid(7) * 12 + MAJOR[total.rem_euclid(7) as usize]
+}
+
+/// Quality of the chord on degree `deg` (0 = I) of a major key: the triad, or the seventh chord when `old` was one.
+/// The seventh on VII is written as a plain diminished chord (there is no half-diminished quality).
+fn diatonic_quality(deg: usize, old: Quality) -> Quality {
+    let seventh = matches!(old, Quality::Dominant7 | Quality::Major7 | Quality::Minor7 | Quality::Dim7);
+    const TRIADS: [Quality; 7] = [Quality::Major, Quality::Minor, Quality::Minor, Quality::Major, Quality::Major, Quality::Minor, Quality::Dim];
+    const SEVENTHS: [Quality; 7] = [Quality::Major7, Quality::Minor7, Quality::Minor7, Quality::Major7, Quality::Dominant7, Quality::Minor7, Quality::Dim];
+    if seventh { SEVENTHS[deg % 7] } else { TRIADS[deg % 7] }
+}
+
+/// The chord symbol after the same move as the notes. A transposition keeps the quality; a move along the scale
+/// (sequence or inversion) gives a chord of the key the quality of its new degree, unless the old chord was not the
+/// one of its degree (borrowed or altered chords keep theirs). Position is left as it was.
+fn move_chord(how: PhraseMove, c: &ChordMark, tonic: i32, pivot: i32) -> ChordMark {
+    let root_midi = pivot - (pivot - c.root as i32).rem_euclid(12);
+    let moved = how.apply(root_midi, tonic, pivot);
+    let root = moved.rem_euclid(12) as u8;
+    let ((old, old_extra), (new, new_extra)) = (degree_index(root_midi, tonic), degree_index(moved, tonic));
+    let quality = match how {
+        PhraseMove::Semitones(_) => c.quality,
+        _ if old_extra == 0 && new_extra == 0 && diatonic_quality(old.rem_euclid(7) as usize, c.quality) == c.quality => diatonic_quality(new.rem_euclid(7) as usize, c.quality),
+        _ => c.quality,
+    };
+    let bass = (root as i32 + (c.bass as i32 - c.root as i32)).rem_euclid(12) as u8;
+    ChordMark { root, quality, bass, ..*c }
 }
 
 /// How [`Score::vary_phrase`] changes the pitches of the repeated measures.
@@ -508,12 +534,21 @@ impl Score {
                 Spanner { start: SpPos { measure: s.start.measure + shift, tick: s.start.tick }, end: SpPos { measure: s.end.measure + shift, tick: s.end.tick }, ..*s }
             })
             .collect();
+        // the chord symbols of the phrase travel with it
+        let moved_chords: Vec<ChordMark> = self
+            .chords
+            .iter()
+            .filter(|c| c.measure >= first && c.measure <= last)
+            .map(|c| ChordMark { measure: c.measure + (new_start - first), ..move_chord(how, c, tonic, pivot) })
+            .collect();
         self.add_measures(phrase);
         let p = &mut self.parts[part];
         for (i, c) in copies.into_iter().enumerate() {
             p.measures[new_start + i] = c;
         }
         p.spanners.extend(moved_spanners);
+        self.chords.extend(moved_chords);
+        self.chords.sort_by_key(|c| (c.measure, c.tick));
         if let Some(f) = new_key {
             self.set_key_at(new_start, f);
         }
@@ -547,6 +582,40 @@ impl Score {
 
 // ---------------------------------------------------------------------------------------------------------------
 // Harmonization
+
+/// What [`Score::harmonize`] may use besides plain triads in root position.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HarmonyOptions {
+    /// Seventh chords (the dominant seventh favoured; first and last chord stay triads).
+    pub sevenths: bool,
+    /// First inversions when they make the bass line move by smaller steps.
+    pub inversions: bool,
+    /// Dominants of the other degrees (V/ii, V/IV, V/V, V/vi…), when the melody has the note that calls for them.
+    pub secondary: bool,
+}
+
+/// One chord the harmonizer can choose: degree offset, quality, degree number (0 for a secondary dominant), whether it
+/// is a seventh chord and, for a secondary dominant, the degree number it leads to.
+#[derive(Clone, Copy)]
+struct Cand {
+    off: u8,
+    q: Quality,
+    num: u8,
+    sev: bool,
+    sec: Option<u8>,
+}
+
+/// Taste for going from `a` to `b` when they are not the same degree twice.
+fn cand_link(a: Cand, b: Cand) -> f32 {
+    if let Some(t) = a.sec {
+        // a secondary dominant must resolve to the degree it announces
+        return if b.sec.is_none() && b.num == t { 2.5 } else { -1.5 };
+    }
+    if b.sec.is_some() {
+        return 0.0;
+    }
+    link(a.num, b.num) + if a.sev && a.num == 5 && b.num == 1 { 0.5 } else { 0.0 }
+}
 
 /// Degrees available when harmonizing: (semitones above the tonic, quality, degree number).
 const MAJOR_DEGREES: [(u8, Quality, u8); 6] = [(0, Quality::Major, 1), (2, Quality::Minor, 2), (4, Quality::Minor, 3), (5, Quality::Major, 4), (7, Quality::Major, 5), (9, Quality::Minor, 6)];
@@ -610,21 +679,39 @@ impl Score {
         if minor { (self.tonic_at(m) + 9) % 12 } else { self.tonic_at(m) }
     }
 
-    /// Places where a chord can start: one per measure or, with `per_bar` = 2, one per half bar (4/4, 2/4, 2/2 and the
-    /// compound meters 6/8, 12/8…; a 3/4 bar is never split). With `part`, a bar is split only when a note of that part
-    /// starts in its second half, so a held note keeps a single chord. Each item is `(measure, tick, length)`.
+    /// Places where a chord can start: one per measure (`per_bar` = 1), one per half bar (2: 4/4, 2/4, 2/2 and the
+    /// compound meters 6/8, 12/8…; a 3/4 bar is never split) or one per beat (4: quarter beats, half-note beats in
+    /// x/2, dotted-quarter beats in 6/8, 9/8 and 12/8). With `part`, a bar is split only where a note of that part
+    /// starts, so a held note keeps a single chord (for half bars: when a note starts in the second half; for beats:
+    /// a beat without a note starting in it joins the previous one). Each item is `(measure, tick, length)`.
     fn chord_units(&self, per_bar: u8, part: Option<usize>) -> Vec<(usize, u32, u32)> {
         let n = self.parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
         let mut out = Vec::new();
         for m in 0..n {
             let len = self.measure_len(m);
             let t = self.time_at(m);
+            // does a note of the part start in [a, b) of this measure?
+            let onset = |pi: usize, a: u32, b: u32| {
+                self.parts[pi].measures.get(m).map_or(false, |me| (0..MAX_VOICES).any(|v| me.voice(v).into_iter().flatten().any(|e| matches!(e.content, Content::Note { .. }) && e.start >= a && e.start < b)))
+            };
+            let beat = match (t.den, t.num) {
+                (4, _) => Some(PPQ),
+                (2, _) => Some(2 * PPQ),
+                (8, k) if k >= 6 && k % 3 == 0 => Some(3 * PPQ / 2),
+                _ => None,
+            };
+            if per_bar >= 4 {
+                if let Some(bl) = beat.filter(|&bl| len % bl == 0) {
+                    let starts: Vec<u32> = (0..len / bl).map(|k| k * bl).filter(|&b0| b0 == 0 || part.map_or(true, |pi| onset(pi, b0, b0 + bl))).collect();
+                    for (i, &b0) in starts.iter().enumerate() {
+                        out.push((m, b0, starts.get(i + 1).copied().unwrap_or(len) - b0));
+                    }
+                    continue;
+                }
+            }
             let half = len / 2;
             let splittable = per_bar >= 2 && len % 2 == 0 && (half % PPQ == 0 || (t.den == 8 && t.num % 6 == 0));
-            let moves = |pi: usize| {
-                self.parts[pi].measures.get(m).map_or(false, |me| (0..MAX_VOICES).any(|v| me.voice(v).into_iter().flatten().any(|e| matches!(e.content, Content::Note { .. }) && e.start >= half)))
-            };
-            if splittable && part.map_or(true, moves) {
+            if splittable && part.map_or(true, |pi| onset(pi, half, len)) {
                 out.push((m, 0, half));
                 out.push((m, half, len - half));
             } else {
@@ -634,24 +721,24 @@ impl Score {
         out
     }
 
-    /// Stores the chords of `units` (merging consecutive repeats) as the chord symbols of the score, fixed by hand so
-    /// «Actualizar acordes» keeps them.
-    fn set_unit_chords(&mut self, units: &[(usize, u32, u32)], chords: &[(i32, Quality)]) {
+    /// Stores the chords `(root, quality, bass)` of `units` (merging consecutive repeats) as the chord symbols of the
+    /// score, fixed by hand so «Actualizar acordes» keeps them.
+    fn set_unit_chords(&mut self, units: &[(usize, u32, u32)], chords: &[(i32, Quality, i32)]) {
         let mut marks: Vec<ChordMark> = Vec::new();
-        for (&(measure, tick, _), &(root, quality)) in units.iter().zip(chords) {
-            let root = root.rem_euclid(12) as u8;
-            if marks.last().map_or(false, |l| (l.root, l.quality) == (root, quality)) {
+        for (&(measure, tick, _), &(root, quality, bass)) in units.iter().zip(chords) {
+            let (root, bass) = (root.rem_euclid(12) as u8, bass.rem_euclid(12) as u8);
+            if marks.last().map_or(false, |l| (l.root, l.quality, l.bass) == (root, quality, bass)) {
                 continue;
             }
-            marks.push(ChordMark { measure, tick, root, quality, bass: root, manual: true });
+            marks.push(ChordMark { measure, tick, root, quality, bass, manual: true });
         }
         self.chords = marks;
     }
 
     /// Writes the chord symbols for a progression given as roman numerals separated by hyphens or spaces, one chord per
-    /// measure (`per_bar` = 1) or per half bar (2) and repeated to the end of the score. `minor` takes the relative
-    /// minor of the key signature as tonic (write its degrees as in a major key: `i-bVII-bVI-V`). Returns the number of
-    /// chord symbols written.
+    /// unit of [`Score::chord_units`] (`per_bar` 1, 2 or 4) and repeated to the end of the score. `minor` takes the
+    /// relative minor of the key signature as tonic (write its degrees as in a major key: `i-bVII-bVI-V`). Returns the
+    /// number of chord symbols written.
     pub fn set_progression(&mut self, text: &str, minor: bool, per_bar: u8) -> Result<usize, String> {
         let cycle: Option<Vec<(i32, Quality)>> = text.split(|c: char| c == '-' || c == '–' || c.is_whitespace()).filter(|w| !w.is_empty()).map(parse_roman).collect();
         let cycle = cycle.ok_or("No entiendo la progresión: usa números romanos separados por guiones, como I-V-vi-IV o ii-V7-I.")?;
@@ -659,19 +746,27 @@ impl Score {
             return Err("La progresión está vacía.".into());
         }
         let units = self.chord_units(per_bar, None);
-        let chords: Vec<(i32, Quality)> = units.iter().enumerate().map(|(u, &(m, _, _))| (self.mode_tonic(minor, m) + cycle[u % cycle.len()].0, cycle[u % cycle.len()].1)).collect();
+        let chords: Vec<(i32, Quality, i32)> = units
+            .iter()
+            .enumerate()
+            .map(|(u, &(m, _, _))| {
+                let root = self.mode_tonic(minor, m) + cycle[u % cycle.len()].0;
+                (root, cycle[u % cycle.len()].1, root)
+            })
+            .collect();
         self.set_unit_chords(&units, &chords);
         Ok(self.chords.len())
     }
 
-    /// Proposes chord symbols for the melody of `part`, one chord per measure (`per_bar` = 1) or per half bar where the
-    /// melody moves in the second half (2), chosen among the degrees of the key (major, or its relative minor when
-    /// `minor`). Each unit scores the share of its notes (weighted by length and by beat) that belong to the chord, plus
-    /// a taste for the usual links (V–I, ii–V, IV–V…), for starting on the tonic and for closing V–I; the best path is
-    /// found with dynamic programming. With `sevenths` every degree also has its seventh chord (dominant seventh on V,
-    /// and on VII in minor; major or minor seventh elsewhere): the dominant seventh is favoured, the others appear when
-    /// the melody has their seventh, and the first and last chord stay triads. Returns the number of chord symbols.
-    pub fn harmonize(&mut self, part: usize, minor: bool, per_bar: u8, sevenths: bool) -> Result<usize, String> {
+    /// Proposes chord symbols for the melody of `part`, one chord per unit of [`Score::chord_units`] (`per_bar` 1, 2 or
+    /// 4), chosen among the degrees of the key (major, or its relative minor when `minor`). Each unit scores the share
+    /// of its notes (weighted by length and by beat) that belong to the chord, plus a taste for the usual links (V–I,
+    /// ii–V, IV–V…), for starting on the tonic and for closing V–I; the best path is found with dynamic programming.
+    /// `opts` adds seventh chords (the dominant seventh favoured, first and last chord stay triads), dominants of the
+    /// other degrees (they appear only where the melody has their leading tone, and must resolve) and first inversions
+    /// (a second pass chooses root or third in the bass to keep the bass line moving by small steps; never on the first
+    /// or last chord). Returns the number of chord symbols.
+    pub fn harmonize(&mut self, part: usize, minor: bool, per_bar: u8, opts: HarmonyOptions) -> Result<usize, String> {
         let p = self.parts.get(part).ok_or("La parte no existe.")?;
         let units = self.chord_units(per_bar, Some(part));
         let n = units.len();
@@ -686,7 +781,8 @@ impl Score {
                         if b <= a {
                             continue;
                         }
-                        let beat = if e.start == t0 { 2.0 } else if e.start % PPQ == 0 { 1.5 } else { 1.0 };
+                        // metric hierarchy: start of the unit, half-bar beats, other beats, off-beats
+                        let beat = if e.start == t0 { 2.0 } else if e.start % (2 * PPQ) == 0 { 1.6 } else if e.start % PPQ == 0 { 1.2 } else { 1.0 };
                         for q in pitches {
                             w[q.midi().rem_euclid(12) as usize] += (b - a) as f32 * beat;
                         }
@@ -700,17 +796,27 @@ impl Score {
         }
         let tonics: Vec<i32> = units.iter().map(|&(m, _, _)| self.mode_tonic(minor, m)).collect();
         let triads: &[(u8, Quality, u8)] = if minor { &MINOR_DEGREES } else { &MAJOR_DEGREES };
-        // (offset, quality, degree number, is a seventh chord)
-        let mut cands: Vec<(u8, Quality, u8, bool)> = triads.iter().map(|&(o, q, n)| (o, q, n, false)).collect();
-        if sevenths {
-            for &(o, q, n) in triads {
+        let mut cands: Vec<Cand> = triads.iter().map(|&(off, q, num)| Cand { off, q, num, sev: false, sec: None }).collect();
+        let dominant_degree = |num: u8| num == 5 || (minor && num == 7);
+        if opts.sevenths {
+            for &(off, q, num) in triads {
                 let seventh = match q {
-                    Quality::Major if n == 5 || (minor && n == 7) => Quality::Dominant7,
+                    Quality::Major if dominant_degree(num) => Quality::Dominant7,
                     Quality::Major => Quality::Major7,
                     Quality::Minor => Quality::Minor7,
                     _ => continue,
                 };
-                cands.push((o, seventh, n, true));
+                cands.push(Cand { off, q: seventh, num, sev: true, sec: None });
+            }
+        }
+        if opts.secondary {
+            // the dominant of every degree but the tonic (that one is V itself) and the diminished one
+            for &(off, q, num) in triads {
+                if num == 1 || q == Quality::Dim {
+                    continue;
+                }
+                let (q, sev) = if opts.sevenths { (Quality::Dominant7, true) } else { (Quality::Major, false) };
+                cands.push(Cand { off: (off + 7) % 12, q, num: 0, sev, sec: Some(num) });
             }
         }
         let fit = |u: usize, c: usize| -> f32 {
@@ -718,21 +824,33 @@ impl Score {
             if total == 0.0 {
                 return 0.0;
             }
-            let (off, q, num, sev) = cands[c];
-            let root = (tonics[u] + off as i32).rem_euclid(12);
-            let inside: f32 = tones(q).iter().map(|&t| weights[u][(root + t as i32).rem_euclid(12) as usize]).sum();
+            let cd = cands[c];
+            let root = (tonics[u] + cd.off as i32).rem_euclid(12);
+            // a seventh counts as part of the chord only when the melody really has that note: a four-note chord would
+            // otherwise cover more passing notes than a triad and win for that reason alone
+            let tn = tones(cd.q);
+            let counts = cd.sev && weights[u][(root + tn[3] as i32).rem_euclid(12) as usize] / total >= 0.15;
+            let used = if cd.sev && !counts { &tn[..3] } else { tn };
+            let inside: f32 = used.iter().map(|&t| weights[u][(root + t as i32).rem_euclid(12) as usize]).sum();
             let mut s = (inside - 0.7 * (total - inside)) / total * 4.0;
-            if u == 0 && num == 1 {
+            if u == 0 && cd.num == 1 {
                 s += 1.5;
             }
             if u + 1 == n {
-                s += match num { 1 => 3.0, 5 => 0.5, _ => 0.0 };
+                s += match cd.num { 1 => 3.0, 5 => 0.5, _ => 0.0 };
             }
-            if u + 2 == n && num == 5 {
+            if u + 2 == n && cd.num == 5 {
                 s += 1.0;
             }
-            if sev {
-                s += if num == 5 || (minor && num == 7) { 0.6 } else { -0.3 };
+            if cd.sec.is_some() {
+                // only where the leading tone is in the melody does it beat the diatonic chords; never first or last
+                s -= 0.8;
+                if u == 0 || u + 1 == n {
+                    s -= 2.0;
+                }
+            } else if cd.sev {
+                // Am7 and C6 are the same notes: a minor or major seventh must beat the plain triad on evidence, not on a tie
+                s += if !counts { -0.5 } else if dominant_degree(cd.num) { 0.6 } else { -1.0 };
                 if u == 0 {
                     s -= 1.0;
                 }
@@ -742,20 +860,21 @@ impl Score {
             }
             s
         };
-        // staying on a chord inside a bar is fine; between bars repeating is discouraged
+        // staying on a chord inside a bar is fine; between bars repeating is discouraged; a change inside a bar costs a little
         let step = |u: usize, a: usize, b: usize| {
             let same_bar = units[u].0 == units[u - 1].0;
             let (ca, cb) = (cands[a], cands[b]);
-            if ca.2 == cb.2 {
+            if ca.num == cb.num && ca.sec.is_none() && cb.sec.is_none() {
                 // the same degree again: V then V7 is natural inside a bar, repeating the very same chord is not
                 return match (a == b, same_bar) {
                     (true, true) => 0.5,
-                    (true, false) => -1.5,
+                    (true, false) => -0.6,
                     (false, true) => 0.3,
                     (false, false) => 0.0,
                 };
             }
-            link(ca.2, cb.2) + if ca.3 && ca.2 == 5 && cb.2 == 1 { 0.5 } else { 0.0 }
+            let r = cand_link(ca, cb);
+            if same_bar { r * 0.6 - 0.3 } else { r }
         };
         let mut best: Vec<Vec<f32>> = vec![vec![0.0; cands.len()]; n];
         let mut from: Vec<Vec<usize>> = vec![vec![0; cands.len()]; n];
@@ -775,7 +894,43 @@ impl Score {
             path[u] = c;
             c = from[u][c];
         }
-        let chords: Vec<(i32, Quality)> = path.iter().enumerate().map(|(u, &c)| (tonics[u] + cands[c].0 as i32, cands[c].1)).collect();
+        let roots: Vec<i32> = path.iter().enumerate().map(|(u, &c)| tonics[u] + cands[c].off as i32).collect();
+        let mut basses = roots.clone();
+        if opts.inversions && n > 2 {
+            // root or third in the bass: the cheapest bass line (small steps; an inversion costs a little)
+            let third = |u: usize| roots[u] + tones(cands[path[u]].q)[1] as i32;
+            let options = |u: usize| -> Vec<i32> { if u == 0 || u + 1 == n { vec![roots[u]] } else { vec![roots[u], third(u)] } };
+            let leap = |a: i32, b: i32| {
+                let d = (a - b).rem_euclid(12);
+                d.min(12 - d) as f32
+            };
+            let mut cost: Vec<Vec<f32>> = Vec::new();
+            let mut back: Vec<Vec<usize>> = Vec::new();
+            for u in 0..n {
+                let opt = options(u);
+                let mut row = vec![0.0; opt.len()];
+                let mut brow = vec![0usize; opt.len()];
+                for (k, &bass) in opt.iter().enumerate() {
+                    let own = if bass == roots[u] { 0.0 } else { 0.8 };
+                    if u == 0 {
+                        row[k] = own;
+                    } else {
+                        let prev = options(u - 1);
+                        let (pk, pc) = prev.iter().enumerate().map(|(j, &pb)| (j, cost[u - 1][j] + 0.5 * leap(pb, bass))).fold((0, f32::MAX), |a, b| if b.1 < a.1 { b } else { a });
+                        row[k] = own + pc;
+                        brow[k] = pk;
+                    }
+                }
+                cost.push(row);
+                back.push(brow);
+            }
+            let mut k = cost[n - 1].iter().enumerate().fold(0, |a, (i, &v)| if v < cost[n - 1][a] { i } else { a });
+            for u in (0..n).rev() {
+                basses[u] = options(u)[k];
+                k = back[u][k];
+            }
+        }
+        let chords: Vec<(i32, Quality, i32)> = (0..n).map(|u| (roots[u], cands[path[u]].q, basses[u])).collect();
         self.set_unit_chords(&units, &chords);
         Ok(self.chords.len())
     }
@@ -1025,17 +1180,17 @@ mod tests {
             }
         }
         s.put_abs(0, 3 * 1920, 1920, &[p(60)]).unwrap();
-        assert_eq!(s.harmonize(0, false, 1, false).unwrap(), 4);
+        assert_eq!(s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap(), 4);
         // C F G C
         assert_eq!(roots(&s), vec![(0, 0, Quality::Major), (1, 5, Quality::Major), (2, 7, Quality::Major), (3, 0, Quality::Major)]);
         // an empty part has nothing to harmonize
         let mut e = Score::new("e", TimeSig { num: 4, den: 4 }, 0, 2);
-        assert!(e.harmonize(0, false, 1, false).is_err());
+        assert!(e.harmonize(0, false, 1, HarmonyOptions::default()).is_err());
         // a melody that closes on A in A minor ends on the tonic chord
         let mut a = Score::new("a", TimeSig { num: 4, den: 4 }, 0, 2);
         a.put_abs(0, 0, 1920, &[p(64)]).unwrap();
         a.put_abs(0, 1920, 1920, &[p(69)]).unwrap();
-        a.harmonize(0, true, 1, false).unwrap();
+        a.harmonize(0, true, 1, HarmonyOptions::default()).unwrap();
         assert_eq!(a.chords.last().map(|c| (c.root, c.quality)), Some((9, Quality::Minor)), "{:?}", roots(&a));
     }
 
@@ -1051,7 +1206,7 @@ mod tests {
         }
         s.put_abs(0, 2 * 1920, 1920, &[p(71)]).unwrap();
         s.put_abs(0, 3 * 1920, 1920, &[p(67)]).unwrap();
-        s.harmonize(0, false, 1, false).unwrap();
+        s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
         assert_eq!(s.chords.last().map(|c| (c.measure, c.root)), Some((3, 7)), "{:?}", roots(&s));
         // a progression is transposed to the key in force: I-IV over C | C | G | G
         let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 4);
@@ -1068,10 +1223,10 @@ mod tests {
             s.put_abs(0, k as u32 * 480, 480, &[p(*n)]).unwrap();
         }
         s.put_abs(0, 1920, 1920, &[p(60)]).unwrap();
-        assert_eq!(s.harmonize(0, false, 2, false).unwrap(), 3);
+        assert_eq!(s.harmonize(0, false, 2, HarmonyOptions::default()).unwrap(), 3);
         assert_eq!(s.chords.iter().map(|c| (c.measure, c.tick, c.root)).collect::<Vec<_>>(), vec![(0, 0, 0), (0, 960, 7), (1, 0, 0)]);
         // one per bar is unchanged
-        assert!(s.harmonize(0, false, 1, false).unwrap() <= 2);
+        assert!(s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap() <= 2);
         assert!(s.chords.iter().all(|c| c.tick == 0));
         // a progression takes every half bar; 6/8 splits in two dotted quarters; 3/4 stays whole
         let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 2);
@@ -1098,10 +1253,10 @@ mod tests {
                 s.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
             }
         }
-        s.harmonize(0, false, 1, true).unwrap();
+        s.harmonize(0, false, 1, HarmonyOptions { sevenths: true, ..HarmonyOptions::default() }).unwrap();
         assert_eq!(roots(&s), vec![(0, 0, Quality::Major), (1, 7, Quality::Dominant7), (2, 0, Quality::Major)]);
         // without sevenths bar 2 is a plain G major
-        s.harmonize(0, false, 1, false).unwrap();
+        s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
         assert_eq!(s.chords[1].quality, Quality::Major);
         // a minor seventh shows up on ii when the melody holds its seventh (C over D F A)
         let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 3);
@@ -1111,7 +1266,7 @@ mod tests {
                 t.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
             }
         }
-        t.harmonize(0, false, 1, true).unwrap();
+        t.harmonize(0, false, 1, HarmonyOptions { sevenths: true, ..HarmonyOptions::default() }).unwrap();
         assert_eq!(t.chords[1].quality, Quality::Minor7, "{:?}", roots(&t));
         // in minor, V is the dominant seventh too and the accompaniment plays all four notes
         let mut m = Score::new("m", TimeSig { num: 4, den: 4 }, 0, 2);
@@ -1119,8 +1274,107 @@ mod tests {
             m.put_abs(0, k as u32 * 480, 480, &[p(*n)]).unwrap();
         }
         m.put_abs(0, 1920, 1920, &[p(69)]).unwrap();
-        m.harmonize(0, true, 1, true).unwrap();
+        m.harmonize(0, true, 1, HarmonyOptions { sevenths: true, ..HarmonyOptions::default() }).unwrap();
         let pi = m.add_accompaniment(Accompaniment::Blocks).unwrap();
         assert!(m.parts[pi].measures[0].events.iter().any(|e| matches!(&e.content, Content::Note { pitches, .. } if pitches.len() == 4)), "{:?}", roots(&m));
+    }
+
+    #[test]
+    fn the_chords_of_a_phrase_travel_with_it() {
+        let mark = |measure: usize, root: u8, quality: Quality| ChordMark { measure, tick: 0, root, quality, bass: root, manual: true };
+        let mut s = two_bars();
+        s.chords = vec![mark(0, 0, Quality::Major), mark(1, 9, Quality::Minor)];
+        // two bars a degree lower: C -> B diminished, Am -> G major
+        s.continue_phrase(0, 2, -1).unwrap();
+        assert_eq!(roots(&s)[2..], [(2, 11, Quality::Dim), (3, 7, Quality::Major)]);
+        // a modulation by +7 keeps qualities: C -> G, Am -> Em, in the new key
+        let mut m = two_bars();
+        m.chords = vec![mark(0, 0, Quality::Major), mark(1, 9, Quality::Minor)];
+        m.vary_phrase(0, 2, PhraseMove::Semitones(7)).unwrap();
+        assert_eq!(roots(&m)[2..], [(2, 7, Quality::Major), (3, 4, Quality::Minor)]);
+        // a seventh chord stays a seventh chord of its new degree: V7 two degrees lower is iii: Em7
+        let mut q = two_bars();
+        q.chords = vec![mark(1, 7, Quality::Dominant7), mark(0, 5, Quality::Major7)];
+        q.continue_phrase(0, 1, -2).unwrap();
+        assert_eq!(roots(&q)[2..], [(2, 4, Quality::Minor7)]);
+        // a borrowed chord (Cm in C major) keeps its quality; without a phrase chord nothing is added
+        let mut b = two_bars();
+        b.chords = vec![mark(1, 0, Quality::Minor)];
+        b.continue_phrase(0, 1, 1).unwrap();
+        assert_eq!(roots(&b), [(1, 0, Quality::Minor), (2, 2, Quality::Minor)]);
+        let mut n = two_bars();
+        n.continue_phrase(0, 1, 1).unwrap();
+        assert!(n.chords.is_empty());
+    }
+
+    fn melody(s: &mut Score, bars: &[&[i32]], last_whole: Option<i32>) {
+        for (m, b) in bars.iter().enumerate() {
+            for (k, n) in b.iter().enumerate() {
+                s.put_abs(0, m as u32 * 1920 + k as u32 * 480, 480, &[p(*n)]).unwrap();
+            }
+        }
+        if let Some(n) = last_whole {
+            s.put_abs(0, bars.len() as u32 * 1920, 1920, &[p(n)]).unwrap();
+        }
+    }
+
+    #[test]
+    fn inversions_smooth_the_bass_line_but_never_touch_the_ends() {
+        // C | G | C: the bass C G C leaps a fifth each time; G/B moves by step
+        let mut s = Score::new("i", TimeSig { num: 4, den: 4 }, 0, 3);
+        melody(&mut s, &[&[60, 64, 67, 64], &[62, 67, 71, 67]], Some(60));
+        s.harmonize(0, false, 1, HarmonyOptions { inversions: true, ..HarmonyOptions::default() }).unwrap();
+        assert_eq!(s.chords.iter().map(|c| (c.root, c.bass)).collect::<Vec<_>>(), vec![(0, 0), (7, 11), (0, 0)]);
+        s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
+        assert!(s.chords.iter().all(|c| c.bass == c.root));
+        // and the accompaniment plays the inverted bass
+        s.harmonize(0, false, 1, HarmonyOptions { inversions: true, ..HarmonyOptions::default() }).unwrap();
+        let pi = s.add_accompaniment(Accompaniment::Bass).unwrap();
+        let bass: Vec<i32> = s.parts[pi].measures.iter().filter_map(|m| m.events.iter().find_map(|e| if let Content::Note { pitches, .. } = &e.content { Some(pitches[0].midi() % 12) } else { None })).collect();
+        assert_eq!(&bass[..3], &[0, 11, 0]);
+    }
+
+    #[test]
+    fn a_secondary_dominant_appears_only_with_its_leading_tone_and_resolves() {
+        // C | E G# B G# | A C E C | C: the G sharp calls for E major (V/vi), which leads to Am
+        let mut s = Score::new("d", TimeSig { num: 4, den: 4 }, 0, 4);
+        let gs = Pitch { step: 4, alter: 1, octave: 4 };
+        melody(&mut s, &[&[60, 64, 67, 64], &[64, 68, 71, 68], &[69, 72, 76, 72]], Some(60));
+        s.put_abs(0, 1920 + 480, 480, &[gs]).unwrap();
+        s.put_abs(0, 1920 + 1440, 480, &[gs]).unwrap();
+        let on = HarmonyOptions { secondary: true, ..HarmonyOptions::default() };
+        s.harmonize(0, false, 1, on).unwrap();
+        assert_eq!((s.chords[1].root, s.chords[1].quality), (4, Quality::Major), "{:?}", roots(&s));
+        assert_eq!((s.chords[2].root, s.chords[2].quality), (9, Quality::Minor), "it resolves to vi");
+        s.harmonize(0, false, 1, HarmonyOptions::default()).unwrap();
+        assert!(!(s.chords[1].root == 4 && s.chords[1].quality == Quality::Major), "without the option no E major: {:?}", roots(&s));
+        // a plain diatonic melody never gets one
+        let mut t = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 3);
+        melody(&mut t, &[&[60, 64, 67, 64], &[65, 69, 72, 69], &[67, 71, 62, 71]], Some(60));
+        t.harmonize(0, false, 1, on).unwrap();
+        assert_eq!(roots(&t).iter().map(|c| c.1).collect::<Vec<_>>(), vec![0, 5, 7, 0]);
+    }
+
+    #[test]
+    fn one_chord_per_beat_joins_beats_without_a_new_note() {
+        // 4/4: quarters on beats 1 and 2, then a half note: three units
+        let mut s = Score::new("b", TimeSig { num: 4, den: 4 }, 0, 1);
+        s.put_abs(0, 0, 480, &[p(60)]).unwrap();
+        s.put_abs(0, 480, 480, &[p(62)]).unwrap();
+        s.put_abs(0, 960, 960, &[p(64)]).unwrap();
+        assert_eq!(s.chord_units(4, Some(0)), vec![(0, 0, 480), (0, 480, 480), (0, 960, 960)]);
+        // a progression takes every beat: 3/4 gives three, 6/8 two dotted quarters, 5/8 stays whole
+        assert_eq!(Score::new("c", TimeSig { num: 3, den: 4 }, 0, 1).chord_units(4, None).len(), 3);
+        assert_eq!(Score::new("c", TimeSig { num: 6, den: 8 }, 0, 1).chord_units(4, None), vec![(0, 0, 720), (0, 720, 720)]);
+        assert_eq!(Score::new("c", TimeSig { num: 5, den: 8 }, 0, 1).chord_units(4, None), vec![(0, 0, 1200)]);
+        let mut t = Score::new("p", TimeSig { num: 4, den: 4 }, 0, 1);
+        assert_eq!(t.set_progression("I-IV-V-I", false, 4).unwrap(), 4);
+        assert_eq!(t.chords.iter().map(|c| c.tick).collect::<Vec<_>>(), vec![0, 480, 960, 1440]);
+        // harmonizing a busy melody per beat runs and keeps the closing tonic
+        let mut m = Score::new("m", TimeSig { num: 4, den: 4 }, 0, 2);
+        melody(&mut m, &[&[60, 64, 62, 65], &[67, 71, 62, 67]], Some(60));
+        m.harmonize(0, false, 4, HarmonyOptions::default()).unwrap();
+        assert!(m.chords.len() >= 3 && m.chords.len() <= 12);
+        assert_eq!(m.chords.last().map(|c| c.root), Some(0));
     }
 }

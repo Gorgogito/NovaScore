@@ -536,6 +536,15 @@ fn set_fifths(state: State<AppState>, fifths: i8) -> Res {
 }
 
 /// Tonalidad desde el compás `measure` hasta el siguiente cambio (en el 0, la inicial). La misma que ya rige quita el cambio.
+/// Transpone todas las partes con altura desde el compás `from` hasta `to` (ambos incluidos) `semitones` semitonos,
+/// con la armadura y el cifrado.
+#[tauri::command]
+fn transpose_range(state: State<AppState>, from: usize, to: usize, semitones: i32) -> Res {
+    let mut doc = lock(&state);
+    doc.edit(|s| s.transpose_range(from, to, semitones)).map_err(|_| "No se puede transponer así: algún sonido saldría del rango MIDI.".to_string())?;
+    Ok(doc.score.clone())
+}
+
 #[tauri::command]
 fn set_key(state: State<AppState>, measure: usize, fifths: i8) -> Res {
     let mut doc = lock(&state);
@@ -620,14 +629,19 @@ fn continue_phrase(state: State<AppState>, part: usize, phrase: usize, steps: i3
 /// `progression` (números romanos, p. ej. `I-V-vi-IV`) escribe esa progresión en lugar de analizar la melodía.
 /// `part` del resultado = número de acordes escritos.
 #[tauri::command]
-fn harmonize(state: State<AppState>, part: usize, minor: bool, progression: Option<String>, per_bar: Option<u8>, sevenths: Option<bool>) -> Result<Entered2, String> {
-    let per_bar = per_bar.unwrap_or(1).clamp(1, 2);
+fn harmonize(state: State<AppState>, part: usize, minor: bool, progression: Option<String>, per_bar: Option<u8>, sevenths: Option<bool>, inversions: Option<bool>, secondary: Option<bool>) -> Result<Entered2, String> {
+    let per_bar = match per_bar.unwrap_or(1) {
+        0 | 1 => 1,
+        2 | 3 => 2,
+        _ => 4,
+    };
+    let opts = nova_core::assist::HarmonyOptions { sevenths: sevenths.unwrap_or(false), inversions: inversions.unwrap_or(false), secondary: secondary.unwrap_or(false) };
     let mut doc = lock(&state);
     let mut result: Result<usize, String> = Err("sin resultado".into());
     doc.edit(|s| {
         result = match progression.as_deref() {
             Some(text) if !text.trim().is_empty() => s.set_progression(text, minor, per_bar),
-            _ => s.harmonize(part, minor, per_bar, sevenths.unwrap_or(false)),
+            _ => s.harmonize(part, minor, per_bar, opts),
         };
         if result.is_err() {
             return Err(nova_core::EditError::OutOfRange);
@@ -753,7 +767,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
-            set_tech, set_time, set_fifths, set_key, set_tempo, detect_chords, set_chord, add_accompaniment, continue_phrase, harmonize, review_score, clear_chords, undo, redo, save_score, load_score
+            set_tech, set_time, set_fifths, set_key, transpose_range, set_tempo, detect_chords, set_chord, add_accompaniment, continue_phrase, harmonize, review_score, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

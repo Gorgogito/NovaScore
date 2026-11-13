@@ -10,7 +10,7 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **IA local:** audio�
 
 ## Mapa del código (`app/`)
 - `crates/nova-core/` — núcleo en Rust, sin UI. `lib.rs` modelo + edición + undo; `io.rs` sonidos/MIDI/MusicXML; `mscx.rs` lector MuseScore; `mscx_write.rs` escritor MuseScore.
-  `examples/ms_roundtrip.rs` y `examples/mscx_info.rs` son herramientas de verificación.
+  `examples/ms_roundtrip.rs`, `examples/mscx_info.rs` y `examples/eval_harmonize.rs` (armonización contra progresiones sintéticas) son herramientas de verificación.
 - `crates/nova-audio/` — audio→notas con Basic Pitch (Apache-2.0, ONNX de 225 KB incluido en el binario, `ort`) y `piano.rs`: modelo de piano de alta precisión (ByteDance, pesos CC-BY-4.0, ONNX de 98 MB descargable, GPU por DirectML; ver `docs/MODELOS.md`). Umbrales calibrados: `docs/CALIBRACION.md`. `nova-core/src/quantize.rs` — notas en segundos → `Score` (tonalidad, pentagramas, voces, grupos irregulares 3:2, 5:4 y 6:4); `nova-core/src/assist.rs` — asistente (acompañamiento desde el cifrado y revisión de tesitura/voces/paralelas); `nova-core/src/tab.rs` — tablatura (cuerda/traste, técnicas `Event.tech`; réplica en `src/tab.ts`; entrada por traste con F2); `nova-core/src/chords.rs` — detección de acordes (simbólica, por pulsos; `examples/eval_chords`); `nova-core/src/beats.rs` — seguimiento de pulso (mapa de tempos variable, DP tipo Ellis). Comando Tauri `import_audio` (`src-tauri/src/audio.rs`, hilo aparte) + botón «Importar audio» con diálogo (tempo, compás, sensibilidad). `novascore.exe audio.wav` también lo abre por línea de órdenes.
 - `src-tauri/` — comandos Tauri (una función por operación; estado en `Mutex<Document>`), `pdf.rs` (svg2pdf), `omr.rs` (partitura impresa → MusicXML con Audiveris como proceso externo, sin empaquetar).
 - `src/` — interfaz Solid: `App.tsx` (estado, teclado, barras), `ScoreView.tsx` (dibujo SVG con Bravura), `layout.ts` (maquetación), `playback.ts` (SpessaSynth), `pdfExport.tsx`.
@@ -19,7 +19,7 @@ MusicXML y lectura/escritura de `.mscz`/`.mscx` (v2–v4). **IA local:** audio�
 ## Comandos
 ```
 cd app && npm install && npm run tauri dev          # ejecutar
-cd app/crates/nova-core && cargo test               # 160 tests del núcleo
+cd app/crates/nova-core && cargo test               # 168 tests del núcleo
 cd app/crates/nova-audio && cargo test              # 5 tests; audio→notas (Basic Pitch/ONNX). Ejemplos: audio2notes, audio2score, roundtrip (mide F1 sobre samples/)
 cd app && npx tsc --noEmit                          # tipos del frontend
 cd app && npx tauri build --debug --no-bundle       # exe de depuración (src-tauri/target/debug/novascore.exe)

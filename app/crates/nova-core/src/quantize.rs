@@ -529,13 +529,15 @@ fn allocate_voices(mut notes: Vec<Q>, max_voices: usize, legato: u32, simplify: 
 /// Write quantized notes into the staff `pi` of `score`: they are split into voices, runs outside
 /// irregular beats are written as plain notes (tied where needed) and irregular beats as tuplets.
 /// Returns true when some note could not be placed.
-pub(crate) fn place_staff(score: &mut Score, pi: usize, notes: Vec<Q>, max_voices: usize, legato_ticks: u32, simplify: bool, tuplet_beats: &HashMap<u32, u8>, sharps: bool) -> bool {
+pub(crate) fn place_staff(score: &mut Score, pi: usize, notes: Vec<Q>, max_voices: usize, legato_ticks: u32, simplify: bool, tuplet_beats: &HashMap<u32, u8>) -> bool {
     let mut dropped_voices = false;
     let voices = allocate_voices(notes, max_voices.clamp(1, crate::MAX_VOICES), legato_ticks, simplify, tuplet_beats);
     for (vi, v) in voices.iter().enumerate() {
         // pulsos con grupo irregular de esta voz: pulso → (ranura, nº de ranuras, alturas, ligada)
         let mut beats: BTreeMap<u32, Vec<(u32, u32, Vec<Pitch>, bool)>> = BTreeMap::new();
         for g in v {
+            // spelled with the key of the measure the note starts in
+            let sharps = score.key_at(score.locate(g.s).0) >= 0;
             let mut ps: Vec<Pitch> = g.pitches.iter().map(|&m| Pitch::from_midi(m as i32, sharps)).collect();
             ps.sort_by_key(|p| p.midi());
             let mut pos = g.s;
@@ -1162,7 +1164,6 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
 
     // Tonalidad
     let fifths = estimate_fifths(&notes);
-    let sharps = fifths >= 0;
 
     // Cuantización
     let to_ticks = |t: f64| -> f64 { (map.pos(t) - origin) * PPQ as f64 };
@@ -1241,7 +1242,7 @@ pub fn notes_to_score(raw: &[RawNote], o: &QuantizeOptions) -> Result<ImportRepo
         part.percussion = false;
         score.parts.push(part);
         let pi = score.parts.len() - 1;
-        dropped_voices |= place_staff(&mut score, pi, notes, o.max_voices, o.legato_ticks, true, &tuplet_beats, sharps);
+        dropped_voices |= place_staff(&mut score, pi, notes, o.max_voices, o.legato_ticks, true, &tuplet_beats);
     }
     if dropped_voices {
         warnings.push("Algunas notas no pudieron colocarse y se omitieron.".into());
