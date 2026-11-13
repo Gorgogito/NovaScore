@@ -219,6 +219,9 @@ fn staff_text_of(n: Node) -> Option<String> {
     }
     let mut text = None;
     for c in n.children().filter(|c| c.is_element()) {
+        if c.has_tag_name("eid") {
+            continue; // MuseScore 4.4+ gives every element an id: it says nothing about the text
+        }
         if c.has_tag_name("text") && c.children().all(|k| k.is_text()) {
             text = c.text().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
         } else {
@@ -297,6 +300,17 @@ fn octave_clef(s: &str) -> Option<Transpose> {
         return None;
     };
     Some(Transpose { diatonic: d, chromatic: c })
+}
+
+/// Text over a note of a tablature staff that means a bend: its size in half tones (the way guitar notation writes it).
+fn bend_of_text(t: &str) -> Option<u8> {
+    match t.trim().to_lowercase().as_str() {
+        "1/2" | "½" => Some(1),
+        "full" => Some(2),
+        "1 1/2" | "1½" => Some(3),
+        "2" => Some(4),
+        _ => None,
+    }
 }
 
 fn key_fifths(n: Node) -> Option<i8> {
@@ -656,6 +670,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                 let mut pending: Vec<Extra> = Vec::new(); // voice-level markup waiting for the next chord
                 let mut pending_dyn: Option<Dynamic> = None;
                 let mut pending_text: Option<String> = None;
+                let mut pending_bend: Option<u8> = None;
 
                 for el in container.children().filter(|c| c.is_element()) {
                     let native_dyn = el.has_tag_name("Dynamic") && dynamic_of(el).is_some();
@@ -670,8 +685,12 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                     if native_dyn {
                         pending_dyn = dynamic_of(el);
                     }
-                    if native_text.is_some() {
-                        pending_text = native_text.clone();
+                    if let Some(t) = &native_text {
+                        // on a tablature staff a text like "full" is a bend, not a text of the note
+                        match bend_of_text(t).filter(|_| staves[si].tab) {
+                            Some(n) => pending_bend = Some(n),
+                            None => pending_text = Some(t.clone()),
+                        }
                     }
                     if preserve && !native_dyn && native_text.is_none() && !native_harmony && !VOICE_SKIP.contains(&el.tag_name().name()) && !el.has_tag_name("voice") {
                         pending.push(Extra { place: ExtraPlace::Before, xml: src(el) });
@@ -802,6 +821,18 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                     }
                                 }
                             }
+                            // guitar techniques of a tablature staff: a hammer-on or pull-off is a spanner of the chord, a slide a
+                            // glissando of its note, a bend the text over it
+                            let mut tech_read: Option<Tech> = pending_bend.take().map(Tech::Bend);
+                            if is_chord && staves[si].tab {
+                                if el.children().any(|c| c.has_tag_name("Spanner") && c.attribute("type") == Some("HammerOnPullOff") && child(c, "next").is_some()) {
+                                    tech_read = Some(Tech::Hammer);
+                                }
+                                let slide = el.children().filter(|c| c.has_tag_name("Note")).any(|note| note.children().any(|c| c.has_tag_name("Spanner") && c.attribute("type") == Some("Glissando") && child(c, "next").is_some()));
+                                if slide {
+                                    tech_read = Some(Tech::Slide);
+                                }
+                            }
                             if is_chord {
                                 for c in el.children().filter(|c| c.is_element()) {
                                     match c.tag_name().name() {
@@ -840,7 +871,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                                         }
                                     }
                                 }
-                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, strings: if staves[si].tab { note_strings } else { Vec::new() }, text: pending_text.take(), tech: None, lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
+                                raws.push(Raw { start: pos.max(0) as u32, ticks: real.max(0) as u32, pitches, rest, tie, tup, extras, dynamic: pending_dyn.take(), articulations, strings: if staves[si].tab { note_strings } else { Vec::new() }, text: pending_text.take(), tech: tech_read, lyrics: if rest { Vec::new() } else { el.children().filter_map(|c| lyric_of(c)).map(|(mut l, ext)| { if ext > 0 { l.extend_to = Some(SpPos { measure: mi, tick: (pos + real + ext as i64).max(0) as u32 }); } l }).collect() } });
                             }
                             pos += real;
                         }
@@ -944,6 +975,7 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
     // strings of its notes go to that staff.
     let mut tab_target: HashMap<usize, usize> = HashMap::new();
     let mut tab_maps: HashMap<usize, HashMap<(usize, u32, i32), u8>> = HashMap::new();
+    let mut tech_maps: HashMap<usize, HashMap<(usize, u32), Tech>> = HashMap::new();
     for (si, info) in staves.iter().enumerate() {
         if !info.tab {
             continue;
@@ -951,9 +983,13 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
         if let Some(ti) = (0..si).rev().find(|&t| !staves[t].tab && staves[t].group == info.group) {
             tab_target.insert(si, ti);
             let map = tab_maps.entry(ti).or_default();
+            let techs = tech_maps.entry(ti).or_default();
             for voice in &raw_staves[si] {
                 for (mi, raws) in voice.iter().enumerate() {
                     for r in raws {
+                        if let Some(t) = r.tech {
+                            techs.insert((mi, r.start), t);
+                        }
                         for (p, &sn) in r.pitches.iter().zip(&r.strings) {
                             if sn > 0 {
                                 map.insert((mi, r.start, p.midi()), sn);
@@ -984,6 +1020,13 @@ pub fn import_mscx_styled(text: &str, style: Option<String>) -> Result<ImportRep
                     if !pairs.is_empty() && pairs.iter().all(|(_, s)| s.map_or(false, |s| (s as usize) <= tn.len())) {
                         r.strings = pairs.iter().map(|(_, s)| s.unwrap()).collect();
                     }
+                }
+            }
+        }
+        if let Some(techs) = tech_maps.get(&si) {
+            for (mi, raws) in raw.iter_mut().flat_map(|v| v.iter_mut().enumerate()) {
+                for r in raws.iter_mut().filter(|r| !r.rest && r.tech.is_none()) {
+                    r.tech = techs.get(&(mi, r.start)).copied();
                 }
             }
         }

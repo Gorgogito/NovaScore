@@ -202,6 +202,8 @@ struct Marks {
     transpose: Option<Transpose>,
     /// Tablature position of each pitch (ascending): string (MuseScore counts from 0 at the highest) and fret.
     tab: Vec<Option<(u8, u8)>>,
+    /// This staff is a tablature staff (guitar techniques are written there only).
+    tab_staff: bool,
 }
 
 /// Move a spanner's ends onto real event boundaries of its voice. Slurs need notes at both
@@ -243,6 +245,7 @@ fn compute_marks(score: &Score, part: &Part, voice: usize, mi: usize, evs: &[Eve
     let mut marks = vec![Marks::default(); evs.len()];
     for m in &mut marks {
         m.transpose = part.transpose;
+        m.tab_staff = part.tab_staff;
     }
     if part.tuning.is_some() {
         if let Some(pi) = score.parts.iter().position(|q| std::ptr::eq(q, part)) {
@@ -353,6 +356,16 @@ fn write_hairpin_marker(out: &mut String, indent: &str, k: SpannerKind, ex: (u8,
     let _ = writeln!(out, "{indent}  </Spanner>");
 }
 
+/// Text written over a bent note: the bend in tones, as guitar notation usually puts it.
+pub(crate) fn bend_text(n: u8) -> &'static str {
+    match n {
+        1 => "1/2",
+        2 => "full",
+        3 => "1 1/2",
+        _ => "2",
+    }
+}
+
 fn write_location(out: &mut String, measures: i32, ticks: i64) {
     out.push_str("<location>");
     if measures != 0 {
@@ -440,6 +453,11 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
 {indent}  <text>{}</text>
 {indent}  </StaffText>", t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
     }
+    // A bend has no counterpart in MuseScore without an arrival note, so on the tablature staff it is written the way
+    // it was before MuseScore 4.2: a text over the note (the reader turns it back into the bend).
+    if let (Some(Tech::Bend(n)), true) = (e.tech, mk.tab_staff) {
+        let _ = writeln!(out, "{indent}<StaffText>\n{indent}  <text>{}</text>\n{indent}  </StaffText>", bend_text(n));
+    }
     for x in e.extras.iter().filter(|x| x.place == ExtraPlace::Before) {
         let _ = writeln!(out, "{indent}{}", x.xml.trim());
     }
@@ -497,6 +515,24 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
                 let _ = writeln!(out, "{indent}    <text>{}</text>
 {indent}    </Lyrics>", l.text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
             }
+            // Hammer-on / pull-off: a spanner between the chords, written like a slur (tablature staff only)
+            if mk.tab_staff {
+                let next_note = matches!(next.map(|x| &x.content), Some(Content::Note { .. }));
+                let prev_hammer = prev.map_or(false, |pv| pv.tech == Some(Tech::Hammer) && matches!(pv.content, Content::Note { .. }));
+                if prev_hammer {
+                    let pstart = prev.map_or(0, |x| x.start as i64);
+                    let (m, t) = if i > 0 { (0, pstart - e.start as i64) } else { (-1, pstart - e.start as i64) };
+                    let _ = write!(out, "{indent}  <Spanner type=\"HammerOnPullOff\">\n{indent}    <prev>\n{indent}      ");
+                    write_location(out, m, t);
+                    let _ = writeln!(out, "\n{indent}      </prev>\n{indent}    </Spanner>");
+                }
+                if e.tech == Some(Tech::Hammer) && next_note {
+                    let (m, t) = if next_in_measure { (0, next.unwrap().start as i64 - e.start as i64) } else { (1, -(e.start as i64)) };
+                    let _ = write!(out, "{indent}  <Spanner type=\"HammerOnPullOff\">\n{indent}    <HammerOnPullOff/>\n{indent}    <next>\n{indent}      ");
+                    write_location(out, m, t);
+                    let _ = writeln!(out, "\n{indent}      </next>\n{indent}    </Spanner>");
+                }
+            }
             for &loc in &mk.slur_end {
                 write_slur_marker(out, &format!("{indent}  "), false, loc);
             }
@@ -534,6 +570,31 @@ fn write_event(out: &mut String, evs: &[Event], i: usize, voice: usize, mlen: u3
                         let _ = writeln!(out, "\n{indent}        </prev>");
                     }
                     let _ = writeln!(out, "{indent}      </Spanner>");
+                }
+                // Slide: a glissando from the highest note of this chord to the highest of the next (tablature staff only),
+                // written like a tie (a note-level spanner).
+                if pk + 1 == pitches.len() && mk.tab_staff {
+                    let kind = |t: Option<Tech>| match t {
+                        Some(Tech::Slide) => Some(("Glissando", "<Glissando/>")),
+                        _ => None,
+                    };
+                    let next_note = matches!(next.map(|x| &x.content), Some(Content::Note { .. }));
+                    let prev_note = matches!(prev.map(|x| &x.content), Some(Content::Note { .. }));
+                    let start = kind(e.tech).filter(|_| next_note);
+                    let end = prev.and_then(|pv| kind(pv.tech)).filter(|_| prev_note);
+                    if let Some((name, el)) = start {
+                        let (m, t) = if next_in_measure { (0, next.unwrap().start as i64 - e.start as i64) } else { (1, -(e.start as i64)) };
+                        let _ = write!(out, "{indent}    <Spanner type=\"{name}\">\n{indent}      {el}\n{indent}      <next>\n{indent}        ");
+                        write_location(out, m, t);
+                        let _ = writeln!(out, "\n{indent}        </next>\n{indent}      </Spanner>");
+                    }
+                    if let Some((name, _)) = end {
+                        let pstart = prev.map_or(0, |x| x.start as i64);
+                        let (m, t) = if i > 0 { (0, pstart - e.start as i64) } else { (-1, pstart - e.start as i64) };
+                        let _ = write!(out, "{indent}    <Spanner type=\"{name}\">\n{indent}      <prev>\n{indent}        ");
+                        write_location(out, m, t);
+                        let _ = writeln!(out, "\n{indent}        </prev>\n{indent}      </Spanner>");
+                    }
                 }
                 let tpc2 = mk.transpose.map_or(String::new(), |t| format!("\n{indent}    <tpc2>{}</tpc2>", tpc(&t.to_written(*p))));
                 let fret = mk.tab.get(pk).copied().flatten().map_or(String::new(), |(string, fret)| format!("\n{indent}    <fret>{fret}</fret>\n{indent}    <string>{string}</string>"));
@@ -836,6 +897,39 @@ mod tests {
         let b = import_mscx(&xml).unwrap().score;
         assert_eq!(b.key_changes, s.key_changes);
         assert!(!import_mscx(&xml).unwrap().warnings.iter().any(|w| w.contains("armadura")));
+    }
+
+    #[test]
+    fn guitar_techniques_round_trip_through_musescore() {
+        let p = |m: i32| Pitch::from_midi(m, true);
+        for tab_only in [true, false] {
+            let mut s = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 2);
+            s.parts[0].tuning = Some(crate::tab::GUITAR.to_vec());
+            s.parts[0].tab_only = tab_only;
+            // hammer-on, pull-off, slide, bend of a tone and a plain note; the last pair crosses the barline
+            for (i, m) in [52, 54, 52, 57, 59, 55, 57].iter().enumerate() {
+                let (measure, start) = if i < 4 { (0, i as u32 * 480) } else { (1, (i as u32 - 4) * 480) };
+                s.put_note(0, 0, measure, start, 480, vec![p(*m)]).unwrap();
+            }
+            s.set_tech(0, 0, 0, 0, Some(Tech::Hammer)).unwrap();
+            s.set_tech(0, 0, 0, 480, Some(Tech::Hammer)).unwrap();
+            s.set_tech(0, 0, 0, 960, Some(Tech::Slide)).unwrap();
+            s.set_tech(0, 0, 0, 1440, Some(Tech::Bend(2))).unwrap();
+            s.set_tech(0, 0, 1, 480, Some(Tech::Slide)).unwrap();
+            let xml = export_mscx(&s);
+            assert!(xml.contains("<Spanner type=\"HammerOnPullOff\">") && xml.contains("<Spanner type=\"Glissando\">") && xml.contains("<text>full</text>"), "tab_only {tab_only}");
+            let back = import_mscx(&xml).unwrap().score;
+            let techs = |sc: &Score| sc.parts[0].measures.iter().flat_map(|m| m.events.iter().map(|e| (e.start, e.tech))).collect::<Vec<_>>();
+            assert_eq!(techs(&back), techs(&s), "tab_only {tab_only}");
+            // the bend text is not left behind as a text of the note
+            assert!(back.parts[0].measures.iter().flat_map(|m| m.events.iter()).all(|e| e.text.is_none()), "tab_only {tab_only}: {:?}", back.parts[0].measures.iter().flat_map(|m| m.events.iter().map(|e| (e.start, e.text.clone()))).collect::<Vec<_>>());
+        }
+        // without tablature nothing is written
+        let mut plain = Score::new("t", TimeSig { num: 4, den: 4 }, 0, 1);
+        plain.put_note(0, 0, 0, 0, 480, vec![p(52)]).unwrap();
+        plain.put_note(0, 0, 0, 480, 480, vec![p(54)]).unwrap();
+        plain.set_tech(0, 0, 0, 0, Some(Tech::Hammer)).unwrap();
+        assert!(!export_mscx(&plain).contains("HammerOnPullOff"));
     }
 
     #[test]

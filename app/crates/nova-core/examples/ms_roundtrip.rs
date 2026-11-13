@@ -25,7 +25,13 @@ fn key(s: &Sound) -> (usize, u32, u32, i32) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (input, out) = (&args[1], &args[2]);
-    let a = load(input);
+    let mut a = load(input);
+    // NOVA_TWIN=1: show the tablature under a normal staff instead of alone (a tablature staff twin in MuseScore)
+    if std::env::var("NOVA_TWIN").is_ok() {
+        for p in a.parts.iter_mut().filter(|p| p.tuning.is_some()) {
+            p.tab_only = false;
+        }
+    }
     let stem = std::path::Path::new(out).file_stem().unwrap().to_string_lossy().to_string();
     std::fs::write(out, export_mscz(&a, &stem).expect("export")).expect("write mscz");
     let xml_path = format!("{out}.musicxml");
@@ -84,6 +90,21 @@ MuseScore {rb:?}"); }
     if ma != mb {
         println!("only ours: {:?}
 only MuseScore: {:?}", ma.iter().filter(|x| !mb.contains(x)).take(6).collect::<Vec<_>>(), mb.iter().filter(|x| !ma.contains(x)).take(6).collect::<Vec<_>>());
+    }
+    // guitar techniques: MuseScore must keep them when it loads our file and saves it again (its own .mscz), and our
+    // reader must find them in what it saved (MuseScore does not write them to MusicXML)
+    let resaved = format!("{out}.resaved.mscz");
+    let _ = std::fs::remove_file(&resaved);
+    let ok = std::process::Command::new(&ms).args(["-o", &resaved, out]).status().map_or(false, |s| s.success());
+    let techs = |s: &nova_core::Score| -> Vec<String> {
+        s.parts.iter().enumerate().flat_map(|(pi, p)| p.measures.iter().enumerate().flat_map(move |(mi, m)| m.events.iter().filter_map(move |e| e.tech.map(|t| format!("{pi}:{mi}:{}:{t:?}", e.start))))).collect()
+    };
+    let ta = techs(&a);
+    let tc = if ok { techs(&import_mscz(&std::fs::read(&resaved).expect("resaved mscz")).expect("resaved import").score) } else { Vec::new() };
+    println!("guitar techniques: ours {} / after MuseScore saved the file again {} {}", ta.len(), tc.len(), if ta == tc { "(identical)" } else { "(DIFFERENT)" });
+    if ta != tc {
+        println!("ours {ta:?}
+resaved by MuseScore {tc:?}");
     }
     println!("{}{}{}", if sa == sb { "IDENTICAL NOTES" } else { "DIFFERENT" }, if pa == pb { " + IDENTICAL SPANNERS" } else { " / DIFFERENT SPANNERS" }, if ma == mb { " + IDENTICAL MARKS" } else { " / DIFFERENT MARKS" });
 }
