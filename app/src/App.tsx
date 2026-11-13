@@ -730,10 +730,23 @@ export default function App() {
       setStatus(String(e));
     }
   };
+  /** Asistente: continúa la parte del cursor como secuencia (`phrase` compases, `steps` grados) o con una cadencia final (`phrase` = 0). */
+  const doContinue = async (phrase: number, steps: number) => {
+    const part = cursor().part;
+    try {
+      const r = await api.continuePhrase(part, phrase, steps);
+      apply(r.score, true);
+      setCursor({ part, voice: 0, m: r.part, start: 0 });
+      setDirty(true);
+      setStatus(phrase === 0 ? "Compás final con la tónica añadido. Se puede deshacer con Ctrl+Z." : `Secuencia añadida (${phrase} compás${phrase > 1 ? "es" : ""}, ${Math.abs(steps)} grado${Math.abs(steps) > 1 ? "s" : ""} ${steps > 0 ? "más arriba" : "más abajo"}). Repite para alargarla; Ctrl+Z la quita.`);
+    } catch (e) {
+      setStatus(String(e));
+    }
+  };
   const doReview = async () => {
     const list = await api.reviewScore();
     if (!list.length) {
-      setStatus("Revisión: no se encontró nada raro (tesitura, voces cruzadas, quintas y octavas paralelas).");
+      setStatus("Revisión: no se encontró nada raro (tesitura, voces cruzadas, quintas y octavas paralelas o directas, saltos grandes).");
       return;
     }
     setIssues(list);
@@ -929,7 +942,22 @@ export default function App() {
             <option value="blocks">Acordes sostenidos</option>
             <option value="arpeggio">Arpegio en corcheas</option>
           </select>
-          <button onClick={doReview} title="Busca notas fuera de la tesitura del instrumento, voces cruzadas y quintas u octavas paralelas">Revisar</button>
+          <select
+            class="assist-select"
+            title="Asistente: alarga la melodía de la parte seleccionada repitiendo sus últimos compases como secuencia (por grados de la escala) o la cierra con la tónica"
+            value=""
+            onChange={(e) => { const v = e.currentTarget.value; e.currentTarget.value = ""; if (v) { const [ph, st] = v.split(":").map(Number); void doContinue(ph, st); } }}
+          >
+            <option value="">Continuar frase…</option>
+            <option value="1:-1">Secuencia descendente (último compás)</option>
+            <option value="2:-1">Secuencia descendente (2 compases)</option>
+            <option value="4:-1">Secuencia descendente (4 compases)</option>
+            <option value="1:1">Secuencia ascendente (último compás)</option>
+            <option value="2:1">Secuencia ascendente (2 compases)</option>
+            <option value="4:1">Secuencia ascendente (4 compases)</option>
+            <option value="0:0">Terminar con la tónica</option>
+          </select>
+          <button onClick={doReview} title="Busca notas fuera de la tesitura del instrumento, voces cruzadas, quintas u octavas paralelas o directas y saltos melódicos de más de una octava">Revisar</button>
         </Show>
         <span class="sep" />
         <button class="play" classList={{ on: isPlaying() }} onClick={togglePlay} title="Reproducir (Espacio)">

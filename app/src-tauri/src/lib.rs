@@ -576,6 +576,24 @@ fn add_accompaniment(state: State<AppState>, style: nova_core::assist::Accompani
     Ok(Entered2 { score: doc.score.clone(), part })
 }
 
+/// Continúa la melodía de una parte: `phrase` > 0 repite sus últimos compases `steps` grados más arriba (o abajo si es
+/// negativo) como secuencia; con `phrase` = 0 añade un compás final con la tónica (cadencia). Devuelve el primer compás nuevo.
+#[tauri::command]
+fn continue_phrase(state: State<AppState>, part: usize, phrase: usize, steps: i32) -> Result<Entered2, String> {
+    let mut doc = lock(&state);
+    let mut result: Result<usize, String> = Err("sin resultado".into());
+    doc.edit(|s| {
+        result = if phrase == 0 { s.end_with_cadence(part) } else { s.continue_phrase(part, phrase, steps) };
+        if result.is_err() {
+            return Err(nova_core::EditError::OutOfRange);
+        }
+        Ok(())
+    })
+    .ok();
+    let first = result?;
+    Ok(Entered2 { score: doc.score.clone(), part: first })
+}
+
 #[derive(Serialize)]
 struct Entered2 {
     score: Score,
@@ -690,7 +708,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_score, toggle_repeat, toggle_marker, set_jump, set_dynamic, set_text, set_lyric, set_lyric_extend, set_string, toggle_articulation, toggle_spanner, remove_spanners, add_part, remove_part, update_part, new_score, enter_note, add_pitch, toggle_tie, get_sounds, export_pdf, export_mscz, startup_export, quit, export_midi, export_musicxml, import_musicxml, import_midi, import_mscz, import_audio, omr_startup, omr_status, set_omr_path, import_omr, cancel_omr, piano_model_status, download_piano_model, cancel_piano_download, delete_piano_model, enter_rest, make_tuplet, clear_tuplet, delete_event, transpose_event, add_measures,
-            set_tech, set_time, set_fifths, set_tempo, detect_chords, set_chord, add_accompaniment, review_score, clear_chords, undo, redo, save_score, load_score
+            set_tech, set_time, set_fifths, set_tempo, detect_chords, set_chord, add_accompaniment, continue_phrase, review_score, clear_chords, undo, redo, save_score, load_score
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

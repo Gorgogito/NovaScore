@@ -2,7 +2,9 @@
 //!
 //! - [`Score::add_accompaniment`] escribe una parte nueva (bajo, acordes o arpegio) a partir del cifrado de acordes.
 //! - [`Score::review`] revisa la partitura y lista lo que suele ser un error: notas fuera de la tesitura del
-//!   instrumento, voces cruzadas y quintas u octavas paralelas entre dos líneas.
+//!   instrumento, voces cruzadas, quintas u octavas paralelas o directas entre dos líneas y saltos melódicos muy grandes.
+//! - [`Score::continue_phrase`] sigue la melodía de una parte repitiendo sus últimos compases como secuencia
+//!   (subiendo o bajando por grados de la escala) y [`Score::end_with_cadence`] la cierra con la tónica.
 
 use crate::chords::{ChordMark, Quality};
 use crate::*;
@@ -153,7 +155,7 @@ pub struct Issue {
     pub voice: usize,
     pub measure: usize,
     pub tick: u32,
-    /// `range`, `crossing` o `parallel`.
+    /// `range`, `crossing`, `parallel`, `direct` o `leap`.
     pub kind: &'static str,
     pub message: String,
 }
@@ -162,7 +164,14 @@ pub struct Issue {
 fn range_of(program: u8) -> Option<(i32, i32, &'static str)> {
     Some(match program {
         0..=7 => (21, 108, "piano"),
+        8 => (60, 108, "celesta"),
+        9 => (79, 108, "glockenspiel"),
+        13 => (65, 108, "xilófono"),
+        16..=20 => (36, 96, "órgano"),
         24..=31 => (40, 88, "guitarra"),
+        46 => (24, 103, "arpa"),
+        48 | 49 => (28, 103, "cuerdas"),
+        52 => (48, 81, "coro"),
         32..=39 => (28, 67, "bajo"),
         40 => (55, 103, "violín"),
         41 => (48, 91, "viola"),
@@ -172,7 +181,12 @@ fn range_of(program: u8) -> Option<(i32, i32, &'static str)> {
         57 => (40, 72, "trombón"),
         58 => (28, 58, "tuba"),
         60 => (41, 77, "trompa"),
-        64..=67 => (49, 90, "saxofón"),
+        64 => (56, 87, "saxofón soprano"),
+        65 => (49, 81, "saxofón alto"),
+        66 => (44, 76, "saxofón tenor"),
+        67 => (36, 69, "saxofón barítono"),
+        69 => (52, 81, "corno inglés"),
+        74 => (60, 96, "flauta dulce"),
         68 => (58, 91, "oboe"),
         70 => (34, 75, "fagot"),
         71 => (50, 94, "clarinete"),
@@ -302,8 +316,163 @@ impl Score {
                 }
             }
         }
+        // 4. fifths and octaves reached in similar motion by a leap of the upper line (direct or "hidden")
+        for (i, a) in lines.iter().enumerate() {
+            for b in lines.iter().skip(i + 1) {
+                let mut found = 0;
+                let mut prev: Option<(i32, i32)> = None;
+                for na in &a.notes {
+                    let Some(nb) = b.notes.iter().find(|n| n.abs == na.abs) else { continue };
+                    if let Some((pa, pb)) = prev {
+                        let (ia, ib) = ((pa - pb).rem_euclid(12), (na.top - nb.top).rem_euclid(12));
+                        let same_way = (na.top - pa).signum() * (nb.top - pb).signum() > 0;
+                        let (upper_leap, upper_is_a) = if na.top >= nb.top { ((na.top - pa).abs() > 2, true) } else { ((nb.top - pb).abs() > 2, false) };
+                        let _ = upper_is_a;
+                        if same_way && ia != ib && (ib == 7 || ib == 0) && upper_leap && (na.top - nb.top).abs() >= 7 {
+                            found += 1;
+                            if found <= 2 {
+                                let what = if ib == 7 { "quintas" } else { "octavas" };
+                                issues.push(Issue { part: a.part, voice: a.voice, measure: na.measure, tick: na.tick, kind: "direct", message: format!("{what} directas (por salto en la voz superior) entre «{}» (voz {}) y «{}» (voz {}).", self.parts[a.part].name, a.voice + 1, self.parts[b.part].name, b.voice + 1) });
+                            }
+                        }
+                    }
+                    prev = Some((na.top, nb.top));
+                }
+            }
+        }
+        // 5. melodic leaps wider than an octave inside one line
+        for l in &lines {
+            let mut found = 0;
+            for w in l.notes.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                if b.abs != a.end {
+                    continue; // a rest in between: the leap is not sung or played in one breath
+                }
+                let leap = (b.top - a.top).abs();
+                if leap > 12 {
+                    found += 1;
+                    if found <= 3 {
+                        issues.push(Issue { part: l.part, voice: l.voice, measure: b.measure, tick: b.tick, kind: "leap", message: format!("Salto melódico de {leap} semitonos ({} → {}) en «{}»: más de una octava, difícil de cantar o tocar.", name_of(a.top), name_of(b.top), self.parts[l.part].name) });
+                    }
+                }
+            }
+        }
         issues.sort_by_key(|i| (i.measure, i.tick, i.part));
         issues
+    }
+}
+
+const MAJOR: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
+
+/// Moves a pitch `steps` degrees along the major scale of `tonic` (a pitch class). A note outside the scale keeps
+/// its distance to the scale note below it.
+fn shift_degrees(midi: i32, tonic: i32, steps: i32) -> i32 {
+    let rel = midi - tonic;
+    let (base, extra) = if MAJOR.contains(&rel.rem_euclid(12)) { (rel, 0) } else { (rel - 1, 1) };
+    let (oct, r) = (base.div_euclid(12), base.rem_euclid(12));
+    let deg = MAJOR.iter().position(|&x| x == r).unwrap_or(0) as i32;
+    let total = oct * 7 + deg + steps;
+    tonic + total.div_euclid(7) * 12 + MAJOR[total.rem_euclid(7) as usize] + extra
+}
+
+impl Score {
+    fn tonic_pc(&self) -> i32 {
+        (self.fifths as i32 * 7).rem_euclid(12)
+    }
+
+    /// Last measure of the part with any note in it.
+    fn last_written_measure(&self, part: usize) -> Option<usize> {
+        let p = self.parts.get(part)?;
+        (0..p.measures.len()).rev().find(|&m| (0..MAX_VOICES).any(|v| p.measures[m].voice(v).into_iter().flatten().any(|e| matches!(e.content, Content::Note { .. }))))
+    }
+
+    /// Continues the music of `part` by repeating its last `phrase` measures `steps` scale degrees higher (negative:
+    /// lower), as a melodic sequence. The measures are appended to every part (the others stay silent there).
+    /// Returns the index of the first new measure.
+    pub fn continue_phrase(&mut self, part: usize, phrase: usize, steps: i32) -> Result<usize, String> {
+        if phrase == 0 || steps == 0 {
+            return Err("La frase y el desplazamiento no pueden ser cero.".into());
+        }
+        let last = self.last_written_measure(part).ok_or("Esa parte no tiene notas que continuar.")?;
+        if last + 1 < phrase {
+            return Err(format!("Solo hay {} compás(es) escritos: elige una frase más corta.", last + 1));
+        }
+        let first = last + 1 - phrase;
+        let (tonic, sharps) = (self.tonic_pc(), self.fifths >= 0);
+        let total = self.parts[part].measures.len();
+        // the copies keep the original lengths: a different time signature in between is not handled
+        let lens: Vec<u32> = (first..=last).map(|m| self.measure_len(m)).collect();
+        let new_start = total;
+        if (0..phrase).any(|i| self.measure_len(new_start + i) != lens[i]) {
+            return Err("El compás cambia justo ahí: la secuencia necesita el mismo compás que la frase.".into());
+        }
+        let range = range_of(self.parts[part].program);
+        let mut copies: Vec<Measure> = Vec::new();
+        for m in first..=last {
+            let mut c = self.parts[part].measures[m].clone();
+            c.extras.clear();
+            c.start_repeat = false;
+            c.end_repeat = 0;
+            c.markers.clear();
+            c.jump = None;
+            for e in c.events.iter_mut().chain(c.voices.iter_mut().flatten()) {
+                e.extras.clear();
+                e.lyrics.clear();
+                e.text = None;
+                e.strings.clear();
+                if let Content::Note { pitches, tie } = &e.content {
+                    let moved: Vec<Pitch> = pitches.iter().map(|q| Pitch::from_midi(shift_degrees(q.midi(), tonic, steps), sharps)).collect();
+                    if let Some((lo, hi, name)) = range {
+                        if moved.iter().any(|q| q.midi() < lo || q.midi() > hi) {
+                            return Err(format!("La secuencia saldría de la tesitura de «{}» ({name}): prueba en sentido contrario.", self.parts[part].name));
+                        }
+                    }
+                    e.content = Content::note(moved, *tie);
+                }
+            }
+            copies.push(c);
+        }
+        // slurs and hairpins inside the phrase come along
+        let moved_spanners: Vec<Spanner> = self.parts[part]
+            .spanners
+            .iter()
+            .filter(|s| matches!(s.kind, SpannerKind::Slur | SpannerKind::Crescendo | SpannerKind::Decrescendo) && s.start.measure >= first && s.end.measure <= last)
+            .map(|s| {
+                let shift = new_start - first;
+                Spanner { start: SpPos { measure: s.start.measure + shift, tick: s.start.tick }, end: SpPos { measure: s.end.measure + shift, tick: s.end.tick }, ..*s }
+            })
+            .collect();
+        self.add_measures(phrase);
+        let p = &mut self.parts[part];
+        for (i, c) in copies.into_iter().enumerate() {
+            p.measures[new_start + i] = c;
+        }
+        p.spanners.extend(moved_spanners);
+        Ok(new_start)
+    }
+
+    /// Adds one measure to the end of `part` with a held tonic (the one nearest to its last note): a plain cadence.
+    /// Returns the index of the new measure.
+    pub fn end_with_cadence(&mut self, part: usize) -> Result<usize, String> {
+        let last = self.last_written_measure(part).ok_or("Esa parte no tiene notas que cerrar.")?;
+        let top = self.parts[part].measures[last].voice(0).into_iter().flatten().rev().find_map(|e| match &e.content {
+            Content::Note { pitches, .. } => pitches.iter().map(|q| q.midi()).max(),
+            _ => None,
+        });
+        let top = top.unwrap_or(60);
+        let tonic = self.tonic_pc();
+        // the tonic closest to the last note (ties go down)
+        let mut best = top - (top - tonic).rem_euclid(12);
+        if top - best > 6 {
+            best += 12;
+        }
+        let at = self.parts[part].measures.len();
+        self.add_measures(1);
+        let len = self.measure_len(at);
+        let abs = self.measure_starts(at + 1)[at];
+        let sharps = self.fifths >= 0;
+        self.put_abs(part, abs, len, &[Pitch::from_midi(best, sharps)]).map_err(|e| format!("{e:?}"))?;
+        Ok(at)
     }
 }
 
@@ -408,5 +577,84 @@ mod tests {
             g.put_abs(b, k as u32 * 480, 480, &[p(*lo)]).unwrap();
         }
         assert!(g.review().iter().all(|i| i.kind != "parallel"), "{:?}", g.review());
+    }
+
+    fn pitches_of(s: &Score, part: usize, m: usize) -> Vec<i32> {
+        s.parts[part].measures[m].events.iter().filter_map(|e| if let Content::Note { pitches, .. } = &e.content { Some(pitches[0].midi()) } else { None }).collect()
+    }
+
+    fn two_bars() -> Score {
+        let mut s = Score::new("q", TimeSig { num: 4, den: 4 }, 0, 2);
+        for (k, n) in [60, 62, 64, 65, 67, 65, 64, 62].iter().enumerate() {
+            s.put_abs(0, k as u32 * 480, 480, &[p(*n)]).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn a_phrase_continues_as_a_sequence_along_the_scale() {
+        let mut s = two_bars();
+        s.add_part("Otra", Clef::Treble, 0, false);
+        // two bars lower by a degree: C D E F -> B C D E, G F E D -> F E D C
+        let first = s.continue_phrase(0, 2, -1).unwrap();
+        assert_eq!(first, 2);
+        assert_eq!(s.parts[0].measures.len(), 4);
+        assert_eq!(s.parts[1].measures.len(), 4, "every part grows");
+        assert_eq!(pitches_of(&s, 0, 2), vec![59, 60, 62, 64]);
+        assert_eq!(pitches_of(&s, 0, 3), vec![65, 64, 62, 60]);
+        // and upwards: the new bars continue from the last written ones
+        let mut u = two_bars();
+        u.continue_phrase(0, 1, 2).unwrap();
+        assert_eq!(pitches_of(&u, 0, 2), vec![67, 65, 64, 62].iter().map(|x| shift_degrees(*x, 0, 2)).collect::<Vec<_>>());
+        // a chromatic note keeps its distance to the note below
+        assert_eq!(shift_degrees(61, 0, 1), 63);
+        // a part with a narrower range refuses to leave it, leaving the score untouched
+        let mut v = two_bars();
+        v.parts[0].program = 40; // violin starts at G3 = 55; the phrase would go below with a long descent
+        for k in 0..8 {
+            v.put_abs(0, k * 480, 480, &[p(55 + k as i32)]).unwrap();
+        }
+        let before = v.parts[0].measures.len();
+        assert!(v.continue_phrase(0, 2, -2).is_err());
+        assert_eq!(v.parts[0].measures.len(), before);
+        assert!(two_bars().continue_phrase(0, 5, -1).is_err(), "a longer phrase than the music is refused");
+    }
+
+    #[test]
+    fn the_cadence_closes_on_the_nearest_tonic() {
+        let mut s = two_bars();
+        let m = s.end_with_cadence(0).unwrap();
+        assert_eq!(m, 2);
+        let n = &s.parts[0].measures[2].events;
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].ticks, 1920);
+        // the melody ended on D4 (62): the nearest C is C4
+        assert_eq!(pitches_of(&s, 0, 2), vec![60]);
+        // in G major (one sharp) the tonic is G
+        let mut g = Score::new("g", TimeSig { num: 4, den: 4 }, 1, 1);
+        g.put_abs(0, 0, 1920, &[p(71)]).unwrap();
+        g.end_with_cadence(0).unwrap();
+        assert_eq!(pitches_of(&g, 0, 1), vec![67]);
+    }
+
+    #[test]
+    fn review_flags_direct_fifths_and_wide_leaps() {
+        // upper voice leaps from E to the octave above the bass that moved in the same direction: direct octave
+        let mut s = Score::new("d", TimeSig { num: 4, den: 4 }, 0, 1);
+        let b = s.add_part("Bajo", Clef::Bass, 0, false);
+        for (k, (hi, lo)) in [(64, 48), (72, 60)].iter().enumerate() {
+            s.put_abs(0, k as u32 * 480, 480, &[p(*hi)]).unwrap();
+            s.put_abs(b, k as u32 * 480, 480, &[p(*lo)]).unwrap();
+        }
+        let issues = s.review();
+        assert!(issues.iter().any(|i| i.kind == "direct" && i.message.contains("octavas")), "{issues:?}");
+        assert!(issues.iter().all(|i| i.kind != "parallel"));
+        // a leap of more than an octave between notes that follow each other, but not across a rest
+        let mut l = Score::new("l", TimeSig { num: 4, den: 4 }, 0, 1);
+        l.put_abs(0, 0, 480, &[p(60)]).unwrap();
+        l.put_abs(0, 480, 480, &[p(76)]).unwrap();
+        l.put_abs(0, 1440, 480, &[p(60)]).unwrap();
+        let issues = l.review();
+        assert_eq!(issues.iter().filter(|i| i.kind == "leap").count(), 1, "{issues:?}");
     }
 }
